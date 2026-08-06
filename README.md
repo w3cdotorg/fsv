@@ -1,5 +1,9 @@
 # FSV
 
+> **⚠️ metal-port branch** — this fork is porting fsv to macOS with a native
+> Metal renderer (SDL3 GPU + Dear ImGui). See [`docs/PORTING.md`](docs/PORTING.md).
+> For the stable GTK/OpenGL version, use [jabl/fsv](https://github.com/jabl/fsv).
+
 This repo is a fork of [fsv](http://fsv.sourceforge.net/), updated to current environments.
 The original author is [Daniel Richard G.](https://github.com/iskunk), a former student of Computer Science at the MIT.
 
