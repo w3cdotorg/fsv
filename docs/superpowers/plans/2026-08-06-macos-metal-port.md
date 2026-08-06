@@ -771,12 +771,18 @@ static void draw_dir_node(GNode *gnode)
 
 ## Milestone 6 — Packaging, CI, docs
 
-### Task 6.1: macOS .app bundle
+### Task 6.1: Xcode project (no signed bundle)
+
+No paid Apple Developer account is available, so we do NOT ship a signed
+`.app` bundle. Instead, provide a minimal Xcode project alongside the Meson
+build so users who want a bundled app can build one themselves.
 
 **Files:**
-- Create: `packaging/macos/Info.plist`, `packaging/macos/fsv.icns` (new icon), `packaging/macos/make-bundle.sh` (assembles `fsv.app` from the meson-installed binary, copies `shaders/compiled/`, runs `codesign --force --sign -`)
+- Create: `packaging/xcode/fsv.xcodeproj/project.pbxproj` — an Xcode project whose single target is an **External Build System** target driving Meson/ninja (`meson setup builddir-xcode -Dfrontend=sdl && ninja -C builddir-xcode`), so there is one source of truth for the build. Signing settings left at "Sign to Run Locally" (ad-hoc, no team).
+- Create: `packaging/xcode/README.md` — how to open, build, and (optionally) sign with your own team if you have one.
+- Create: `packaging/macos/Info.plist` + `packaging/macos/fsv.icns` — referenced by the Xcode target's bundle step for local use.
 
-- [ ] Implement; verify `open fsv.app` launches and Gatekeeper accepts the ad-hoc signature locally. Commit.
+- [ ] Generate the project, verify `xcodebuild -project packaging/xcode/fsv.xcodeproj -scheme fsv build` succeeds on a clean checkout with only brew deps installed. Commit.
 
 ### Task 6.2: GitHub Actions CI
 
