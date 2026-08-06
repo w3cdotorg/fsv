@@ -23,7 +23,9 @@
 #include "dirtree.h"
 #include "filelist.h"
 #include "fsv.h"
+#include "fsv-platform.h"
 #include "gui.h"
+#include "ogl.h" /* ogl_draw( ) */
 #include "viewport.h"
 
 /* Toolbar button icons */
@@ -51,6 +53,80 @@ static GList *sw_widget_list = NULL;
 /* Left and right statusbar widgets */
 static GtkWidget *left_statusbar_w;
 static GtkWidget *right_statusbar_w;
+
+/* Widgets backing the fsv_platform hook implementations below */
+static GtkWidget *hook_gl_area_w;
+static GtkWidget *hook_x_scrollbar_w;
+static GtkWidget *hook_y_scrollbar_w;
+
+
+/* fsv_platform.request_frame: schedule an animation tick as a low-priority
+ * GTK idle callback, exactly as core code used to do directly */
+static gboolean
+gtk_tick_cb( gpointer data )
+{
+	return fsv_animation_tick( );
+}
+
+static void
+gtk_request_frame( void )
+{
+	g_idle_add_full( G_PRIORITY_LOW, gtk_tick_cb, NULL, NULL );
+}
+
+
+/* fsv_platform.render_frame: render the viewport now.
+ * Note: named fsv_gtk_render_frame( ), not gtk_render_frame( ), to avoid
+ * clashing with GTK's own gtk_render_frame( ) (see gtk/gtkrender.h) */
+static void
+fsv_gtk_render_frame( void )
+{
+	ogl_draw( );
+}
+
+
+/* fsv_platform.viewport_size: current GL area allocation, in pixels */
+static void
+gtk_viewport_size( int *width, int *height )
+{
+	GtkAllocation allocation;
+
+	gtk_widget_get_allocation( hook_gl_area_w, &allocation );
+	*width = allocation.width;
+	*height = allocation.height;
+}
+
+
+/* Returns the GtkAdjustment backing the given scroll axis */
+static GtkAdjustment *
+hook_scrollbar_adjustment( int axis )
+{
+	return gtk_range_get_adjustment( GTK_RANGE(axis == 0 ? hook_x_scrollbar_w : hook_y_scrollbar_w) );
+}
+
+
+/* fsv_platform.set_scroll: update the scrollbar adjustment for the given
+ * axis (0=x, 1=y) */
+static void
+gtk_set_scroll( int axis, double lower, double upper, double page, double pos )
+{
+	GtkAdjustment *adj = hook_scrollbar_adjustment( axis );
+
+	gtk_adjustment_set_lower( adj, lower );
+	gtk_adjustment_set_upper( adj, upper );
+	gtk_adjustment_set_page_size( adj, page );
+	gtk_adjustment_set_value( adj, pos );
+}
+
+
+/* fsv_platform.get_scroll: current value of the scrollbar adjustment for
+ * the given axis (0=x, 1=y) */
+static double
+gtk_get_scroll( int axis )
+{
+	return gtk_adjustment_get_value( hook_scrollbar_adjustment( axis ) );
+}
+
 
 /* Constructs the main program window. The specified mode will be the one
  * initially selected in the Vis menu */
@@ -237,6 +313,17 @@ window_init(GtkApplication *app, gpointer user_data)
 	dirtree_pass_widget( dir_tree_w );
 	filelist_pass_widget( file_list_w );
 	camera_pass_scrollbar_widgets( x_scrollbar_w, y_scrollbar_w );
+
+	/* Install the GTK platform hooks. Must happen before anything
+	 * that can call redraw( ) (e.g. fsv_load( ) below) */
+	hook_gl_area_w = gl_area_w;
+	hook_x_scrollbar_w = x_scrollbar_w;
+	hook_y_scrollbar_w = y_scrollbar_w;
+	fsv_platform.request_frame = gtk_request_frame;
+	fsv_platform.render_frame = fsv_gtk_render_frame;
+	fsv_platform.viewport_size = gtk_viewport_size;
+	fsv_platform.set_scroll = gtk_set_scroll;
+	fsv_platform.get_scroll = gtk_get_scroll;
 
 	/* Showtime! */
 	gtk_widget_show( main_window_w );

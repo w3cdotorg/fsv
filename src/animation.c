@@ -12,9 +12,12 @@
 #include "common.h"
 #include "animation.h"
 
-#include <gtk/gtk.h>
+#include "fsv-platform.h"
 
-#include "ogl.h" /* ogl_draw( ) */
+/* Frontend hooks (request_frame/render_frame/...). Zero-initialized;
+ * the frontend (GTK today, SDL later) fills this in before core code
+ * that can trigger a redraw runs. */
+FsvPlatformHooks fsv_platform;
 
 
 /* The framerate is maintained as a rolling average over this
@@ -397,9 +400,11 @@ framerate_iteration( int mesg )
 }
 
 
-/* Top-level animation loop */
-static gboolean
-animation_loop(gpointer data)
+/* Top-level animation loop. One iteration of the animation/morph
+ * loop; called repeatedly by the frontend (via a GTK idle callback,
+ * an SDL main-loop tick, etc.) for as long as it returns non-zero */
+int
+fsv_animation_tick(void)
 {
 	boolean state_changed, schevents_pending = FALSE;
 
@@ -408,7 +413,7 @@ animation_loop(gpointer data)
 
 	if (globals.need_redraw) {
 		/* Redraw viewport */
-		ogl_draw( );
+		fsv_platform.render_frame( );
 
 		/* Update framerate */
 		framerate_iteration( FRAME_RENDERED );
@@ -426,7 +431,7 @@ animation_loop(gpointer data)
 		animation_active = FALSE;
 	}
 
-	/* (returning FALSE terminates looping) */
+	/* (returning zero terminates looping) */
 	return animation_active;
 }
 
@@ -437,7 +442,7 @@ redraw( void )
 {
 	/* Ensure that animation loop is active */
 	if (!animation_active)
-		g_idle_add_full(G_PRIORITY_LOW, (GSourceFunc) animation_loop, NULL, NULL);
+		fsv_platform.request_frame( );
 
 	animation_active = TRUE;
 	globals.need_redraw = TRUE;
