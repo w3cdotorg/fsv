@@ -74,8 +74,13 @@ if get_option('buildtype') == 'debug' or get_option('buildtype') == 'debugoptimi
     add_project_arguments('-DDEBUG', language: ['c', 'cpp'])
 endif
 
-configure_file(output : 'config.h',
-               configuration : conf)
+# config.h is generated from within src/meson.build (subdir('src')
+# below), not here, even though `conf` itself is built up in this root
+# file. See the comment above `incdir` in src/meson.build for why: this
+# needs to land at <builddir>/src/config.h, reachable only via the
+# harmless `-Isrc`/`-I../src` pair, and NOT at the build root, which
+# would require exposing the repo root itself on the include path (a
+# real, load-bearing bug for the C++ SDL frontend -- see that comment).
 
 libm = compiler.find_library('m')
 
