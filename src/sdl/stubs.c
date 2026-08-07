@@ -9,7 +9,8 @@
  * counterpart for real, and no-ops the rest until the task that owns
  * them lands:
  *
- *   dirtree_ / filelist_ -> Task 5.2 (ImGui panels)
+ *   dirtree_ / filelist_ -> Task 5.2, src/sdl/ui_panels.cpp (real now --
+ *                           NOT here; see that file)
  *   window_ ...          -> Task 5.1/5.3 (ImGui menu bar, dialogs)
  *   about ...            -> no About/splash presentation in this frontend
  *   viewport_ ...        -> the node table lives here since Task 3.3;
@@ -25,21 +26,12 @@
  * This is deliberately separate from tools/fsv-headless-stubs.c, which
  * fsv-scan and test_scanfs use: that one also stubs out geometry.c, which
  * this build compiles for real.
- *
- * dirtree_entry_expanded() is the one stub whose return value the core
- * actually reads -- geometry.c asks it whether a directory is open.
- * Answering "yes" for every directory would lay out the entire tree at
- * once; answering it only for the root matches the GTK frontend's state
- * on a fresh scan, where dirtree.c expands the root and everything below
- * it starts collapsed.
  */
 
 #include "common.h"
 
 #include "about.h"
 #include "color.h"
-#include "dirtree.h"
-#include "filelist.h"
 #include "gui.h"
 #include "viewport.h"
 #include "window.h"
@@ -49,71 +41,6 @@
  * thread for the whole scan and calls gui_update() per directory entry to
  * keep the frontend alive, so it has to pump SDL events and render -- and
  * the scan's progress text arrives through window_statusbar(). */
-
-/* dirtree.h */
-void
-dirtree_clear(void)
-{
-}
-
-void
-dirtree_entry_new(GNode *dnode)
-{
-	(void)dnode;
-}
-
-void
-dirtree_no_more_entries(void)
-{
-}
-
-boolean
-dirtree_entry_expanded(GNode *dnode)
-{
-	return dnode == root_dnode;
-}
-
-void
-dirtree_entry_collapse_recursive(GNode *dnode)
-{
-	(void)dnode;
-}
-
-void
-dirtree_entry_expand(GNode *dnode)
-{
-	(void)dnode;
-}
-
-void
-dirtree_entry_expand_recursive(GNode *dnode)
-{
-	(void)dnode;
-}
-
-/* filelist.h */
-void
-filelist_reset_access(void)
-{
-}
-
-void
-filelist_scan_monitor_init(void)
-{
-}
-
-void
-filelist_scan_monitor(int *node_counts, int64 *size_counts)
-{
-	(void)node_counts;
-	(void)size_counts;
-}
-
-void
-filelist_show_entry(GNode *node)
-{
-	(void)node;
-}
 
 /* viewport.h
  *

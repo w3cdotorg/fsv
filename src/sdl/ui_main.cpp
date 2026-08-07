@@ -18,6 +18,8 @@
 //                                 rescan" action, only Change Root
 //          -> Quit            == on_file_exit_activate() -> exit(EXIT_SUCCESS)
 //   Vis    -> DiscV/MapV/TreeV == on_vis_*_activate() -> fsv_set_mode()
+//   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
+//                                 GTK's left pane has no show/hide toggle at all
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
 //          -> Setup...        == on_color_setup_activate() -> dialog_color_setup() (Task 5.3)
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
@@ -29,12 +31,14 @@
 
 #include "app.h"
 #include "input.h"
+#include "ui_panels.h"
 
 extern "C" {
 #include "common.h"
 #include "camera.h"
 #include "color.h"
 #include "colexp.h"
+#include "dirtree.h"
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -146,10 +150,17 @@ draw_context_menu(void)
 			// tree-view callbacks use (dirtree_collapse_cb() ->
 			// COLEXP_COLLAPSE_RECURSIVE, dirtree_expand_cb() ->
 			// COLEXP_EXPAND) -- colexp() asserts NODE_IS_DIR(dnode), so
-			// this is only offered for directories.
+			// this is only offered for directories. Label decision uses
+			// dirtree_entry_expanded() (the *tree row's* state, flipped
+			// synchronously the instant colexp() starts), exactly like
+			// src/dialog.c's real context_menu() -- not DIR_EXPANDED()
+			// (deployment > 1-EPSILON, the *animation's* progress),
+			// which src/sdl/ui_panels.cpp (Task 5.2) is what makes a
+			// meaningful distinction now that dirtree_entry_expanded()
+			// is a real per-row flag instead of a stub.
 			if (NODE_IS_DIR(node)) {
 				ImGui::Separator();
-				if (DIR_EXPANDED(node)) {
+				if (dirtree_entry_expanded(node)) {
 					if (ImGui::MenuItem("Collapse"))
 						colexp(node, COLEXP_COLLAPSE_RECURSIVE);
 				} else {
@@ -211,6 +222,18 @@ ui_main_draw(void)
 				app_switch_mode(FSV_MAPV);
 			if (ImGui::MenuItem("TreeV", nullptr, mode == FSV_TREEV))
 				app_switch_mode(FSV_TREEV);
+			ImGui::EndMenu();
+		}
+
+		// Addition, not a port: src/window.c's left pane (the
+		// dirtree/filelist panel this toggles) has no show/hide menu
+		// entry in GTK at all, only a paned-widget divider the user
+		// can drag but never fully hide (docs/PORTING.md).
+		if (ImGui::BeginMenu("View")) {
+			const bool panels_visible = ui_panels_get_visible();
+			if (ImGui::MenuItem("Directory Tree && Files", nullptr,
+			    panels_visible))
+				ui_panels_set_visible(!panels_visible);
 			ImGui::EndMenu();
 		}
 

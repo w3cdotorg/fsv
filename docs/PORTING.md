@@ -1760,6 +1760,216 @@ right-click injection script, and the `FSV_UI_TEST`-gated logging in
 `grep -rn "TEMPORARY\|UITEST\|FSV_UI_TEST\|FSV_TEST_DENSITY"
 src/sdl/*.cpp src/sdl/*.h` is empty.
 
+## Task 5.2 verification (ui_panels.cpp — directory tree + file list)
+
+`src/sdl/ui_panels.h`/`ui_panels.cpp` (new) replace `src/dirtree.c`
+(a `GtkTreeView`) and `src/filelist.c` (another `GtkTreeView`, used as a
+flat list) — together, the left-hand pane `src/window.c` builds via
+`gui_hpaned_add()`/`gui_vpaned_add()` — with a single ImGui window: the
+directory tree on top, the selected directory's contents below. Neither
+GTK file is touched. This is also what turns most of `src/sdl/stubs.c`'s
+`dirtree_*`/`filelist_*` no-ops into real implementations — those
+symbols now live in `ui_panels.cpp`, not `stubs.c`.
+
+### Why no persistent widget tree
+
+`dirtree.c` owns a `GtkTreeStore`: one row per directory, built
+incrementally as `scanfs.c` calls `dirtree_entry_new()`, mutated by
+`dirtree_entry_expand()`/`_collapse_recursive()` as the user (or the 3D
+context menu) opens/closes directories. `ui_panels.cpp` keeps no such
+model: `draw_dir_node()` walks the *live* `GNode` tree directly, every
+frame, descending only into directories already known to be open. That
+is what makes "iterate only visible nodes" (the brief's perf
+requirement) fall out for free from ImGui's own `TreeNodeEx()`/lazy-
+children idiom — there is only ever one source of truth, the `GNode`
+tree itself, so there is nothing to keep in sync.
+
+The one piece of state this still needs — "is this directory's row
+open" — reuses `DirNodeDesc::tnode` (`src/common.h`), the exact field
+`dirtree.c` uses to remember its `GtkTreePath` for the same node.
+`scanfs.c` never touches that field itself except to `NULL` it once
+before the first `dirtree_entry_new()` call (`scanfs.c:333`, "needed in
+dirtree_entry_new()"), so repurposing it as a plain 0/NULL-or-1/non-NULL
+boolean (`tree_row_expanded()`/`set_tree_row_expanded()`) needed no core
+change.
+
+### GTK → ImGui cross-reference
+
+| GTK original | ImGui replacement | Notes |
+|---|---|---|
+| `dirtree.c`'s `dirtree_select_cb()` | `draw_dir_node()`'s click branch | Ported the *asymmetric* branching verbatim: clicking an already-open row flies the camera there; clicking a closed row previews its contents in the file list instead, without moving the camera. Not a simplification of the brief's own sketch — the real behavior. |
+| `dirtree.c`'s `dirtree_expand_cb()`/`dirtree_collapse_cb()` | `draw_dir_node()`'s `IsItemToggledOpen()` branch | Calls `colexp()` exactly as the GTK signal handlers do |
+| `dirtree_entry_new/_show/_expand*/_collapse_recursive/_expanded` | Real implementations in `ui_panels.cpp` | Were `src/sdl/stubs.c` no-ops (one, `dirtree_entry_expanded()`, returned `dnode == root_dnode`) |
+| `filelist.c`'s `filelist_populate()` | `populate_file_list()` (static) | Not exposed as `filelist_populate()`: grep confirms nothing outside `dirtree.c`/`filelist.c` ever called that symbol, so there is no core-facing contract to preserve under that name |
+| `filelist.c`'s `filelist_select_cb()` | `draw_file_list_section()`'s `Selectable()` | Every click — file or directory — flies the camera there, unlike the tree above |
+| `filelist_show_entry()` | Real implementation | The one core → UI notification besides the `dirtree_*` family that matters: fired from `camera.c`'s `post_pan_end()` after *every* completed pan, and from `input.cpp`'s right-click branch (Tasks 4.1/4.2, both already wired to call it before this task existed) |
+| `filelist_reset_access()` | No-op | Re-reads `dirtree_entry_expanded(g_shown_dir)` live at draw time instead — an ImGui window has no persistent "insensitive" state to push a value into ahead of time |
+| `window.c`'s `hpaned_w`/`vpaned_w` | One ImGui window | Tree on top (~1/3 height, matching `vpaned_w`'s `window_height/3` initial split), file list below (~2/3); panel width matches `hpaned_w`'s `window_width/5`. Brief's "simplest: one panel" option |
+| *(none)* | View → "Directory Tree && Files" menu item | Addition: GTK's left pane has no show/hide toggle at all, only a paned divider the user can drag but never fully hide |
+
+### Deliberate deviations
+
+1. **Tree row order is structural (dir-first, size-descending), not
+   alphabetical.** `dirtree.c` inserts rows in `scanfs.c`'s raw
+   scan-time order (alphabetical, from `scandir()`+`alphasort()`) —
+   but `draw_dir_node()` walks the *current* `GNode` children list,
+   which `scanfs.c`'s `setup_fstree_recursive()` permanently re-sorts
+   (dir-first, then by size) for the 3D geometry's own layout purposes,
+   *after* the scan finishes. Re-sorting a directory's children to
+   match GTK's alphabetical row order every frame purely for the tree
+   panel would cost real time on directories with many entries and
+   would first require mutating `->children` — off the table, since
+   that ordering is geometrically significant (MapV/TreeV/DiscV layout
+   depends on it). The **file list**, by contrast, *is* sorted
+   alphabetically (`populate_file_list()`'s `compare_name`), matching
+   `filelist.c`'s own `compare_node` exactly — safe because it only
+   re-sorts a cached copy when the shown directory changes, never
+   per frame.
+2. **`dirtree_entry_expand()`/`_expand_recursive()` also open every
+   ancestor**, which GTK's versions never needed to. GTK's
+   `GtkTreeStore` rows all exist regardless of expansion state
+   (collapsing a row just hides its children); `draw_dir_node()`'s walk
+   *only* descends into rows it already knows are open, so an ancestor
+   left closed would make the target node undrawable no matter what
+   its own flag says. `expand_ancestors()` is the fix, called from
+   both.
+3. **View menu panel toggle** (see table above) — GTK has none.
+
+### A real bug the panel-click verification found: unbalanced `TreePop()`
+
+`draw_dir_node()`'s first cut called `ImGui::TreePop()` whenever
+`has_subdirs` was true, regardless of `node_open`. `ImGui::TreeNodeEx()`
+only pushes an ID scope when `node_open` is true
+(`imgui_widgets.cpp`: `if (is_open && !NoTreePushOnOpen)
+TreePushOverrideID(id);`), so collapsing a directory *with* children via
+a real click unbalanced the ID stack and asserted on the very next
+`TreePop()` (`window->IDStack.Size > 1`) — reproduced live, not a
+hypothetical, the first time the verification harness below actually
+collapsed `root_dnode` via its arrow. Fixed by gating both the recursion
+and the `TreePop()` on `has_subdirs && node_open` together.
+
+### Manual verification
+
+Both arms build clean from scratch:
+
+- `meson setup builddir-sdl -Dfrontend=sdl && ninja -C builddir-sdl` —
+  zero warnings from any file this task touched (`ui_panels.h`,
+  `ui_panels.cpp`, `main.cpp`, `ui_main.cpp`, `stubs.c`,
+  `meson.build`).
+- `meson setup builddir-gtk && ninja -C builddir-gtk` — untouched;
+  `git diff --stat -- src/gui.c src/window.c src/callbacks.c src/fsv.c
+  src/dirtree.c src/filelist.c src/colexp.c src/color.c src/viewport.c
+  src/dialog.c` is empty.
+- `meson test scanfs` → `1/1 OK` on both.
+
+Headed, scripted, real-SDL-event verification (a temporary
+`FSV_PANELS_TEST`-gated harness in `main.cpp`, plus matching temporary
+rect/state-logging hooks in `ui_panels.cpp`/`ui_main.cpp`, all fully
+reverted before commit — see below) against `src` (this repo,
+1280×800):
+
+1. **Panel shows the real tree.** Per-frame logging of `root_dnode`'s
+   row (name, rect, expanded state) confirms the panel renders live
+   scan data from the very first frame — no separate widget model to
+   go stale.
+2. **Synthetic click expanding/collapsing a dir in the panel → 3D scene
+   changes (screenshot proof).** Root starts open (only two real
+   directories exist anywhere under `src` — `sdl` and `xmaps`, both
+   leaves with no subdirectories of their own, so root_dnode is the
+   only row with an arrow to click in this particular tree). A real
+   `SDL_EVENT_MOUSE_BUTTON_DOWN`/`UP` pair at the arrow's computed
+   hitbox (`[cursor.x, cursor.x + FontSize + 2×FramePadding.x)`, the
+   same formula `TreeNodeEx()` uses internally) collapsed it —
+   `dirtree_entry_collapse_recursive('src') -> tree_row_expanded=0`
+   logged — then a second click re-expanded it —
+   `dirtree_entry_expand('src') -> tree_row_expanded=1` logged.
+   `gpu_screenshot_begin/end()` (offscreen, unaffected by ImGui
+   compositing) captured all three states; MD5 of the raw pixels:
+   before-collapse and after-re-expand are byte-identical
+   (`58def58942db`, confirming the round trip is exact),
+   after-collapse differs (`a2e691b68d9c`) — visually, TreeV's fully
+   laid-out `src` tree collapses to a single flat folder box and back.
+3. **Double-click/context-menu expand in 3D → panel reflects it
+   (logged assertion).** A real right-click on a directory found via a
+   `gpu_pick()` grid search (`xmaps`, found fresh immediately before
+   the click — see below), through the *existing* Task 5.1 context
+   menu's "Expand" item, logged
+   `dirtree_entry_expand('xmaps') -> tree_row_expanded=1` — proving
+   `colexp()`'s core-side notification reaches this file's real
+   `dirtree_entry_expand()` regardless of which caller (panel arrow,
+   3D context menu, or — untested here but identical code path —
+   `dialog.c`'s future Properties dialog) invoked `colexp()`.
+4. **File click → camera moves (screenshot pair).** Root's file list
+   auto-populates once the intro pan settles on `root_dnode` (via the
+   real `filelist_show_entry()` call `camera.c`'s `post_pan_end()`
+   already makes) — no prior click needed. A real click on the
+   `camera.c` row moved the camera (`theta` 270.00→269.97, `distance`
+   1276.66→1273.55) and highlighted its pedestal — visible in the
+   screenshot pair (before/after MD5s differ) as the platform turning
+   from the ordinary yellow color to white/highlighted.
+
+**Two testing-methodology findings, not application bugs** (recorded
+here because they will bite the next person who tries this kind of
+harness against this vendored ImGui build):
+
+- **Synthetic mouse-button events need a preceding, separately-timed
+  motion event, and press/release must land in separate rendered
+  frames.** `imgui_impl_sdl3.cpp`'s `SDL_EVENT_MOUSE_BUTTON_DOWN`/`UP`
+  case only calls `io.AddMouseButtonEvent()` — `io.MousePos` is set
+  only by `SDL_EVENT_MOUSE_MOTION` (or a same-frame
+  `SDL_GetGlobalMouseState()` fallback when no real OS mouse is
+  hovering the window, which this sandbox always hits). Worse,
+  `io.WantCaptureMouse` is only recomputed by ImGui's layout pass at
+  the *next* `NewFrame()`, so a motion+button pair injected in the same
+  batch is evaluated against *last frame's* hover position. And
+  `TreeNodeEx()`'s `OpenOnArrow` toggle uses
+  `ImGuiButtonFlags_PressedOnClick` (fires on mouse-down, "rather
+  standard", per its own source comment) rather than
+  `PressedOnClickRelease` — bundling press+release in one batch left
+  `ImGui::IsItemClicked()` reporting `true` (it is a generic,
+  `ButtonBehavior`-independent check: `IsMouseClicked() &&
+  IsItemHovered()`) while the widget's own internal `pressed` stayed
+  `false`, so nothing ever toggled. Splitting every interaction into
+  three separately-timed steps (move, press, release) fixed all of
+  it — and is arguably a more faithful simulation anyway, since a real
+  human's press and release are never in the same rendered frame
+  either.
+- **A `gpu_pick()` grid search must exclude the main menu bar's screen
+  row and re-run fresh after any camera movement.** `gpu_pick()` reads
+  the 3D scene directly and has no idea a menu bar exists on top of
+  it, so it can return a real node id for a pixel a genuine click would
+  never reach (ImGui owns that row). And picks taken once, early, go
+  stale the moment something later moves the camera (the file-click
+  test's whole point) — a pixel that named a directory at t=0 can name
+  something else, or nothing, a few seconds later.
+
+**Large-tree sanity** (`/opt/homebrew`, `find | wc -l` → 500,497
+entries — larger than Task 3.3's own ~275k-node test target): a
+temporary `FSV_FRAMETIME_LOG`-gated probe forced the *entire* scanned
+tree open via `dirtree_entry_expand_recursive(root_dnode)` (this file's
+own flags only — no geometry/colexp side effects) and forced continuous
+rendering (bypassing the idle-wait path) to get sustained frame-time
+samples rather than the handful the app's by-design idle-out would
+otherwise yield. Frame time settled to a stable **~33–46ms** band
+(frames 481–871 of a 60s run) with the *entire* tree expanded in the
+panel — a materially harder case than "partially expanded", and it does
+not degrade over time or with more of the tree walked, confirming the
+per-frame cost tracks *visible* rows, not the whole 500k-entry tree
+(the brief's own reasoning for why "iterate only visible nodes" was
+expected to fall out of `TreeNodeEx()`'s lazy-children idiom).
+
+**Idle CPU**: 0.4% (`ps`) on `src`, intro pan settled — at or below
+every prior task's baseline (Task 5.1: 0.8%).
+
+**Reverted before commit**: `grep -rn "PANELS_TEST\|TEMPORARY\|
+FSV_FRAMETIME_LOG\|g_test_\|panels_test_tick" src/sdl/*.cpp src/sdl/*.h`
+is empty. The diff against the prior commit touches exactly
+`ui_panels.h`/`ui_panels.cpp` (new), `main.cpp` (the `ui_panels_draw()`
+call site), `ui_main.cpp` (the View menu item and the
+`dirtree_entry_expanded()` label fix), `stubs.c` (`dirtree_*`/
+`filelist_*` bodies removed), and `meson.build` (new source file) —
+nothing else.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -1810,3 +2020,7 @@ code is kept.
 | 2026-08-07 | Full-screen `screencapture` in this sandbox returns a solid-black image regardless of window state | unlike prior tasks' "window occluded" finding, this session's virtual display has no capturable compositor output at all (confirmed capturing the whole screen, not just the fsv window); ImGui-overlay pixels (menu bar, popups, About/Controls windows) could not be visually verified this way, only via internal-state tracing plus the (unaffected) offscreen scene-only `gpu_screenshot_*()` path |
 | 2026-08-07 | `ContextMenuRequest` carries only logical coordinates (`win_x/win_y`), not a second pixel-space field alongside them | the pick has already happened (`input.cpp` resolved `node` via its own pixel-space locals) by the time the struct is filled, so nothing downstream ever needs pixel space again; a second field would be dead weight inviting the next person to reach for the wrong one |
 | 2026-08-07 | Verified the Retina/HiDPI coordinate fix with a temporary, reverted `FSV_TEST_DENSITY` env-var override in `pixel_scale()` rather than trusting the sandbox's real (1.0) display density | at 1x, logical and pixel coordinates coincide numerically, so a same-density-only re-test could not have told the pre-fix and post-fix code apart; forcing 2.0 made the two spaces provably diverge and confirmed the popup tracks the logical pair, not the pixel one, in both cases |
+| 2026-08-07 | Repurpose `DirNodeDesc::tnode` as a plain expanded/collapsed flag instead of adding a new field | `scanfs.c` only ever `NULL`s it once before the first `dirtree_entry_new()` call and never reads it back; it exists specifically as "the frontend's per-directory tree-widget handle", which is exactly what this flag is, just for a frontend with no persistent widget to hold a handle to |
+| 2026-08-07 | Directory tree panel keeps `GNode->children`'s structural (dir-first, size-descending) order rather than re-sorting to match `dirtree.c`'s alphabetical insertion order | that order is geometrically significant (MapV/TreeV/DiscV layout depends on it), so it cannot be mutated; re-deriving an alphabetical view every frame for potentially large directories would cost real time for a cosmetic-only match. The file list *is* sorted alphabetically, matching `filelist.c` exactly, because it only re-sorts a cached copy on a directory change, not per frame |
+| 2026-08-07 | `dirtree_entry_expand()`/`_expand_recursive()` walk up to open every ancestor, a step GTK's own versions never needed | `GtkTreeStore` rows all exist regardless of expansion (collapsing only hides children); this file's tree walk only descends into rows already known to be open, so a closed ancestor would make the target permanently undrawable no matter its own flag |
+| 2026-08-07 | Verified the panel↔3D sync end-to-end with real `SDL_PushEvent`-injected input (motion, then press, then release as three separately-timed steps) rather than direct state calls | direct calls would only prove the notification plumbing, not that a real click on the actual rendered widget reaches it; the three-step split was required after bundling press+release in one frame silently failed `TreeNodeEx()`'s `OpenOnArrow` toggle (`ImGuiButtonFlags_PressedOnClick`) despite `IsItemClicked()` still reporting true |

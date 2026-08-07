@@ -22,6 +22,7 @@
 #include "gpu_internal.hpp"
 #include "input.h"
 #include "ui_main.h"
+#include "ui_panels.h"
 #include <cstring>
 extern "C" {
 #include "common.h"
@@ -729,9 +730,14 @@ main(int argc, char **argv)
 		g_frame_requested = false;
 
 		imgui_new_frame();
-		// The dirtree/filelist panels are Task 5.2's; the menu bar,
-		// node context menu and Help windows are this task's.
+		// ui_main_draw() (Task 5.1: menu bar, node context menu, Help
+		// windows) first, ui_panels_draw() (Task 5.2: dirtree/filelist
+		// panel) second -- ui_panels_draw() positions itself off
+		// ImGui::GetMainViewport()'s WorkPos/WorkSize, which
+		// BeginMainMenuBar()/EndMainMenuBar() inside ui_main_draw()
+		// shrinks to exclude the menu bar's own height for this frame.
 		ui_main_draw();
+		ui_panels_draw();
 		ImGui::Render();
 		submit_frame();
 

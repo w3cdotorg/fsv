@@ -8,11 +8,11 @@
 #
 # The SDL frontend implements only part of the frontend surface the fsv
 # core notifies (see the header of src/sdl/stubs.c): the menu bar
-# (ui_main.cpp, Task 5.1) is real; the dirtree/filelist panels are Task
-# 5.2, so their entry points stay no-ops for now. geometry.c and
-# tmaptext.c, by contrast, are compiled for real here -- which is why
-# this target uses its own stub file rather than tools/fsv-headless-
-# stubs.c, whose geometry_*/text_* no-ops would collide.
+# (ui_main.cpp, Task 5.1) and the dirtree/filelist panels (ui_panels.cpp,
+# Task 5.2) are both real now. geometry.c and tmaptext.c, by contrast,
+# are compiled for real here -- which is why this target uses its own
+# stub file rather than tools/fsv-headless-stubs.c, whose geometry_*/
+# text_* no-ops would collide.
 #
 # Neither file is folded into libfsvcore: both now call gpu.h, which each
 # frontend implements, and libfsvcore's other consumers (fsv-scan,
@@ -38,7 +38,7 @@ shaders_embedded_h = custom_target('shaders_embedded.h',
   command: [python3, embed_shaders_py, '@OUTPUT@', '@INPUT@'])
 
 fsv_sdl = executable('fsv',
-  ['main.cpp', 'gpu.cpp', 'input.cpp', 'ui_main.cpp', shaders_embedded_h, core_gl_src],
+  ['main.cpp', 'gpu.cpp', 'input.cpp', 'ui_main.cpp', 'ui_panels.cpp', shaders_embedded_h, core_gl_src],
   link_with: libfsvcore,
   dependencies: [sdl3dep, imgui_dep, glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   # include_directories('.') resolves to *both* src/sdl and its build
