@@ -1,0 +1,109 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXLegacyTarget section */
+		E648976B3CD0255169621037 /* fsv */ = {
+			isa = PBXLegacyTarget;
+			buildArgumentsString = "-c \"export PATH=/opt/homebrew/bin:$PATH; SRCDIR=${PROJECT_DIR}/../..; BUILDDIR=$SRCDIR/builddir-xcode; case $CONFIGURATION in Debug) BUILDTYPE=debugoptimized;; *) BUILDTYPE=release;; esac; test -d $BUILDDIR || meson setup $BUILDDIR $SRCDIR --buildtype=$BUILDTYPE; ninja -C $BUILDDIR\"";
+			buildConfigurationList = B8C63EB2C2B5FE86DA821F4A /* Build configuration list for PBXLegacyTarget "fsv" */;
+			buildPhases = (
+			);
+			buildToolPath = /bin/sh;
+			buildWorkingDirectory = "";
+			dependencies = (
+			);
+			name = fsv;
+			passBuildSettingsInEnvironment = 1;
+			productName = fsv;
+		};
+/* End PBXLegacyTarget section */
+
+/* Begin PBXProject section */
+		816E29C8265C1B8DAFB8E118 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1620;
+			};
+			buildConfigurationList = 5FF40338186CF4E358D9DA91 /* Build configuration list for PBXProject "fsv" */;
+			compatibilityVersion = "Xcode 13.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = BBDBC635F267399CE4B23E06;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E648976B3CD0255169621037 /* fsv */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXGroup section */
+		BBDBC635F267399CE4B23E06 = {
+			isa = PBXGroup;
+			children = (
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin XCBuildConfiguration section */
+		3BA0EADAAAFB59FE43D41AD8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		F3848D8A573A0CD703E912C9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		9F2769E6571EFEA10284A8C3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = fsv;
+			};
+			name = Debug;
+		};
+		3821FF33B95626A661E0C0CB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = fsv;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B8C63EB2C2B5FE86DA821F4A /* Build configuration list for PBXLegacyTarget "fsv" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9F2769E6571EFEA10284A8C3 /* Debug */,
+				3821FF33B95626A661E0C0CB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5FF40338186CF4E358D9DA91 /* Build configuration list for PBXProject "fsv" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3BA0EADAAAFB59FE43D41AD8 /* Debug */,
+				F3848D8A573A0CD703E912C9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 816E29C8265C1B8DAFB8E118 /* Project object */;
+}
