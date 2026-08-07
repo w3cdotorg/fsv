@@ -48,11 +48,10 @@ typedef struct FsvGlState {
 	GLint light_pos_location;
 	GLint normal_matrix_location;
 
-	// Projection and modelview matrices (using cglm library)
-	mat4 projection;
-	mat4 modelview;
 	// The base modelview matrix. Not to be used directly, but copy it
-	// over the modelview matrix when resetting matrix state.
+	// over the modelview matrix when resetting matrix state. The live
+	// projection/modelview pair lives in gpu_mat (src/gpu.h): it is
+	// shared with geometry.c, which is frontend-agnostic now.
 	mat4 base_modelview;
 
 	RenderMode render_mode;
@@ -100,9 +99,6 @@ GLuint ogl_create_shader(GLenum shader_type, const char *source);
 void ogl_resize( void );
 void ogl_refresh( void );
 double ogl_aspect_ratio( void );
-void ogl_upload_matrices(gboolean text);
-void ogl_enable_lightning();
-void ogl_disable_lightning();
 void ogl_draw( void );
 void _ogl_error(const char *filename, int line_num);
 GLuint ogl_select_modern(GLint x, GLint y);

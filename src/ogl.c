@@ -13,6 +13,8 @@
 #include "common.h"
 #include "ogl.h"
 
+#include "gpu.h"
+
 #include <gtk/gtk.h>
 #include <gtk/gtkglarea.h>
 #include <GL/glu.h> /* gluPickMatrix( ) */
@@ -182,15 +184,15 @@ ogl_init( void )
 	/* Create the initial modelview matrix
 	 * (right-handed coordinate system, +z = straight up,
 	 * camera at origin looking in -x direction) */
-	glm_mat4_identity(gl.modelview);
-	glm_rotate_x(gl.modelview, -M_PI_2, gl.modelview);
-	glm_rotate_z(gl.modelview, -M_PI_2, gl.modelview);
-	glm_mat4_copy(gl.modelview, gl.base_modelview);
-	glm_mat4_identity(gl.projection);
+	glm_mat4_identity(gpu_mat.modelview);
+	glm_rotate_x(gpu_mat.modelview, -M_PI_2, gpu_mat.modelview);
+	glm_rotate_z(gpu_mat.modelview, -M_PI_2, gpu_mat.modelview);
+	glm_mat4_copy(gpu_mat.modelview, gl.base_modelview);
+	glm_mat4_identity(gpu_mat.projection);
 
 	/* Set up lighting */
 	glUseProgram(gl.program);
-	ogl_enable_lightning();
+	gpu_set_lighting(1);
 	glUniform1f(gl.ambient_location, light_ambient[0]);
 	glUniform1f(gl.diffuse_location, light_diffuse[0]);
 	glUniform1f(gl.specular_location, light_specular[0]);
@@ -264,8 +266,8 @@ setup_projection_matrix( boolean full_reset )
 	mat4 frustum;
 	glm_frustum(-dx, dx, -dy, dy, camera->near_clip, camera->far_clip, frustum);
 	if (full_reset)
-		glm_mat4_identity(gl.projection);
-	glm_mat4_mul(gl.projection, frustum, gl.projection);
+		glm_mat4_identity(gpu_mat.projection);
+	glm_mat4_mul(gpu_mat.projection, frustum, gpu_mat.projection);
 }
 
 
@@ -273,89 +275,44 @@ setup_projection_matrix( boolean full_reset )
 static void
 setup_modelview_matrix( void )
 {
-	glm_mat4_copy(gl.base_modelview, gl.modelview);
+	glm_mat4_copy(gl.base_modelview, gpu_mat.modelview);
 
 	switch (globals.fsv_mode) {
 		case FSV_SPLASH:
 		break;
 
 		case FSV_DISCV:
-		glm_translate(gl.modelview, (vec3){-camera->distance, 0.f, 0.f});
-		glm_rotate_y(gl.modelview, M_PI_2, gl.modelview);
-		glm_rotate_z(gl.modelview, M_PI_2, gl.modelview);
-		glm_translate(gl.modelview, (vec3){-DISCV_CAMERA(camera)->target.x,
+		glm_translate(gpu_mat.modelview, (vec3){-camera->distance, 0.f, 0.f});
+		glm_rotate_y(gpu_mat.modelview, M_PI_2, gpu_mat.modelview);
+		glm_rotate_z(gpu_mat.modelview, M_PI_2, gpu_mat.modelview);
+		glm_translate(gpu_mat.modelview, (vec3){-DISCV_CAMERA(camera)->target.x,
 						   -DISCV_CAMERA(camera)->target.y,
 						   0.f});
 		break;
 
 		case FSV_MAPV:
-		glm_translate(gl.modelview, (vec3){-camera->distance, 0.f, 0.f});
-		glm_rotate_y(gl.modelview, camera->phi * M_PI / 180, gl.modelview);
-		glm_rotate_z(gl.modelview, -camera->theta * M_PI / 180, gl.modelview);
-		glm_translate(gl.modelview, (vec3){-MAPV_CAMERA(camera)->target.x,
+		glm_translate(gpu_mat.modelview, (vec3){-camera->distance, 0.f, 0.f});
+		glm_rotate_y(gpu_mat.modelview, camera->phi * M_PI / 180, gpu_mat.modelview);
+		glm_rotate_z(gpu_mat.modelview, -camera->theta * M_PI / 180, gpu_mat.modelview);
+		glm_translate(gpu_mat.modelview, (vec3){-MAPV_CAMERA(camera)->target.x,
 						   -MAPV_CAMERA(camera)->target.y,
 						   -MAPV_CAMERA(camera)->target.z});
 		break;
 
 		case FSV_TREEV:
-		glm_translate(gl.modelview, (vec3){-camera->distance, 0.f, 0.f});
-		glm_rotate_y(gl.modelview, camera->phi * M_PI / 180, gl.modelview);
-		glm_rotate_z(gl.modelview, -camera->theta * M_PI / 180, gl.modelview);
-		glm_translate(gl.modelview, (vec3){TREEV_CAMERA(camera)->target.r,
+		glm_translate(gpu_mat.modelview, (vec3){-camera->distance, 0.f, 0.f});
+		glm_rotate_y(gpu_mat.modelview, camera->phi * M_PI / 180, gpu_mat.modelview);
+		glm_rotate_z(gpu_mat.modelview, -camera->theta * M_PI / 180, gpu_mat.modelview);
+		glm_translate(gpu_mat.modelview, (vec3){TREEV_CAMERA(camera)->target.r,
 						   0.0f,
 						   -TREEV_CAMERA(camera)->target.z});
-		glm_rotate_z(gl.modelview,
+		glm_rotate_z(gpu_mat.modelview,
 			     (180.0 - TREEV_CAMERA(camera)->target.theta) * M_PI / 180,
-			     gl.modelview);
+			     gpu_mat.modelview);
 		break;
 
 		SWITCH_FAIL
 	}
-}
-
-
-// Upload modified projection and modelview matrices to the GPU
-void
-ogl_upload_matrices(gboolean text)
-{
-	// As we're not doing any shading yet, just create the single MVP
-	// matrix instead of uploading separate projection and modelview
-	// matrices.
-	mat4 mvp;
-	glm_mat4_mul(gl.projection, gl.modelview, mvp);
-
-	mat3 normmat;
-	glm_mat4_pick3(gl.modelview, normmat);
-	glm_mat3_inv(normmat, normmat);
-	glm_mat3_transpose(normmat);
-
-	/* load our program */
-	glUseProgram(gl.program);
-
-	glUniformMatrix4fv(gl.modelview_location, 1, GL_FALSE, (float*) gl.modelview);
-	glUniformMatrix3fv(gl.normal_matrix_location, 1, GL_FALSE, (float*) normmat);
-	/* update the "mvp" matrix we use in the shader */
-	glUniformMatrix4fv(gl.mvp_location, 1, GL_FALSE, (float*)mvp);
-
-	glUseProgram(0);
-
-	if (text)
-		text_upload_mvp((float*) mvp);
-}
-
-
-// Note: gl Program must be in use before calling this.
-void
-ogl_enable_lightning()
-{
-	glUniform1i(gl.lightning_enabled_location, 1);
-}
-
-// Note: gl Program must be in use before calling this.
-void
-ogl_disable_lightning()
-{
-	glUniform1i(gl.lightning_enabled_location, 0);
 }
 
 
@@ -431,7 +388,7 @@ render(GtkGLArea *area, GdkGLContext *context)
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 	setup_projection_matrix( TRUE );
 	setup_modelview_matrix( );
-	ogl_upload_matrices(FALSE);
+	gpu_upload_matrices();
 	geometry_draw( TRUE );
 
 	/* Error check */
@@ -464,7 +421,7 @@ ogl_select_modern(GLint x, GLint y)
 	gl.render_mode = RENDERMODE_SELECT;
 	setup_projection_matrix(TRUE);
 	setup_modelview_matrix();
-	ogl_upload_matrices(FALSE);
+	gpu_upload_matrices();
 	// Enable depth test
 	//glEnable(GL_DEPTH_TEST);
 	// Accept fragment if it closer to the camera than the former one
@@ -503,7 +460,7 @@ ogl_select_modern(GLint x, GLint y)
 	/* Leave matrices in a usable state */
 	setup_projection_matrix(TRUE);
 	setup_modelview_matrix();
-	ogl_upload_matrices(FALSE);
+	gpu_upload_matrices();
 	glClearColor(0, 0, 0, 0);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	gl.render_mode = RENDERMODE_RENDER;

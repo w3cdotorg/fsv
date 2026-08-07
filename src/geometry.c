@@ -13,14 +13,12 @@
 #include "common.h"
 #include "geometry.h"
 
-#include <cglm/call.h>
-
 #include "about.h"
 #include "animation.h"
 #include "camera.h"
 #include "color.h"
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
-#include "ogl.h"
+#include "gpu.h"
 #include "tmaptext.h"
 
 
@@ -47,146 +45,81 @@ static void cursor_post( void );
 static void queue_uncached_draw( void );
 
 
-// Vertex struct for modern OpenGL with normals
-typedef struct Vertex {
-	GLfloat position[3];
-	GLfloat normal[3];
-} Vertex;
-
-// Vertex struct with only position
-typedef struct VertexPos {
-	GLfloat position[3];
-} VertexPos;
+/* Vertices are handed straight to gpu_draw( ), so this file builds them
+ * in the renderer's own layout (FsvVertex, src/gpu.h) rather than in a
+ * private struct that would have to be converted on every draw. Line
+ * geometry leaves the normal zeroed and draws unlit, which is what the
+ * old position-only vertex struct amounted to. */
 
 
-// Print the legacy and modern OpenGL projection and modelview matrices.
-// which = 0: both modelview and projection matrices
-// which = 1: Only modelview
-// which = 2: Only projection
-__attribute__((unused)) static void
-debug_print_matrices(int which)
-{
-#ifdef DEBUG
-	if (which == 0 || which == 1) {
-		g_print("Modelview matrix:\n");
-		glmc_mat4_print(gl.modelview, stdout);
-	}
-	if (which == 0 || which == 2) {
-		g_print("\nProjection matrix:\n");
-		glmc_mat4_print(gl.projection, stdout);
-	}
-#endif
-}
-
-
+/* Node whose color is boosted, or 0 for none (geometry_highlight_node) */
 static unsigned int highlight_node_id;
 
-// Set node color and lightning enabled uniform. GL Program must be in use when
-// calling this.
+/* Sets the fill color and lighting state for the node about to be drawn:
+ * its real color when rendering, or its flat id color when the renderer
+ * is resolving a pick (unlit, so the id survives the fragment shader
+ * untouched). */
 static void
 node_set_color(GNode *node)
 {
-	GLfloat color[4];
+	float color[4];
 	color[3] = 1.0;	 // Alpha
-	if (gl.render_mode == RENDERMODE_RENDER) {
-		memcpy(color, NODE_DESC(node)->color, 3 * sizeof(GLfloat));
+	if (gpu_render_mode() == FSV_RENDER_NORMAL) {
+		memcpy(color, NODE_DESC(node)->color, 3 * sizeof(float));
 		// Check highlight
 		if (NODE_DESC(node)->id == highlight_node_id) {
 			for (size_t i = 0; i < 3; i++)
 				color[i] *= 1.3f;
 		}
-		glUniform1i(gl.lightning_enabled_location, 1);
+		gpu_set_lighting(1);
 	} else {
-		GLuint c = NODE_DESC(node)->id;
-		// const char *name = NODE_DESC(node)->name;
-		GLuint r = (c & 0x000000FF) >> 0;
-		GLuint g = (c & 0x0000FF00) >> 8;
-		GLuint b = (c & 0x00FF0000) >> 16;
-		color[0] = (GLfloat)r / G_MAXUINT8;
-		color[1] = (GLfloat)g / G_MAXUINT8;
-		color[2] = (GLfloat)b / G_MAXUINT8;
-		// g_print("Painting node %s id %u with Color red %f green %f
-		// blue %f\n", 	name, c, (double)color[0], (double)color[1],
-		//(double)color[2]);
-		glUniform1i(gl.lightning_enabled_location, 0);
+		unsigned int c = NODE_DESC(node)->id;
+		unsigned int r = (c & 0x000000FF) >> 0;
+		unsigned int g = (c & 0x0000FF00) >> 8;
+		unsigned int b = (c & 0x00FF0000) >> 16;
+		color[0] = (float)r / G_MAXUINT8;
+		color[1] = (float)g / G_MAXUINT8;
+		color[2] = (float)b / G_MAXUINT8;
+		gpu_set_lighting(0);
 	}
 
-	glUniform4fv(gl.color_location, 1, color);
+	gpu_set_color(color[0], color[1], color[2], color[3]);
 }
 
 static const RGBcolor color_black = {0, 0, 0};
 
-// Upload and draw a bunch of VertexPos vertices.
-// Note this is highly inefficient and implements every known modern GL
-// anti-pattern (e.g. does not take any advantage of batching, or keeping
-// vertex data on the GPU instead of reuploading it every time). But hey,
-// it's simple.
+/* Draws an unlit batch in a flat color: the black folder outlines and
+ * leaf "X" marks. (Was drawVertexPos( ), which built its own VBO.) */
 static void
-drawVertexPos(GLenum mode, VertexPos *vert, size_t vert_cnt, const RGBcolor *color)
+draw_unlit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
+	   const RGBcolor *color)
 {
-	static GLuint vbo;
-	if (!vbo)
-		glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(VertexPos) * vert_cnt, vert, GL_STREAM_DRAW);
-
-	glEnableVertexAttribArray(gl.position_location);
-	glVertexAttribPointer(gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(VertexPos), (void *)offsetof(VertexPos, position));
-
-	glUseProgram(gl.program);
-	glUniform4f(gl.color_location, color->r, color->g, color->b, 1);
-	glUniform1i(gl.lightning_enabled_location, 0);
-	glDrawArrays(mode, 0, vert_cnt);
-	glUseProgram(0);
-
-	// Avoid implicit sync by allowing GL to dealloc memory
-	glBufferData(GL_ARRAY_BUFFER, sizeof(VertexPos) * vert_cnt, NULL, GL_STREAM_DRAW);
-
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	gpu_set_color(color->r, color->g, color->b, 1.0f);
+	gpu_set_lighting(0);
+	gpu_draw(topology, vert, vert_cnt, NULL, 0);
 }
 
 
-// Similar to above, but draw a Vertex.
-// The color is taken either from the color argument, or the node argument.
-// One of these must be NULL and the other non-null.
+/* Draws a lit batch. The color is taken either from the color argument,
+ * or from the node argument; one of the two must be NULL and the other
+ * non-NULL. (Was drawVertex( ).) */
 static void
-drawVertex(GLenum mode, Vertex *vert, size_t vert_cnt, const RGBcolor *color, GNode *node)
+draw_lit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
+	 const RGBcolor *color, GNode *node)
 {
-	if (color != NULL)
+	if (color != NULL) {
 		g_assert(node == NULL);
-	else
+		gpu_set_color(color->r, color->g, color->b, 1.0f);
+		gpu_set_lighting(1);
+	}
+	else {
 		g_assert(node != NULL);
-
-	static GLuint vbo;
-	if (!vbo) glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * vert_cnt, vert,
-		     GL_STREAM_DRAW);
-
-	glEnableVertexAttribArray(gl.position_location);
-	glVertexAttribPointer(gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex),
-			      (void *)offsetof(Vertex, position));
-	glEnableVertexAttribArray(gl.normal_location);
-	glVertexAttribPointer(gl.normal_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, normal));
-
-	glUseProgram(gl.program);
-	if (color) {
-		glUniform4f(gl.color_location, color->r, color->g, color->b, 1);
-		glUniform1i(gl.lightning_enabled_location, 1);
-	} else
 		node_set_color(node);
-	glDrawArrays(mode, 0, vert_cnt);
-	glUseProgram(0);
+	}
 
-	// Avoid implicit sync by allowing GL to dealloc memory
-	glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * vert_cnt, NULL,
-		     GL_STREAM_DRAW);
-
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	gpu_draw(topology, vert, vert_cnt, NULL, 0);
 }
+
 
 /**** DISC VISUALIZATION **************************************/
 
@@ -390,15 +323,15 @@ discv_gldraw_node( GNode *node, double dir_deployment )
 
 	/* Draw disc */
 	size_t vert_cnt = seg_count + 2;
-	Vertex *vert = NEW_ARRAY(Vertex, vert_cnt);
-	vert[0] = (Vertex){{center.x, center.y, 0}, {0, 0, 1}};
+	FsvVertex *vert = NEW_ARRAY(FsvVertex, vert_cnt);
+	vert[0] = (FsvVertex){{center.x, center.y, 0}, {0, 0, 1}};
 	for (s = 0; s <= seg_count; s++) {
 		theta = (double)s / (double)seg_count * 360.0;
 		p.x = center.x + gparams->radius * cos( RAD(theta) );
 		p.y = center.y + gparams->radius * sin( RAD(theta) );
-		vert[s + 1] = (Vertex){{p.x, p.y, 0}, {0, 0, 1}};
+		vert[s + 1] = (FsvVertex){{p.x, p.y, 0}, {0, 0, 1}};
 	}
-	drawVertex(GL_TRIANGLE_FAN, vert, vert_cnt, NULL, node);
+	draw_lit(FSV_TRIANGLE_FAN, vert, vert_cnt, NULL, node);
 	xfree(vert);
 }
 
@@ -453,14 +386,14 @@ discv_draw_recursive( GNode *dnode, int action )
 	dir_gparams = DISCV_GEOM_PARAMS(dnode);
 
 	mat4 tmpmat;
-	glm_mat4_copy(gl.modelview, tmpmat);
+	glm_mat4_copy(gpu_mat.modelview, tmpmat);
 
 	dir_collapsed = DIR_COLLAPSED(dnode);
 	dir_expanded = DIR_EXPANDED(dnode);
 
-	glm_translate(gl.modelview, (vec3){dir_gparams->pos.x, dir_gparams->pos.y, 0.0});
-	glm_scale(gl.modelview, (vec3){dir_ndesc->deployment,  dir_ndesc->deployment,  1.0f});
-	ogl_upload_matrices(TRUE);
+	glm_translate(gpu_mat.modelview, (vec3){dir_gparams->pos.x, dir_gparams->pos.y, 0.0});
+	glm_scale(gpu_mat.modelview, (vec3){dir_ndesc->deployment,  dir_ndesc->deployment,  1.0f});
+	gpu_upload_matrices();
 
 	if (action == DISCV_DRAW_GEOMETRY) {
 		/* Draw folder or leaf nodes */
@@ -496,7 +429,7 @@ discv_draw_recursive( GNode *dnode, int action )
 		}
 	}
 
-	glm_mat4_copy(tmpmat, gl.modelview);
+	glm_mat4_copy(tmpmat, gpu_mat.modelview);
 }
 
 
@@ -504,7 +437,7 @@ discv_draw_recursive( GNode *dnode, int action )
 static void
 discv_draw( boolean high_detail )
 {
-	glLineWidth( 3.0 );
+	gpu_set_line_width( 3.0 );
 
 	/* Draw low-detail geometry */
 
@@ -531,7 +464,7 @@ discv_draw( boolean high_detail )
 		/* draw_cursor( ); */
 	}
 
-	glLineWidth( 1.0 );
+	gpu_set_line_width( 1.0 );
 }
 
 
@@ -899,7 +832,7 @@ mapv_gldraw_node( GNode *node )
 
 	gparams = MAPV_GEOM_PARAMS(node);
 
-	Vertex vertex_data[] = {
+	FsvVertex vertex_data[] = {
 	    {{gparams->c0.x, gparams->c1.y, 0.0}, /* Rear face */
 	     {0.0, normal.y, normal_z_ny}},
 	    {{gparams->c0.x + offset.x, gparams->c1.y - offset.y,
@@ -951,63 +884,17 @@ mapv_gldraw_node( GNode *node )
 	    {{gparams->c1.x - offset.x, gparams->c1.y - offset.y,
 	      gparams->height},	 // 3
 	     {0.0f, 0.0f, 1.0f}}};
-	static const GLushort elements[] = {
+	static const unsigned int elements[] = {
 	    0,	1,  2,	2,  1,	3,   // Rear face
 	    4,	5,  6,	6,  5,	7,   // Right face
 	    8,	9,  10, 10, 9,	11,  // Front face
 	    12, 13, 14, 14, 13, 15,  // Left face
 	    16, 17, 18, 18, 17, 19   // Top face
 	};
-	ogl_error();
-	//debug_print_matrices(0);
-	static GLuint vbo;
-	if (!vbo)
-		glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertex_data), &vertex_data, GL_DYNAMIC_DRAW);
-
-	static GLuint ebo;
-	if (!ebo) {
-		glGenBuffers(1, &ebo);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(elements), &elements, GL_STATIC_DRAW);
-	}
-
-	glEnableVertexAttribArray(gl.position_location);
-	glVertexAttribPointer(gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, position));
-
-	glEnableVertexAttribArray(gl.normal_location);
-	glVertexAttribPointer(gl.normal_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, normal));
-
-	ogl_error();
-
-	glUseProgram(gl.program);
 
 	node_set_color(node);
-#if 0
-#ifdef DEBUG
-	mat4 mvp;
-	glm_mat4_mul(gl.projection, gl.modelview, mvp);
-	// Check coords
-	vec3 out;
-	g_print("quad coords with rendermode %d:\n", gl.render_mode);
-	glm_mat4_mulv3(mvp, vertex_data[0].position, 1, out);
-	glmc_vec3_print(out, stdout);
-	glm_mat4_mulv3(mvp, vertex_data[1].position, 1, out);
-	glmc_vec3_print(out, stdout);
-	glm_mat4_mulv3(mvp, vertex_data[3].position, 1, out);
-	glmc_vec3_print(out, stdout);
-#endif
-#endif
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-	GLsizei cnt = sizeof(elements) / sizeof(GLushort);
-	glDrawElements(GL_TRIANGLES, cnt, GL_UNSIGNED_SHORT, 0);
-	glUseProgram(0);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertex_data), NULL, GL_DYNAMIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	gpu_draw(FSV_TRIANGLES, vertex_data, G_N_ELEMENTS(vertex_data),
+		 elements, G_N_ELEMENTS(elements));
 }
 
 
@@ -1045,7 +932,7 @@ mapv_gldraw_folder( GNode *dnode )
 	folder_tab.x = folder_c1.x - (MAGIC_NUMBER - 1.0) * (folder_c1.x - folder_c0.x);
 	folder_tab.y = folder_c1.y - border;
 
-	VertexPos vert[] = {
+	FsvVertex vert[] = {
 		{{folder_c0.x, folder_c0.y, 0}},
 		{{folder_c0.x, folder_tab.y, 0}},
 		{{folder_c0.x + border, folder_c1.y, 0}},
@@ -1055,7 +942,7 @@ mapv_gldraw_folder( GNode *dnode )
 		{{folder_c1.x, folder_c0.y, 0}}
 	};
 
-	drawVertexPos(GL_LINE_LOOP, vert, 7, &color_black);
+	draw_unlit(FSV_LINE_LOOP, vert, G_N_ELEMENTS(vert), &color_black);
 }
 
 
@@ -1072,8 +959,7 @@ mapv_build_dir( GNode *dnode )
 	while (node != NULL) {
 		/* Draw node */
 		mapv_gldraw_node( node );
-		ogl_error();
-		node = node->next;
+			node = node->next;
 	}
 }
 
@@ -1121,8 +1007,8 @@ mapv_draw_recursive( GNode *dnode, int action )
 	g_assert( NODE_IS_DIR(dnode) || NODE_IS_METANODE(dnode) );
 
 	mat4 tmpmat;
-	glm_mat4_copy(gl.modelview, tmpmat);
-	glm_translate(gl.modelview, (vec3){0.0f, 0.0f, MAPV_GEOM_PARAMS(dnode)->height});
+	glm_mat4_copy(gpu_mat.modelview, tmpmat);
+	glm_translate(gpu_mat.modelview, (vec3){0.0f, 0.0f, MAPV_GEOM_PARAMS(dnode)->height});
 
 	dir_ndesc = DIR_NODE_DESC(dnode);
 	dir_collapsed = DIR_COLLAPSED(dnode);
@@ -1130,12 +1016,10 @@ mapv_draw_recursive( GNode *dnode, int action )
 
 	if (!dir_collapsed && !dir_expanded) {
 		/* Grow/shrink children heightwise */
-		glm_scale(gl.modelview, (vec3){1.0f, 1.0f, dir_ndesc->deployment});
+		glm_scale(gpu_mat.modelview, (vec3){1.0f, 1.0f, dir_ndesc->deployment});
 	}
 
-	ogl_error();
-	ogl_upload_matrices(TRUE);
-	ogl_error();
+	gpu_upload_matrices();
 
 	if (action == MAPV_DRAW_GEOMETRY) {
 		/* Draw directory face or geometry of children
@@ -1145,7 +1029,6 @@ mapv_draw_recursive( GNode *dnode, int action )
 		else
 			mapv_build_dir(dnode);
 	}
-	ogl_error();
 
 	if (action == MAPV_DRAW_LABELS) {
 		/* Draw name label(s) */
@@ -1181,8 +1064,8 @@ mapv_draw_recursive( GNode *dnode, int action )
 		}
 	}
 
-	glm_mat4_copy(tmpmat, gl.modelview);
-	ogl_upload_matrices(FALSE);
+	glm_mat4_copy(tmpmat, gpu_mat.modelview);
+	gpu_upload_matrices();
 }
 
 
@@ -1200,9 +1083,6 @@ mapv_gldraw_cursor( const XYZvec *c0, const XYZvec *c1 )
 	corner_dims.z = bar_part * (c1->z - c0->z);
 
 	cursor_pre( );
-	static GLuint vbo;
-	if (!vbo) glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	for (i = 0; i < 2; i++) {
 		if (i == 0)
 			cursor_hidden_part( );
@@ -1237,7 +1117,7 @@ mapv_gldraw_cursor( const XYZvec *c0, const XYZvec *c1 )
 				delta.z = corner_dims.z;
 			}
 
-			VertexPos vert[] = {
+			FsvVertex vert[] = {
 				{{p.x, p.y, p.z}}, // First line
 				{{p.x + delta.x, p.y, p.z}},
 				{{p.x, p.y, p.z}}, // Second
@@ -1246,19 +1126,9 @@ mapv_gldraw_cursor( const XYZvec *c0, const XYZvec *c1 )
 				{{p.x, p.y, p.z + delta.z}}
 			};
 
-			glBufferData(GL_ARRAY_BUFFER, sizeof(vert),
-				     vert, GL_STREAM_DRAW);
-			glEnableVertexAttribArray(gl.position_location);
-			glVertexAttribPointer(
-			    gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			    sizeof(VertexPos),
-			    (void *)offsetof(VertexPos, position));
-			glDrawArrays(GL_LINES, 0, 6);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(vert),
-				     NULL, GL_STREAM_DRAW);
+			gpu_draw(FSV_LINES, vert, G_N_ELEMENTS(vert), NULL, 0);
 		}
 	}
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	cursor_post( );
 }
 
@@ -1895,22 +1765,22 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 
 	size_t vert_cnt = seg_count * (8 + 4) + 8;
 	size_t idx_len = 0;
-	Vertex *vert = NEW_ARRAY(Vertex, vert_cnt);
-	GLushort *idx = NEW_ARRAY(GLushort, vert_cnt * 2);
+	FsvVertex *vert = NEW_ARRAY(FsvVertex, vert_cnt);
+	unsigned int *idx = NEW_ARRAY(unsigned int, vert_cnt * 2);
 
 	/* Draw inner edge */
 	for (s = 0; s < seg_count; s++) {
 		/* Going up */
 		p0.x = inner_edge_buf[s].x;
 		p0.y = inner_edge_buf[s].y;
-		vert[s * 4] = (Vertex){{p0.x, p0.y, 0}, {-p0.x / r0, -p0.y / r0, 0}};
-		vert[s * 4 + 1] = (Vertex){{p0.x, p0.y, z1}, {-p0.x / r0, -p0.y / r0, 0}};
+		vert[s * 4] = (FsvVertex){{p0.x, p0.y, 0}, {-p0.x / r0, -p0.y / r0, 0}};
+		vert[s * 4 + 1] = (FsvVertex){{p0.x, p0.y, z1}, {-p0.x / r0, -p0.y / r0, 0}};
 
 		/* Going down */
 		p0.x = inner_edge_buf[s + 1].x;
 		p0.y = inner_edge_buf[s + 1].y;
-		vert[s * 4 + 2] = (Vertex){{p0.x, p0.y, z1}, {-p0.x / r0, -p0.y / r0, 0}};
-		vert[s * 4 + 3] = (Vertex){{p0.x, p0.y, 0}, {-p0.x / r0, -p0.y / r0, 0}};
+		vert[s * 4 + 2] = (FsvVertex){{p0.x, p0.y, z1}, {-p0.x / r0, -p0.y / r0, 0}};
+		vert[s * 4 + 3] = (FsvVertex){{p0.x, p0.y, 0}, {-p0.x / r0, -p0.y / r0, 0}};
 		idx[idx_len++] = s * 4;
 		idx[idx_len++] = s * 4 + 1;
 		idx[idx_len++] = s * 4 + 2;
@@ -1925,14 +1795,14 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 		size_t s2 = (seg_count + seg_count - s) * 4;
 		p1.x = outer_edge_buf[s].x;
 		p1.y = outer_edge_buf[s].y;
-		vert[s2] = (Vertex){{p1.x, p1.y, 0}, {-p1.x / r1, -p1.y / r1, 0}};
-		vert[s2 + 1] = (Vertex){{p1.x, p1.y, z1}, {-p1.x / r1, -p1.y / r1, 0}};
+		vert[s2] = (FsvVertex){{p1.x, p1.y, 0}, {-p1.x / r1, -p1.y / r1, 0}};
+		vert[s2 + 1] = (FsvVertex){{p1.x, p1.y, z1}, {-p1.x / r1, -p1.y / r1, 0}};
 
 		/* Going down */
 		p1.x = outer_edge_buf[s - 1].x;
 		p1.y = outer_edge_buf[s - 1].y;
-		vert[s2 + 2] = (Vertex){{p1.x, p1.y, z1}, {-p1.x / r1, -p1.y / r1, 0}};
-		vert[s2 + 3] = (Vertex){{p1.x, p1.y, 0}, {-p1.x / r1, -p1.y / r1, 0}};
+		vert[s2 + 2] = (FsvVertex){{p1.x, p1.y, z1}, {-p1.x / r1, -p1.y / r1, 0}};
+		vert[s2 + 3] = (FsvVertex){{p1.x, p1.y, 0}, {-p1.x / r1, -p1.y / r1, 0}};
 		idx[idx_len++] = s2;
 		idx[idx_len++] = s2 + 1;
 		idx[idx_len++] = s2 + 2;
@@ -1947,10 +1817,10 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 	p1.x = outer_edge_buf[0].x;
 	p1.y = outer_edge_buf[0].y;
 	size_t s2 = seg_count * 2 * 4;
-	vert[s2] = (Vertex){{p0.x, p0.y, 0}, {p0.y / r0, -p0.x / r0, 0}};
-	vert[s2 + 1] = (Vertex){{p1.x, p1.y, 0}, {p0.y / r0, -p0.x / r0, 0}};
-	vert[s2 + 2] = (Vertex){{p1.x, p1.y, z1}, {p0.y / r0, -p0.x / r0, 0}};
-	vert[s2 + 3] = (Vertex){{p0.x, p0.y, z1}, {p0.y / r0, -p0.x / r0, 0}};
+	vert[s2] = (FsvVertex){{p0.x, p0.y, 0}, {p0.y / r0, -p0.x / r0, 0}};
+	vert[s2 + 1] = (FsvVertex){{p1.x, p1.y, 0}, {p0.y / r0, -p0.x / r0, 0}};
+	vert[s2 + 2] = (FsvVertex){{p1.x, p1.y, z1}, {p0.y / r0, -p0.x / r0, 0}};
+	vert[s2 + 3] = (FsvVertex){{p0.x, p0.y, z1}, {p0.y / r0, -p0.x / r0, 0}};
 	idx[idx_len++] = s2;
 	idx[idx_len++] = s2 + 1;
 	idx[idx_len++] = s2 + 2;
@@ -1964,10 +1834,10 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 	p0.y = inner_edge_buf[seg_count].y;
 	p1.x = outer_edge_buf[seg_count].x;
 	p1.y = outer_edge_buf[seg_count].y;
-	vert[s2] = (Vertex){{p0.x, p0.y, z1}, {-p0.y / r0, p0.x / r0, 0}};
-	vert[s2 + 1] = (Vertex){{p1.x, p1.y, z1}, {-p0.y / r0, p0.x / r0, 0}};
-	vert[s2 + 2] = (Vertex){{p1.x, p1.y, 0}, {-p0.y / r0, p0.x / r0, 0}};
-	vert[s2 + 3] = (Vertex){{p0.x, p0.y, 0}, {-p0.y / r0, p0.x / r0, 0}};
+	vert[s2] = (FsvVertex){{p0.x, p0.y, z1}, {-p0.y / r0, p0.x / r0, 0}};
+	vert[s2 + 1] = (FsvVertex){{p1.x, p1.y, z1}, {-p0.y / r0, p0.x / r0, 0}};
+	vert[s2 + 2] = (FsvVertex){{p1.x, p1.y, 0}, {-p0.y / r0, p0.x / r0, 0}};
+	vert[s2 + 3] = (FsvVertex){{p0.x, p0.y, 0}, {-p0.y / r0, p0.x / r0, 0}};
 	idx[idx_len++] = s2;
 	idx[idx_len++] = s2 + 1;
 	idx[idx_len++] = s2 + 2;
@@ -1984,8 +1854,8 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 		p0.y = inner_edge_buf[s].y;
 		p1.x = outer_edge_buf[s].x;
 		p1.y = outer_edge_buf[s].y;
-		vert[s3] = (Vertex){{p0.x, p0.y, z1}, {0, 0, 1}};
-		vert[s3 + 1] = (Vertex){{p1.x, p1.y, z1}, {0, 0, 1}};
+		vert[s3] = (FsvVertex){{p0.x, p0.y, z1}, {0, 0, 1}};
+		vert[s3 + 1] = (FsvVertex){{p1.x, p1.y, z1}, {0, 0, 1}};
 
 
 		/* Going in */
@@ -1993,8 +1863,8 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 		p0.y = inner_edge_buf[s + 1].y;
 		p1.x = outer_edge_buf[s + 1].x;
 		p1.y = outer_edge_buf[s + 1].y;
-		vert[s3 + 2] = (Vertex){{p1.x, p1.y, z1}, {0, 0, 1}};
-		vert[s3 + 3] = (Vertex){{p0.x, p0.y, z1}, {0, 0, 1}};
+		vert[s3 + 2] = (FsvVertex){{p1.x, p1.y, z1}, {0, 0, 1}};
+		vert[s3 + 3] = (FsvVertex){{p0.x, p0.y, z1}, {0, 0, 1}};
 		idx[idx_len++] = s3;
 		idx[idx_len++] = s3 + 1;
 		idx[idx_len++] = s3 + 2;
@@ -2006,37 +1876,8 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 	g_assert(s2 + (seg_count - 1) * 4 + 3 < vert_cnt);
 	g_assert(idx_len <= vert_cnt * 2);
 
-	static GLuint vbo;
-	if (!vbo)
-		glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * vert_cnt, vert, GL_DYNAMIC_DRAW);
-
-	static GLuint ebo;
-	if (!ebo)
-		glGenBuffers(1, &ebo);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLushort) * idx_len, idx, GL_DYNAMIC_DRAW);
-
-	glEnableVertexAttribArray(gl.position_location);
-	glVertexAttribPointer(gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, position));
-
-	glEnableVertexAttribArray(gl.normal_location);
-	glVertexAttribPointer(gl.normal_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, normal));
-
-	glUseProgram(gl.program);
-
 	node_set_color(dnode);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-	glDrawElements(GL_TRIANGLES, idx_len, GL_UNSIGNED_SHORT, 0);
-
-	glUseProgram(0);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * vert_cnt, NULL, GL_DYNAMIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	gpu_draw(FSV_TRIANGLES, vert, vert_cnt, idx, idx_len);
 
 	xfree(vert);
 	xfree(idx);
@@ -2093,7 +1934,7 @@ treev_gldraw_leaf( GNode *node, double r0, boolean full_node )
 	sin_theta = sin( RAD(TREEV_GEOM_PARAMS(node)->leaf.theta) );
 	cos_theta = cos( RAD(TREEV_GEOM_PARAMS(node)->leaf.theta) );
 
-	/* Rotate corners into position (no glRotated( )-- leaf nodes are
+	/* Rotate corners into position (no matrix rotate -- leaf nodes are
 	 * not important enough to mess with the transformation matrix) */
 	for (i = 0; i < 4; i++) {
 		p.x = corners[i].x;
@@ -2104,25 +1945,25 @@ treev_gldraw_leaf( GNode *node, double r0, boolean full_node )
 
 	/* Draw top face */
 	// Note order of vertices for triangle stripping.
-	Vertex vert[] = {
+	FsvVertex vert[] = {
 		{{corners[0].x, corners[0].y, z1}, {0, 0, 1}},
 		{{corners[1].x, corners[1].y, z1}, {0, 0, 1}},
 		{{corners[3].x, corners[3].y, z1}, {0, 0, 1}},
 		{{corners[2].x, corners[2].y, z1}, {0, 0, 1}},
 	};
-	drawVertex(GL_TRIANGLE_STRIP, vert, 4, NULL, node);
+	draw_lit(FSV_TRIANGLE_STRIP, vert, G_N_ELEMENTS(vert), NULL, node);
 
 	if (!full_node) {
 		/* Draw an "X" and we're done */
-		VertexPos vertx[4];
+		FsvVertex vertx[4];
 		for (i = 0; i < 4; i++)
-			vertx[i] = (VertexPos){{corners[x_verts[i]].x, corners[x_verts[i]].y, z1}};
-		drawVertexPos(GL_LINES, vertx, 4, &color_black);
+			vertx[i] = (FsvVertex){{corners[x_verts[i]].x, corners[x_verts[i]].y, z1}};
+		draw_unlit(FSV_LINES, vertx, G_N_ELEMENTS(vertx), &color_black);
 		return;
 	}
 
 	/* Draw side faces */
-	Vertex vside[] = {
+	FsvVertex vside[] = {
 	    // Front face
 	    {{corners[0].x, corners[0].y, z1}, {sin_theta, -cos_theta, 0}},
 	    {{corners[0].x, corners[0].y, z0}, {sin_theta, -cos_theta, 0}},
@@ -2144,45 +1985,16 @@ treev_gldraw_leaf( GNode *node, double r0, boolean full_node )
 	    {{corners[0].x, corners[0].y, z1}, {-cos_theta, -sin_theta, 0}},
 	    {{corners[0].x, corners[0].y, z0}, {-cos_theta, -sin_theta, 0}},
 	};
-	static const GLushort elems[] = {
+	static const unsigned int elems[] = {
 	    0,	1,  2,	2,  1,	3,   // Front
 	    4,	5,  6,	6,  5,	7,   // Right
 	    8,	9,  10, 10, 9,	11,  // Back
 	    12, 13, 14, 14, 13, 15   // Left
 	};
-	static GLuint vbo;
-	if (!vbo)
-		glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vside), &vside, GL_DYNAMIC_DRAW);
-
-	static GLuint ebo;
-	if (!ebo) {
-		glGenBuffers(1, &ebo);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(elems), &elems, GL_STATIC_DRAW);
-	}
-
-	glEnableVertexAttribArray(gl.position_location);
-	glVertexAttribPointer(gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, position));
-
-	glEnableVertexAttribArray(gl.normal_location);
-	glVertexAttribPointer(gl.normal_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(Vertex), (void *)offsetof(Vertex, normal));
-
-	glUseProgram(gl.program);
 
 	node_set_color(node);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-	GLsizei cnt = sizeof(elems) / sizeof(GLushort);
-	glDrawElements(GL_TRIANGLES, cnt, GL_UNSIGNED_SHORT, 0);
-
-	glUseProgram(0);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vside), NULL, GL_DYNAMIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	gpu_draw(FSV_TRIANGLES, vside, G_N_ELEMENTS(vside), elems,
+		 G_N_ELEMENTS(elems));
 }
 
 
@@ -2229,17 +2041,17 @@ treev_gldraw_folder( GNode *dnode, double r0 )
 	p_rot.z = (1.0 - DIR_NODE_DESC(dnode)->deployment) * TREEV_GEOM_PARAMS(dnode)->leaf.height + TREEV_GEOM_PARAMS(dnode->parent)->platform.height;
 
 	/* Translate, rotate, and draw folder geometry */
-	VertexPos vert[8];
+	FsvVertex vert[8];
 	for (i = 0; i <= 7; i++) {
 		p.x = folder_r + folder_points[i % 7].x;
 		p.y = folder_points[i % 7].y;
 		p_rot.x = p.x * cos_theta - p.y * sin_theta;
 		p_rot.y = p.x * sin_theta + p.y * cos_theta;
 
-		vert[i] = (VertexPos){{p_rot.x, p_rot.y, p_rot.z}};
+		vert[i] = (FsvVertex){{p_rot.x, p_rot.y, p_rot.z}};
 	}
 
-	drawVertexPos(GL_LINE_STRIP, vert, 8, &color_black);
+	draw_unlit(FSV_LINE_STRIP, vert, G_N_ELEMENTS(vert), &color_black);
 }
 
 
@@ -2259,7 +2071,7 @@ treev_gldraw_loop( double loop_r )
 
 	/* Draw loop */
 	static size_t vert_cnt = (seg_count + 1) * 2;
-	Vertex *vert = NEW_ARRAY(Vertex, vert_cnt);
+	FsvVertex *vert = NEW_ARRAY(FsvVertex, vert_cnt);
 	for (s = 0; s <= seg_count; s++) {
 		theta = 360.0 * (double)s / (double)seg_count;
 		sin_theta = sin( RAD(theta) );
@@ -2271,10 +2083,10 @@ treev_gldraw_loop( double loop_r )
 		p1.x = loop_r1 * cos_theta;
 		p1.y = loop_r1 * sin_theta;
 
-		vert[2 * s] = (Vertex){{p0.x, p0.y, 0}, {0, 0, 1}};
-		vert[2 * s + 1] = (Vertex){{p1.x, p1.y, 0}, {0, 0, 1}};
+		vert[2 * s] = (FsvVertex){{p0.x, p0.y, 0}, {0, 0, 1}};
+		vert[2 * s + 1] = (FsvVertex){{p1.x, p1.y, 0}, {0, 0, 1}};
 	}
-	drawVertex(GL_TRIANGLE_STRIP, vert, vert_cnt, &branch_color, NULL);
+	draw_lit(FSV_TRIANGLE_STRIP, vert, vert_cnt, &branch_color, NULL);
 	xfree(vert);
 }
 
@@ -2294,13 +2106,13 @@ treev_gldraw_inbranch( double r0 )
 	c1.x = r0;
 	c1.y = (0.5 * TREEV_BRANCH_WIDTH);
 
-	Vertex vert[] = {
+	FsvVertex vert[] = {
 		{{c0.x, c0.y, 0}, {0, 0, 1}},
 		{{c1.x, c0.y, 0}, {0, 0, 1}},
 		{{c0.x, c1.y, 0}, {0, 0, 1}},
 		{{c1.x, c1.y, 0}, {0, 0, 1}},
 	};
-	drawVertex(GL_TRIANGLE_STRIP, vert, 4, &branch_color, NULL);
+	draw_lit(FSV_TRIANGLE_STRIP, vert, G_N_ELEMENTS(vert), &branch_color, NULL);
 }
 
 
@@ -2342,12 +2154,12 @@ treev_gldraw_outbranch( double r1, double theta0, double theta1 )
 	seg_arc_width = (arc_width + supp_arc_width) / (double)seg_count;
 
 	const size_t vert_cnt = 4 + (seg_count + 1) * 2;
-	Vertex *vert = NEW_ARRAY(Vertex, vert_cnt);
+	FsvVertex *vert = NEW_ARRAY(FsvVertex, vert_cnt);
 	/* Branch stem */
-	vert[0] = (Vertex){{p0.x, p0.y, 0}, {0, 0, 1}};
-	vert[1] = (Vertex){{p1.x, p0.y, 0}, {0, 0, 1}};
-	vert[3] = (Vertex){{p1.x, p1.y, 0}, {0, 0, 1}};
-	vert[2] = (Vertex){{p0.x, p1.y, 0}, {0, 0, 1}};
+	vert[0] = (FsvVertex){{p0.x, p0.y, 0}, {0, 0, 1}};
+	vert[1] = (FsvVertex){{p1.x, p0.y, 0}, {0, 0, 1}};
+	vert[3] = (FsvVertex){{p1.x, p1.y, 0}, {0, 0, 1}};
+	vert[2] = (FsvVertex){{p0.x, p1.y, 0}, {0, 0, 1}};
 
 	/* Draw branch arc */
 	theta = theta0 - 0.5 * supp_arc_width;
@@ -2361,12 +2173,12 @@ treev_gldraw_outbranch( double r1, double theta0, double theta1 )
 		p1.x = arc_r1 * cos_theta;
 		p1.y = arc_r1 * sin_theta;
 
-		vert[4 + s * 2] = (Vertex){{p0.x, p0.y, 0}, {0, 0, 1}};
-		vert[4 + s * 2 + 1] = (Vertex){{p1.x, p1.y, 0}, {0, 0, 1}};
+		vert[4 + s * 2] = (FsvVertex){{p0.x, p0.y, 0}, {0, 0, 1}};
+		vert[4 + s * 2 + 1] = (FsvVertex){{p1.x, p1.y, 0}, {0, 0, 1}};
 
 		theta += seg_arc_width;
 	}
-	drawVertex(GL_TRIANGLE_STRIP, vert, vert_cnt, &branch_color, NULL);
+	draw_lit(FSV_TRIANGLE_STRIP, vert, vert_cnt, &branch_color, NULL);
 	xfree(vert);
 }
 
@@ -2479,7 +2291,7 @@ treev_draw_recursive( GNode *dnode, double prev_r0, double r0, int action )
 	dir_gparams = TREEV_GEOM_PARAMS(dnode);
 
 	mat4 tmpmat;
-	glm_mat4_copy(gl.modelview, tmpmat);
+	glm_mat4_copy(gpu_mat.modelview, tmpmat);
 	//debug_print_matrices(1);
 
 	dir_collapsed = DIR_COLLAPSED(dnode);
@@ -2504,15 +2316,15 @@ treev_draw_recursive( GNode *dnode, double prev_r0, double r0, int action )
 			 * corresponding leaf position */
 			leaf.r = prev_r0 + dir_gparams->leaf.distance;
 			leaf.theta = dir_gparams->leaf.theta;
-			glm_rotate_z(gl.modelview, leaf.theta * M_PI/180.0, gl.modelview);
-			glm_translate(gl.modelview, (vec3){leaf.r, 0.0, 0.0});
-			glm_scale(gl.modelview, (vec3){dir_ndesc->deployment, dir_ndesc->deployment, dir_ndesc->deployment});
-			glm_translate(gl.modelview, (vec3){-leaf.r, 0.0, 0.0});
-			glm_rotate_z(gl.modelview, -leaf.theta * M_PI/180.0, gl.modelview);
+			glm_rotate_z(gpu_mat.modelview, leaf.theta * M_PI/180.0, gpu_mat.modelview);
+			glm_translate(gpu_mat.modelview, (vec3){leaf.r, 0.0, 0.0});
+			glm_scale(gpu_mat.modelview, (vec3){dir_ndesc->deployment, dir_ndesc->deployment, dir_ndesc->deployment});
+			glm_translate(gpu_mat.modelview, (vec3){-leaf.r, 0.0, 0.0});
+			glm_rotate_z(gpu_mat.modelview, -leaf.theta * M_PI/180.0, gpu_mat.modelview);
 		}
 
-		glm_rotate_z(gl.modelview, dir_gparams->platform.theta * M_PI / 180.0, gl.modelview);
-		ogl_upload_matrices(TRUE);
+		glm_rotate_z(gpu_mat.modelview, dir_gparams->platform.theta * M_PI / 180.0, gpu_mat.modelview);
+		gpu_upload_matrices();
 	}
 
 	if (action >= TREEV_DRAW_GEOMETRY) {
@@ -2604,8 +2416,8 @@ treev_draw_recursive( GNode *dnode, double prev_r0, double r0, int action )
 	dir_ndesc->geom_expanded = !dir_collapsed;
 
 	if (!dir_collapsed) {
-		glm_mat4_copy(tmpmat, gl.modelview);
-		ogl_upload_matrices(FALSE);
+		glm_mat4_copy(tmpmat, gpu_mat.modelview);
+		gpu_upload_matrices();
 	}
 
 	return dir_expanded;
@@ -2636,9 +2448,6 @@ treev_gldraw_cursor( RTZvec *c0, RTZvec *c1 )
 	seg_count = (int)ceil( corner_dims.theta / TREEV_CURVE_GRANULARITY );
 
 	cursor_pre( );
-	static GLuint vbo;
-	if (!vbo) glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	for (i = 0; i <= 1; i++) {
 		if (i == 0)
 			cursor_hidden_part( );
@@ -2681,34 +2490,23 @@ treev_gldraw_cursor( RTZvec *c0, RTZvec *c1 )
 			cp1.y = (p.r + delta.r) * sin_theta;
 
 			const size_t vert_cnt = 4 + seg_count + 1;
-			VertexPos *vert = NEW_ARRAY(VertexPos, vert_cnt);
-			vert[0] = (VertexPos){{cp0.x, cp0.y, p.z + delta.z}}; // Vertical axis start
-			vert[1] = (VertexPos){{cp0.x, cp0.y, p.z}}; // Vertical axis end
-			vert[2] = (VertexPos){{cp1.x, cp1.y, p.z}}; // Radial axis end
-			vert[3] = (VertexPos){{cp0.x, cp0.y, p.z}}; // Back to radial/vertical intersection
+			FsvVertex *vert = NEW_ARRAY(FsvVertex, vert_cnt);
+			vert[0] = (FsvVertex){{cp0.x, cp0.y, p.z + delta.z}}; // Vertical axis start
+			vert[1] = (FsvVertex){{cp0.x, cp0.y, p.z}}; // Vertical axis end
+			vert[2] = (FsvVertex){{cp1.x, cp1.y, p.z}}; // Radial axis end
+			vert[3] = (FsvVertex){{cp0.x, cp0.y, p.z}}; // Back to radial/vertical intersection
 			/* Tangent axis (curved part) */
 			for (s = 0; s <= seg_count; s++) {
 				theta = p.theta + delta.theta * (double)s / (double)seg_count;
 				cp0.x = p.r * cos( RAD(theta) );
 				cp0.y = p.r * sin( RAD(theta) );
-				vert[4 + s] = (VertexPos){{cp0.x, cp0.y, p.z}};
+				vert[4 + s] = (FsvVertex){{cp0.x, cp0.y, p.z}};
 			}
 
-			glBufferData(GL_ARRAY_BUFFER,
-				     sizeof(VertexPos) * vert_cnt, vert,
-				     GL_STREAM_DRAW);
-			glEnableVertexAttribArray(gl.position_location);
-			glVertexAttribPointer(
-			    gl.position_location, 3, GL_FLOAT, GL_FALSE,
-			    sizeof(VertexPos),
-			    (void *)offsetof(VertexPos, position));
-			glDrawArrays(GL_LINE_STRIP, 0, vert_cnt);
-			glBufferData(GL_ARRAY_BUFFER,
-				     sizeof(VertexPos) * vert_cnt, NULL,
-				     GL_STREAM_DRAW);
+			gpu_draw(FSV_LINE_STRIP, vert, vert_cnt, NULL, 0);
+			xfree(vert);
 		}
 	}
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	cursor_post( );
 }
 
@@ -2774,8 +2572,7 @@ treev_draw( boolean high_detail )
 static void
 cursor_pre( void )
 {
-	glUseProgram(gl.program);
-	ogl_disable_lightning();
+	gpu_set_lighting( 0 );
 }
 
 
@@ -2784,9 +2581,9 @@ static void
 cursor_hidden_part( void )
 {
 	/* Hidden part is drawn with a thin line */
-	glDepthFunc( GL_GREATER );
-	glLineWidth(2.0);
-	glUniform4f(gl.color_location, 0.3, 0.3, 0.3, 1);
+	gpu_set_depth_test( FSV_DEPTH_GREATER );
+	gpu_set_line_width( 2.0 );
+	gpu_set_color( 0.3, 0.3, 0.3, 1.0 );
 }
 
 
@@ -2795,9 +2592,9 @@ static void
 cursor_visible_part( void )
 {
 	/* Visible part is drawn with a thick solid line */
-	glDepthFunc( GL_LEQUAL );
-	glLineWidth( 5.0 );
-	glUniform4f(gl.color_location, 1, 1, 1, 1);
+	gpu_set_depth_test( FSV_DEPTH_LEQUAL );
+	gpu_set_line_width( 5.0 );
+	gpu_set_color( 1.0, 1.0, 1.0, 1.0 );
 }
 
 
@@ -2805,9 +2602,13 @@ cursor_visible_part( void )
 static void
 cursor_post( void )
 {
-	glLineWidth( 1.0 );
-	ogl_enable_lightning();
-	glUseProgram(0);
+	/* Note: the GL original never restored the depth function here, so
+	 * everything drawn after the first cursor kept GL_LEQUAL for the
+	 * rest of the session. Restoring GL's default is the intended
+	 * state, and the SDL renderer resets it per frame regardless. */
+	gpu_set_depth_test( FSV_DEPTH_LESS );
+	gpu_set_line_width( 1.0 );
+	gpu_set_lighting( 1 );
 }
 
 
@@ -2977,7 +2778,7 @@ __attribute__((unused)) static void
 draw_node( GNode *node )
 {
 	mat4 tmpmat;
-	glm_mat4_copy(gl.modelview, tmpmat);
+	glm_mat4_copy(gpu_mat.modelview, tmpmat);
 
 	switch (globals.fsv_mode) {
 		case FSV_DISCV:
@@ -2985,20 +2786,20 @@ draw_node( GNode *node )
 		break;
 
 		case FSV_MAPV:
-		glm_translate(gl.modelview, (vec3){0.0f, 0.0f, geometry_mapv_node_z0(node)});
-		ogl_upload_matrices(TRUE);
+		glm_translate(gpu_mat.modelview, (vec3){0.0f, 0.0f, geometry_mapv_node_z0(node)});
+		gpu_upload_matrices();
 		mapv_gldraw_node( node );
 		break;
 
 		case FSV_TREEV:
 		if (geometry_treev_is_leaf( node )) {
-			glm_rotate_z(gl.modelview, geometry_treev_platform_theta(node->parent) * M_PI/180, gl.modelview);
-			ogl_upload_matrices(TRUE);
+			glm_rotate_z(gpu_mat.modelview, geometry_treev_platform_theta(node->parent) * M_PI/180, gpu_mat.modelview);
+			gpu_upload_matrices();
 			treev_gldraw_leaf( node, geometry_treev_platform_r0( node->parent ), TRUE );
 		}
 		else {
-			glm_rotate_z(gl.modelview, geometry_treev_platform_theta(node) * M_PI/180, gl.modelview);
-			ogl_upload_matrices(TRUE);
+			glm_rotate_z(gpu_mat.modelview, geometry_treev_platform_theta(node) * M_PI/180, gpu_mat.modelview);
+			gpu_upload_matrices();
 			treev_gldraw_platform( node, geometry_treev_platform_r0( node ) );
 		}
 		break;
@@ -3006,8 +2807,8 @@ draw_node( GNode *node )
 		SWITCH_FAIL
 	}
 
-	glm_mat4_copy(tmpmat, gl.modelview);
-	ogl_upload_matrices(FALSE);
+	glm_mat4_copy(tmpmat, gpu_mat.modelview);
+	gpu_upload_matrices();
 }
 
 
