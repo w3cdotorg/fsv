@@ -29,11 +29,14 @@ glibdep = dependency('glib-2.0')
 # regardless of `frontend`'s value. The imgui subproject (static lib +
 # `imgui_dep`, see subprojects/imgui/meson.build) is only pulled in
 # when frontend == 'sdl' *and* SDL3 was actually found — mirrors
-# gtkdep_found's pattern. Task 2.2 wires `imgui_dep`/`sdl3dep` into an
-# actual src/sdl/ target; for now this only proves the subproject
-# builds (see docs/PORTING.md, Task 2.1).
+# gtkdep_found's pattern.
 sdl3dep = dependency('sdl3', required: false)
 if frontend == 'sdl' and sdl3dep.found()
+  # main.cpp (Task 2.2) and the vendored ImGui sources are C++20; the
+  # root project itself only declares 'c' above, so C++ has to be
+  # added explicitly before anything in this project (as opposed to a
+  # subproject, which brings its own compiler) can compile a .cpp file.
+  add_languages('cpp', required: true, native: false)
   imgui_subproject = subproject('imgui')
   imgui_dep = imgui_subproject.get_variable('imgui_dep')
 endif
@@ -74,6 +77,13 @@ subdir('po')
 subdir('debug')
 subdir('lib')
 subdir('src')
+# The sdl frontend's real target (Task 2.2) needs libfsvcore/incdir,
+# which only exist once subdir('src') above has run — hence a second
+# small block here rather than folding this into the imgui/sdl3 lookup
+# arm near the top of this file.
+if frontend == 'sdl' and sdl3dep.found()
+  subdir('src/sdl')
+endif
 subdir('tools')
 subdir('tests')
 

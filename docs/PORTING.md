@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies) in progress (Task 2.1 done)**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done through Task 2.2**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -258,6 +258,110 @@ the subproject builds); Task 2.2 is what actually consumes
 - Both scratch build directories were deleted after verification (not
   committed) — same convention as the `builddir` used in earlier
   tasks.
+
+## Task 2.2 verification (SDL3 + Metal app skeleton, ImGui, animation tick)
+
+`src/sdl/main.cpp` is a real, compiling SDL3 + SDL_GPU + ImGui frontend:
+opens a resizable HiDPI window titled "fsv", creates a GPU device
+requesting MSL + SPIR-V shader formats, claims the window, installs all
+five `fsv_platform` hooks, initializes ImGui's SDL3 + SDLGPU3 backends,
+then loops (poll → forward to ImGui → `fsv_animation_tick()` → render
+`ImGui::ShowDemoWindow()` over a `{0.08,0.10,0.12,1.0}` clear → submit),
+idle-waiting via `SDL_WaitEventTimeout` when nothing animates. No scene
+rendering yet — `sdl_render_frame()` is a deliberate no-op until M3.
+
+Identifiers were cross-checked against the vendored example
+(`subprojects/imgui/example_sdl3_sdlgpu3_main.cpp.txt`,
+v1.92.9b-docking) rather than the brief's code block; no drift was
+found beyond the brief's already-intentional simplifications (no
+multi-viewport support, no `SwapchainComposition`/`PresentMode` fields
+set on `ImGui_ImplSDLGPU3_InitInfo` since both only matter in
+multi-viewport mode and their struct defaults — `SDR`/`VSYNC` — already
+match the vendored example's explicit values).
+
+**Meson wiring:** the root `if frontend == 'sdl' and sdl3dep.found()`
+arm (Task 2.1) now also calls `add_languages('cpp', required: true)`
+before `subproject('imgui')` — the root project only declares `'c'`,
+so C++ has to be added explicitly before *this* project (as opposed to
+the imgui subproject, which brings its own compiler) can compile a
+`.cpp` file. A **second**, separate `if frontend == 'sdl' and
+sdl3dep.found()` block was added right after `subdir('src')` (not
+folded into the first one) to call `subdir('src/sdl')` — it has to run
+after `subdir('src')` because `src/sdl/meson.build` consumes
+`libfsvcore`/`incdir`/`libmisc_dep`/`libdebug_dep`, all defined inside
+`subdir('src')`. The GTK arm (`src/meson.build`) is untouched.
+
+**Headless stubs, temporarily:** `fsv_animation_tick()` reads
+`globals.need_redraw` (defined in `common.o`), and `common.o` itself
+calls `gui_update()` at line 462 (keeping the GUI responsive while
+shelling out to `file`) — so linking in `common.o` (pulled in
+transitively via `libfsvcore`) requires `gui_update` to resolve even
+though this task never calls `scanfs`/`colexp` itself. `src/sdl/
+meson.build` links `tools/fsv-headless-stubs.c` directly (via a
+relative path, since `subdir('tools')` runs *after* `subdir('src')`
+and its `headless_stubs_src` variable doesn't exist yet at this point)
+as the smallest correct choice — those are exactly the 30 stub symbols
+this executable needs and already exist for this purpose. Documented
+in a comment at the top of `src/sdl/meson.build`; will be replaced
+task by task (M3 for geometry/viewport, M5 for dirtree/filelist) as
+real UI panels land.
+
+**Build:** `meson setup builddir-sdl -Dfrontend=sdl && ninja -C
+builddir-sdl` — clean, 28 targets, zero warnings from `main.cpp` or
+the headless-stubs compile unit (the pre-existing `G_LOG_DOMAIN`
+redefinition warning in `fsv-scan.c`/`test_scanfs.c` is unrelated,
+already present before this task).
+
+**Run, GPU driver:** `./builddir-sdl/src/sdl/fsv` logs (via Apple's
+unified logging, macOS 26.6, Apple Silicon):
+```
+Metal API Validation Enabled
+GPU driver: metal
+```
+
+**Visual verification:** `screencapture -x` is unavailable in this
+sandbox — it fails with `could not create image from display` even on
+a bare desktop with no app running (a Screen Recording TCC permission
+the sandboxed shell doesn't have, not an app bug). Per the task's own
+fallback ("use SDL's own capabilities"), a **temporary** debug-only
+capture path was added to `main.cpp`, gated behind an
+`FSV_DEBUG_SCREENSHOT_BMP` env var: on frame 30 it re-renders the same
+`ImDrawData` into an ordinary offscreen `SDL_GPUTexture` (the real
+swapchain texture is `framebufferOnly` on Metal and rejects
+`SDL_DownloadFromGPUTexture` as a copy source — confirmed by hitting
+exactly that Metal validation assertion first), downloads it via a
+`SDL_GPUTransferBuffer`, and writes the raw bytes to disk. (First
+attempt wrote a BMP via `SDL_CreateSurfaceFrom`/`SDL_SaveBMP`; the
+32-bit V4-header BMP round-tripped through both Pillow and `sips` with
+channels shuffled — a decoder-side artifact, reproduced and diagnosed
+by reading raw pixel values with PIL — so the final version writes a
+trivial P6 PPM directly from the mapped buffer instead, using the
+already-logged, confirmed-`B8G8R8A8_UNORM` swapchain format to pick
+the right byte order.) This confirmed a dark teal background
+(`(26,20,255,31)`→ decoded correctly once the channel order matched:
+≈(20,26,31,255), i.e. `{0.08,0.10,0.12,1.0}`) with the ImGui Demo
+window rendered on top, dark theme, fully legible. **This capture code
+was fully reverted before committing** — `main.cpp` as committed has
+no trace of it (`grep -n "DEBUG_SCREENSHOT\|TEMP" src/sdl/main.cpp` →
+no matches); it existed only to produce the proof screenshot at
+`/tmp/fsv-t22-capture2.png`, referenced from the Task 2.2 report.
+
+**Quit path:** sent `SIGTERM` to the running process (closing the
+window/Cmd+Q wasn't automatable in this sandbox either, for the same
+reason screencapture isn't) — `wait $PID` → exit code `0`, confirming
+a clean shutdown path either way (SDL/macOS's default termination
+handling, or explicit `SDL_EVENT_QUIT` handling in the loop — both
+paths converge on the same `ImGui_ImplSDLGPU3_Shutdown` → `..SDL3_
+Shutdown` → `ImGui::DestroyContext` → `SDL_ReleaseWindowFromGPUDevice`
+→ `SDL_DestroyGPUDevice`/`SDL_DestroyWindow`/`SDL_Quit` → `return 0`
+sequence at the bottom of `main()`).
+
+**Regression checks:** `meson test -C builddir-sdl scanfs` → `1/1
+fsv:scanfs OK`. Default `meson setup builddir-gtk-check` (no
+`-Dfrontend`) still configures 8 targets with no SDL/imgui subproject
+involvement and `ninja -C builddir-gtk-check` builds cleanly
+end-to-end (both scratch dirs deleted after verification, per the
+existing per-task convention).
 
 ## Why this architecture
 
