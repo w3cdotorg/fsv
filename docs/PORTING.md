@@ -631,6 +631,222 @@ outlines are drawn together, which is exactly when the line topologies
 above arrive — if platform fills z-fight with their outlines, this is
 why.
 
+## Task 3.3 verification (geometry.c off OpenGL, scene renders via Metal)
+
+`src/geometry.c` no longer contains a single GL call
+(`grep -c "\bgl[A-Z]" src/geometry.c` -> `0`) and no longer includes
+`ogl.h`, hence no epoxy. It draws against `src/gpu.h`, which each
+frontend implements: `src/sdl/gpu.cpp` (SDL_GPU) and
+`src/ogl-gpu-compat.c` (epoxy/GL, so `-Dfrontend=gtk` keeps working).
+`gpu.h` moved from `src/sdl/` to `src/` to say so.
+
+**The scene renders.** All three modes, on a real directory
+(`./builddir-sdl/src/sdl/fsv src --mapv|--treev|--discv`):
+
+- **MapV**: the classic landscape. A grey directory slab carrying the
+  black folder outline, with yellow file pedestals laid out in rows of
+  descending size, taller ones at the back; two grey sub-directory
+  pedestals with their own folder outlines; side faces shaded dark
+  (ambient-only, correct for a light at `(0.2, 0, 1, 0)`); the white
+  node cursor bracketing the root, with its occluded corner bars
+  showing through the pedestals in grey (the `GL_GREATER` pass) and its
+  visible corners in white (the `GL_LEQUAL` pass).
+- **TreeV**: the grey platform seen from the front, yellow leaf nodes in
+  concentric rows, two grey directory leaves at the rear, the red branch
+  stem descending from the platform's inner edge, cursor bracket around
+  the platform.
+- **DiscV**: the grey root disc ringed by yellow file discs, sized by
+  file size and staggered clockwise, smallest tapering off at the
+  bottom.
+
+### Topology strategy: expand everything into two pipelines
+
+SDL_GPU has no `TRIANGLEFAN` and no `LINELOOP`, and bakes the primitive
+type into the pipeline object. Rather than carry a pipeline per GL mode,
+`gpu_draw()` expands every topology into indices against exactly two:
+`TRIANGLELIST` and `LINELIST`.
+
+| `geometry.c` draws | expanded to |
+|---|---|
+| `GL_TRIANGLES` (indexed) | indices passed through unchanged |
+| `GL_TRIANGLE_FAN` | `(0, i, i+1)` |
+| `GL_TRIANGLE_STRIP` | `(i, i+1, i+2)`, first two swapped on odd `i` so winding is uniform |
+| `GL_LINES` | `(i, i+1)` per pair |
+| `GL_LINE_STRIP` | `(i, i+1)` |
+| `GL_LINE_LOOP` | line strip plus `(n-1, 0)` |
+
+Index expansion is a few integer appends over data that is being copied
+anyway; a strip pipeline would have saved nothing, since the fan and the
+loop still need converting and neither could share it. Indices are
+32-bit throughout — `geometry.c` used `GL_UNSIGNED_SHORT`, and widening
+on the way in was cheaper than a second index-size code path.
+
+Pipelines are built lazily and cached by (primitive type, depth
+comparison, color-target format). A normal frame uses two; the node
+cursor adds two more the first time it is drawn; picking (Task 4.2) will
+add the offscreen-format variants.
+
+### Recording and replay, not retained meshes
+
+Task 3.2's `FsvMesh` handle API was removed in favor of one immediate
+call, `gpu_draw(topology, verts, nverts, indices, nindices)`. This was
+not a stylistic preference. `geometry.c` owns no persistent meshes: each
+call site rebuilt its vertex array and re-specified one shared streaming
+VBO on every frame. Modeling that as one `FsvMesh` per call site is
+wrong under SDL_GPU, because buffer copies are illegal inside a render
+pass, so the uploads must be recorded before the draws that consume
+them — and a mesh reused across every node in a frame then paints all of
+them with the last node's geometry. Cycling only papers over it by
+allocating a fresh internal buffer per node per frame.
+
+So `gpu_draw()` records: vertices and expanded indices append to two CPU
+arenas, and a `DrawCmd` captures the pipeline, the index range and a
+snapshot of both uniform blocks. `gpu_scene_end()` uploads both arenas in
+one copy pass and replays every `DrawCmd` in one render pass. A frame
+costs one transfer and one pass regardless of node count, the uniform
+snapshots preserve exactly the per-draw state the GL code expressed
+through ordering, and `geometry.c` keeps its "build a little array, draw
+it, move on" shape unchanged.
+
+Consequence for Task 3.4: text drawn between `gpu_scene_begin()` and
+`gpu_scene_end()` has to join the same recording (or open its own pass
+afterwards with `LOADOP_LOAD` on color and depth). It cannot simply
+issue draws mid-walk, for the same reason geometry cannot.
+
+### Depth bias (`glPolygonOffset`)
+
+`ogl_init()`'s `glEnable(GL_POLYGON_OFFSET_FILL)` + `glPolygonOffset(1.0,
+1.0)` becomes `enable_depth_bias = true`,
+`depth_bias_constant_factor = 1.0f`, `depth_bias_slope_factor = 1.0f`,
+`depth_bias_clamp = 0.0f` — the same numbers, and the same sign
+convention (positive pushes fills away from the viewer). It is set on
+the **triangle** pipelines only: `GL_POLYGON_OFFSET_FILL` applies to
+filled polygons, not lines, and the whole point is for the black folder
+outlines and the cursor bars — which sit exactly on a face's plane — to
+win the depth test. Verified visually: the folder outlines on the MapV
+directory faces and the TreeV folder leaves render solid, with no
+z-fighting.
+
+### Line width: 1 pixel, everywhere
+
+`geometry.c` did ask for other widths — `glLineWidth(3.0)` around DiscV,
+and 2.0 / 5.0 for the cursor's hidden and visible halves. SDL_GPU has no
+line-width control at all (no field in `SDL_GPURasterizerState`; Metal
+has no `glLineWidth` equivalent), so `gpu_set_line_width()` is a
+documented no-op on the SDL backend and every line rasterizes 1 pixel
+wide. **This is a visible difference from the GTK build**: the node
+cursor's visible half reads as a thin white outline rather than a thick
+one. The GL shim still calls `glLineWidth()`, so the GTK frontend is
+unchanged. Emulating widths with quads is deliberately not done here.
+
+### The GTK compat shim
+
+`src/ogl-gpu-compat.c` (~220 lines) is a transcription of the blocks
+deleted from `geometry.c`: same `GL_STREAM_DRAW` usage hints, same
+attribute setup, same "re-specify the buffer as empty afterwards to
+avoid an implicit sync" trick, one shared streaming VBO/EBO pair instead
+of one `static GLuint vbo` per call site. Color and lighting are cached
+and applied inside `gpu_draw()`, which is what `drawVertex()` /
+`drawVertexPos()` did; depth function and line width are plain GL server
+state and apply immediately.
+
+`gpu_mat` is now the single storage for the projection/modelview pair on
+**both** frontends — `ogl.c` writes it in `setup_*_matrix()`, and
+`FsvGlState` lost its own copies, because two copies of a matrix
+`geometry.c` pushes and pops is two sources of truth. `ogl.c` also lost
+`ogl_upload_matrices()` and `ogl_{enable,disable}_lightning()`, which are
+now `gpu_upload_matrices()` / `gpu_set_lighting()`. The old
+`ogl_upload_matrices(gboolean text)` argument is gone: the text engine's
+MVP is now always refreshed with the scene's. Every caller that passed
+`FALSE` did so only to skip work, and the one place that wants a
+different text matrix (`about_splash_draw()`'s ortho projection) calls
+`text_upload_mvp()` directly afterwards.
+
+`gpu_init()`/`gpu_shutdown()`/`gpu_pick()` are deliberately *not* in the
+shim: device setup is `ogl_init()`, and `viewport.c` calls
+`ogl_select_modern()` directly. Nothing in the GTK arm references them.
+
+### Deviations from the task brief
+
+1. **The splash screen and the "fsv" logo moved to `about.c`.**
+   `geometry_gldraw_fsv()` and `splash_draw()` were the only drawing in
+   `geometry.c` that did not use the scene shader: they use the separate
+   *about* program (per-vertex color + linear fog,
+   `src/fsv-about-*.glsl`), which Task 3.1 never ported and `gpu.h` has
+   no pipeline for. Keeping them would have meant putting a second
+   shader program into the shared contract that only the GTK frontend
+   could implement. `about.c` already drew the same letters through the
+   same program, so they moved there; `geometry.c`'s `FSV_SPLASH` case
+   calls `about_splash_draw()`, which the SDL frontend no-ops. **The SDL
+   frontend therefore has no splash screen and no About presentation**;
+   reinstating them needs the about shaders ported (Task 3.1 scope).
+2. **`geometry.c` is a source of each frontend target, not part of
+   `libfsvcore`.** The brief expected it to join the core library, but it
+   now calls `gpu.h`, and `libfsvcore`'s other consumers (`fsv-scan`,
+   `test_scanfs`) have no renderer to link against. It is listed in both
+   frontends' source lists instead, and the SDL target uses its own
+   `src/sdl/stubs.c` rather than `tools/fsv-headless-stubs.c`, whose
+   `geometry_*` no-ops would collide.
+3. **`FsvMesh` was removed rather than extended** — see "Recording and
+   replay" above. `fsv_mesh_draw_id()` was already dropped in Task 3.2
+   and stays dropped; picking goes through `node_set_color()`'s id
+   colors plus `gpu_set_color()` / `gpu_set_lighting(0)`, with
+   `gpu_render_mode()` replacing `gl.render_mode`.
+4. **`FsvVertex` lost its per-vertex `color[4]`** (40 -> 24 byte stride,
+   two vertex attributes). `scene.vert` declares only `position` and
+   `normal`; the third attribute was never read.
+5. **Default mode is MapV, not DiscV.** The brief's goal state says
+   "DiscV landscape (default mode)", but `src/fsv.c`'s default is
+   `FSV_MAPV` and MapV is the mode with the pedestal landscape the same
+   sentence describes. Matching `fsv.c` seemed more defensible than
+   diverging from it; `--discv` / `--mapv` / `--treev` select the mode
+   until Task 5.1's menu bar exists.
+6. **One behavior fix**: `cursor_post()` now restores the depth function
+   to `LESS`. The GL original never restored it, so every draw after the
+   first node cursor ran with `GL_LEQUAL` for the rest of the session.
+
+### `--screenshot FILE`
+
+Renders one frame into an offscreen `R8G8B8A8_UNORM` texture
+(`gpu_screenshot_begin()` / `gpu_screenshot_end()` in `gpu.cpp`),
+downloads it with `SDL_DownloadFromGPUTexture()` behind a fence, and
+writes it with `SDL_SaveBMP()`. It first lets the intro camera pan
+finish — morphs advance on wall-clock time, so it has to actually wait —
+bounded at 8 seconds so a stuck animation cannot hang CI. The scene path
+is identical to the windowed one: same recording, same pipelines, only
+the color-target texture and its format differ.
+
+All three screenshots above were produced this way and are non-black.
+`screencapture` and AppleScript window queries remain blocked by this
+shell's TCC restrictions (same as Task 3.2), so the offscreen readback
+is how the frame was inspected; the windowed path was verified to run,
+render and stay at ~0.9% CPU.
+
+### Verification
+
+- `grep -c "\bgl[A-Z]" src/geometry.c` -> `0`; `grep -n "epoxy\|ogl" src/geometry.c` -> empty.
+- **macOS / SDL**: `meson setup -Dfrontend=sdl` + `ninja` clean from
+  scratch, no warnings from any file touched here (the two
+  `G_LOG_DOMAIN` redefinition warnings are pre-existing, in
+  `fsv-scan.c` and `test_scanfs.c`).
+- **Linux / GTK** (Debian bookworm container): `meson setup` + `ninja`
+  clean from scratch, 11 targets, zero warnings. `src/fsv` links
+  `ogl-gpu-compat.c.o` and exports `gpu_draw`, `gpu_set_color`,
+  `gpu_set_lighting`, `gpu_set_depth_test`, `gpu_set_line_width`,
+  `gpu_render_mode`, `gpu_upload_matrices`. A *headed* GTK run is not
+  possible in the container, so the GTK arm is verified to build and
+  link, not to render.
+- `meson test scanfs` -> `1/1 OK` on both arms.
+- Idle CPU after the intro animation settles: **0.7 - 1.0%** measured
+  with `ps` on a 275,557-node tree (`/opt/homebrew/Cellar`), RSS 133 MB.
+  A 747-node tree screenshots end to end in 4.3 s, of which 4.0 s is the
+  intro pan it waits out.
+- `-DDEBUG` now applies to C++ as well as C. `common.h` routes the
+  `GList` helpers through `debug.c`'s tracking allocator under `DEBUG`,
+  and with the flag on only one side a link prepended by `main.cpp` was
+  untracked when `camera.c` removed it ("Attempted to free unknown
+  link" at startup).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -658,3 +874,8 @@ code is kept.
 | 2026-08-07 | Two render passes per frame (scene then ImGui) rather than one | ImGui must not be depth-tested and must not inherit/leak the scene's viewport+scissor state; costs one extra Metal encoder |
 | 2026-08-07 | `glm_frustum_rh_zo()` per call site, not a project-wide `CGLM_CLIP_CONTROL` | SDL_GPU wants `[0,1]` depth while the still-OpenGL GTK frontend shares cglm and wants `[-1,1]`; a global switch would silently retarget it |
 | 2026-08-07 | Separate "id" pipeline for picking, but no separate shader | a pipeline's color-target format is fixed at creation and picking reads back from an offscreen `R8G8B8A8` texture, not the swapchain; the flat id color is just a uniform push, exactly as `geometry.c` already does in `RENDERMODE_SELECT` |
+| 2026-08-07 | `gpu.h` lives in `src/`, not `src/sdl/` | it is the contract the shared core draws against, implemented once per frontend (SDL_GPU and the epoxy shim), not an SDL-private header |
+| 2026-08-07 | Immediate-mode `gpu_draw()` recorded + replayed, instead of retained `FsvMesh` handles | geometry.c owns no persistent meshes; SDL_GPU forbids copies inside a render pass, so uploads must precede the draws that consume them, which a per-call-site mesh reused across nodes cannot satisfy |
+| 2026-08-07 | Expand fans/strips/loops into indexed TRIANGLELIST/LINELIST rather than add strip pipelines | halves the pipeline count and costs only integer appends over data already being copied; no strip pipeline could have served the fan or the loop anyway |
+| 2026-08-07 | Splash screen + "fsv" logo move from geometry.c to about.c | they are the only geometry drawn through the separate *about* shader program, which Task 3.1 never ported; keeping them would force a second pipeline into the shared gpu.h contract that only GTK could implement |
+| 2026-08-07 | Accept 1-pixel lines on SDL_GPU instead of emulating `glLineWidth` with quads | SDL_GPU has no line-width control on any backend; the cursor reads thinner than on GTK, which is a cosmetic difference not worth a quad-expansion path |
