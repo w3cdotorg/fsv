@@ -24,6 +24,7 @@
 #include "ui_main.h"
 #include "ui_panels.h"
 #include <cstring>
+#include <string>
 extern "C" {
 #include "common.h"
 #include "animation.h"
@@ -566,6 +567,11 @@ main(int argc, char **argv)
 	const char *screenshot_path = nullptr;
 	// Same default as the GTK frontend (src/fsv.c).
 	FsvMode initial_mode = FSV_MAPV;
+	// Backs io.IniFilename below (Task 5.2 docking) -- declared here,
+	// not inside the block that fills it in, so it outlives that block:
+	// ImGui only stores the pointer, and main() never returns before
+	// shutdown, so this scope is exactly as long as it needs to be.
+	std::string imgui_ini_path;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--discv") == 0)
@@ -642,6 +648,45 @@ main(int argc, char **argv)
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 		ImGui::StyleColorsDark();
+
+		// Docking (Task 5.2): the vendored ImGui is the docking branch
+		// (v1.92.9b-docking, per this file's own header) and the brief
+		// asks for a real "left dock", not a floating window merely
+		// positioned there -- ui_panels_draw()'s "Directory Tree"
+		// window becomes dockable the moment this flag is set, with no
+		// other change to that file needed (any ImGui::Begin() window
+		// is dockable once ImGuiConfigFlags_DockingEnable is set,
+		// unless it opts out with ImGuiWindowFlags_NoDocking).
+		ImGuiIO &io = ImGui::GetIO();
+		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+		// .ini persistence policy: point it at a stable, absolute path
+		// instead of leaving ImGui's default ("imgui.ini", relative to
+		// the process's current directory). That default would be
+		// actively wrong here -- scanfs.c chdir()s into the scanned
+		// root and never chdir()s back (scanfs.c:320), so a relative
+		// ini would land inside whatever directory the user last
+		// scanned (their home directory, a random project checkout,
+		// ...), not a stable location, and Rescan/Change Root would
+		// keep moving it around underneath itself. SDL_GetPrefPath()
+		// is SDL3's own answer to "where can I safely write files"
+		// (SDL_filesystem.h's own doc comment) -- e.g. `~/Library/
+		// Application Support/fsv/fsv/` on macOS, created if needed.
+		// imgui_ini_path itself is declared in main()'s own scope (see
+		// above this block), not here: io.IniFilename only stores the
+		// pointer, so the string backing it must outlive this `if`.
+		char *pref_path = SDL_GetPrefPath("fsv", "fsv");
+		if (pref_path != nullptr) {
+			imgui_ini_path = pref_path;
+			imgui_ini_path += "imgui.ini";
+			SDL_free(pref_path);
+			io.IniFilename = imgui_ini_path.c_str();
+		} else {
+			// No writable pref dir (unusual) -- disable persistence
+			// rather than fall back to the cwd-relative default this
+			// whole block exists to avoid.
+			io.IniFilename = nullptr;
+		}
 
 		ImGui_ImplSDL3_InitForSDLGPU(g_window);
 		ImGui_ImplSDLGPU3_InitInfo init_info = {};
@@ -730,13 +775,21 @@ main(int argc, char **argv)
 		g_frame_requested = false;
 
 		imgui_new_frame();
-		// ui_main_draw() (Task 5.1: menu bar, node context menu, Help
-		// windows) first, ui_panels_draw() (Task 5.2: dirtree/filelist
-		// panel) second -- ui_panels_draw() positions itself off
-		// ImGui::GetMainViewport()'s WorkPos/WorkSize, which
-		// BeginMainMenuBar()/EndMainMenuBar() inside ui_main_draw()
-		// shrinks to exclude the menu bar's own height for this frame.
+		// Order matters, in two independent ways:
+		//  1. ui_main_draw() (Task 5.1: menu bar, node context menu,
+		//     Help windows) before ui_dockspace_draw()/ui_panels_draw():
+		//     ImGui::GetMainViewport()'s WorkPos/WorkSize is shrunk by
+		//     BeginMainMenuBar()/EndMainMenuBar() *inside*
+		//     ui_main_draw(), and both docking (the dockspace's own
+		//     size) and the panel's fallback floating placement read
+		//     that viewport rect.
+		//  2. ui_dockspace_draw() (Task 5.2: docking) before
+		//     ui_panels_draw(): ImGui's own docs -- "Dockspaces need to
+		//     be submitted before any window they can host". Only
+		//     ui_panels_draw()'s window ever docks into it; ui_main_draw()'s
+		//     menu bar/popups don't, so their relative order doesn't matter.
 		ui_main_draw();
+		ui_dockspace_draw();
 		ui_panels_draw();
 		ImGui::Render();
 		submit_frame();

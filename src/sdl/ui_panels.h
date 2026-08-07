@@ -18,9 +18,22 @@
 // Call once per frame, after ui_main_draw() (its menu bar's
 // BeginMainMenuBar()/EndMainMenuBar() shrinks ImGui::GetMainViewport()'s
 // WorkPos/WorkSize for this frame, which this file's initial window
-// placement relies on). No-op while a scan is running or before the
-// first filesystem has finished loading -- there is no stable GNode tree
-// to walk in either case.
+// placement relies on) but before ui_panels_draw() -- see this
+// function's own doc comment in ui_panels.cpp for why that specific
+// ordering matters. Submits a passthrough DockSpaceOverViewport() so
+// ui_panels_draw()'s "Directory Tree" window can dock into the left
+// side of the main viewport, with the 3D scene still visible (and still
+// receiving clicks -- ImGuiDockNodeFlags_PassthruCentralNode punches a
+// real input hit-test hole, not just a visual one) through the
+// dockspace's empty central node. On the very first frame only, and
+// only if no docking layout was already loaded from imgui.ini, docks
+// the panel into a fresh left split by default; afterwards a user's own
+// rearrangement persists across runs via the .ini path main.cpp sets.
+void ui_dockspace_draw(void);
+
+// Call once per frame, after ui_dockspace_draw(). No-op while a scan is
+// running or before the first filesystem has finished loading -- there
+// is no stable GNode tree to walk in either case.
 void ui_panels_draw(void);
 
 // View menu (ui_main.cpp): whether the panel is currently shown. GTK's

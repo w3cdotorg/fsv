@@ -60,6 +60,11 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
+// DockBuilder* and ImGuiDockNode are "very early end-user API ... expect
+// this to change/break" (imgui.cpp's own header above the Docking:
+// Builder Functions section) -- deliberately not in imgui.h, only here,
+// only for the one-time default-layout seed in ui_dockspace_draw() below.
+#include <imgui_internal.h>
 
 #include "app.h"
 
@@ -149,6 +154,11 @@ static GNode *g_filelist_scroll_to = nullptr;
 static std::vector<GNode *> g_file_list;
 
 static bool g_panels_visible = true;
+
+// Shared between ui_dockspace_draw() (DockBuilderDockWindow() needs the
+// exact title string to pre-dock by) and ui_panels_draw() (Begin()'s own
+// title) -- one constant so the two can never drift apart.
+static const char *const kPanelWindowTitle = "Directory Tree";
 
 // Port of filelist.c's compare_node(): alphabetical by name. Unlike the
 // dir tree below, this is cheap to apply here because it only runs when
@@ -461,6 +471,33 @@ draw_file_list_section(void)
 
 		ImGuiListClipper clipper;
 		clipper.Begin(static_cast<int>(g_file_list.size()));
+		// IncludeItemByIndex() *before* the first Step() (imgui.h's own
+		// doc comment on it) is required for a pending scroll-to onto a
+		// row outside the currently visible range: the clipper would
+		// otherwise never hand this row's index to the loop below at
+		// all (it is clipped away, not merely drawn off-screen), so the
+		// child == g_filelist_scroll_to check inside the loop can never
+		// see it and SetScrollHereY() never fires. Exactly the bug
+		// filelist_show_entry() hits every time camera.c's
+		// post_pan_end() (or a right-click) lands on a file outside the
+		// list's current scroll position -- e.g. any entry past the
+		// first screenful of a large directory like /opt/homebrew/bin.
+		if (g_filelist_scroll_to != nullptr) {
+			auto it = std::find(g_file_list.begin(), g_file_list.end(),
+			    g_filelist_scroll_to);
+			if (it != g_file_list.end())
+				clipper.IncludeItemByIndex(
+				    static_cast<int>(it - g_file_list.begin()));
+			else
+				// Not a row of *this* list -- e.g. filelist_show_entry()
+				// was called with the shown directory itself (never a
+				// row within its own listing), which is exactly what
+				// happens once per load right after the intro camera
+				// pan settles on root_dnode. Clear it now rather than
+				// leaving a stale pointer for every future frame's
+				// std::find() to rescan for nothing, forever.
+				g_filelist_scroll_to = nullptr;
+		}
 		while (clipper.Step()) {
 			for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
 				GNode *child = g_file_list[i];
@@ -516,6 +553,58 @@ ui_panels_set_visible(bool visible)
 	g_panels_visible = visible;
 }
 
+// Submits the passthrough dockspace every frame (ImGui's own docs:
+// "Dockspaces need to be submitted _before_ any window they can host.
+// Submit them early in your frame!"), and, once only, seeds a default
+// left-docked layout if -- and only if -- no layout was already
+// restored from imgui.ini for this dockspace. Called from main.cpp
+// after ui_main_draw() (so ImGui::GetMainViewport()'s WorkPos/WorkSize
+// already reflects this frame's main-menu-bar shrink -- ui_main_draw()
+// itself never docks anything, so running it first costs nothing) and
+// before ui_panels_draw() (which does).
+void
+ui_dockspace_draw(void)
+{
+	const ImGuiViewport *vp = ImGui::GetMainViewport();
+
+	// ImGuiDockNodeFlags_PassthruCentralNode: the empty central node (no
+	// window ever gets docked there -- only the left split, below, is
+	// ever targeted) gets a *real* input hit-test hole punched through
+	// it (imgui.cpp's DockNodeUpdate(): SetWindowHitTestHole()), not
+	// merely a transparent background. That is what keeps the 3D scene
+	// receiving clicks/drags there -- WantCaptureMouse stays false over
+	// it exactly as it did before this dockspace existed.
+	const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(
+	    0, vp, ImGuiDockNodeFlags_PassthruCentralNode);
+
+	static bool first_frame = true;
+	if (!first_frame)
+		return;
+	first_frame = false;
+
+	// ImGui loads imgui.ini's saved dock-node structure (splits, which
+	// windows are docked where) at CreateContext()/first-NewFrame() time
+	// -- before this ever runs. So if this exact dockspace ID was saved
+	// with a real layout in a previous run, the node DockSpaceOverViewport()
+	// just resolved above already carries that structure (it is split
+	// and/or already hosts windows) by the time we get here. A node
+	// that is still IsEmpty() (leaf, no docked window) has nothing to
+	// preserve -- either imgui.ini didn't exist yet, or it never saved
+	// this dockspace -- so seed one sensible default layout: the panel
+	// docked into a left ~25% split, matching window.c's own hpaned_w
+	// initial ratio (window_width/5), everything else left as the
+	// passthrough central node for the 3D scene.
+	ImGuiDockNode *node = ImGui::DockBuilderGetNode(dockspace_id);
+	if (node == nullptr || !node->IsEmpty())
+		return;
+
+	ImGuiID dock_left = 0, dock_main = 0;
+	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.25f,
+	    &dock_left, &dock_main);
+	ImGui::DockBuilderDockWindow(kPanelWindowTitle, dock_left);
+	ImGui::DockBuilderFinish(dockspace_id);
+}
+
 void
 ui_panels_draw(void)
 {
@@ -544,7 +633,7 @@ ui_panels_draw(void)
 	ImGui::SetNextWindowSize(
 	    ImVec2(vp->WorkSize.x / 5.0f, vp->WorkSize.y), ImGuiCond_FirstUseEver);
 
-	if (ImGui::Begin("Directory Tree", &g_panels_visible)) {
+	if (ImGui::Begin(kPanelWindowTitle, &g_panels_visible)) {
 		const float avail_h = ImGui::GetContentRegionAvail().y;
 		ImGui::BeginChild("##dirtree_scroll", ImVec2(0.0f, avail_h / 3.0f),
 		    ImGuiChildFlags_Borders);

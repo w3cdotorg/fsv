@@ -1834,6 +1834,18 @@ change.
    its own flag says. `expand_ancestors()` is the fix, called from
    both.
 3. **View menu panel toggle** (see table above) — GTK has none.
+4. **File list has a third column, Size**, beyond `filelist.c`'s two
+   (an icon pixmap column and Name). Not requested by the GTK original
+   at all — an addition, kept because the brief's own scope list asks
+   for "name, size, type icon-as-text prefix" explicitly, and because
+   the icon pixmap column had to be replaced with *something* once the
+   Size column highlighted how little the two-column original actually
+   showed. Uses `abbrev_size()` (`src/common.c`, already used by
+   `dialog.c`'s Properties dialog), and — for directories — the
+   subtree size (`DIR_NODE_DESC(child)->subtree.size`), not the raw
+   node size GTK's own Properties dialog shows for a plain file, since
+   a directory's own on-disk size is rarely the number a user browsing
+   the list actually wants.
 
 ### A real bug the panel-click verification found: unbalanced `TreePop()`
 
@@ -1970,6 +1982,133 @@ call site), `ui_main.cpp` (the View menu item and the
 `filelist_*` bodies removed), and `meson.build` (new source file) —
 nothing else.
 
+### Fix round (post-review): real docking, and a clipper scroll-to bug
+
+Code review verified the sync plumbing, the `TreePop()` fix, `tnode`'s
+lifetime and the O(visible) walk, but found two Important issues and
+two Minors.
+
+**Important 1 — no actual ImGui docking.** The brief says "left dock
+(ImGui docking)" and the vendored ImGui is the docking branch, but the
+first cut never set `ImGuiConfigFlags_DockingEnable` and had no
+`DockSpace` at all — `ui_panels_draw()`'s window was a floating window
+merely *positioned* at the left edge (`SetNextWindowPos/Size`,
+`ImGuiCond_FirstUseEver`), not a dockable one. Fixed:
+
+- `main.cpp`, once, at ImGui init: `io.ConfigFlags |=
+  ImGuiConfigFlags_DockingEnable`. This alone makes `ui_panels_draw()`'s
+  existing `ImGui::Begin("Directory Tree", ...)` dockable — no change
+  to that call itself was needed.
+- New `ui_panels.cpp`/`.h`: `ui_dockspace_draw()`, called from
+  `main.cpp` every frame between `ui_main_draw()` and
+  `ui_panels_draw()`. Submits `ImGui::DockSpaceOverViewport(0, vp,
+  ImGuiDockNodeFlags_PassthruCentralNode)`, and, on the very first frame
+  only, seeds a default layout via the `DockBuilder*` API (`imgui_
+  internal.h` — "very early end-user API... expect this to change/
+  break", its own header's words) *only if* the resulting dock node is
+  still `IsEmpty()` (i.e. nothing was already restored from a previous
+  run's `imgui.ini`): split left ~25% (`window.c`'s own `hpaned_w`
+  ratio, `window_width/5`), `DockBuilderDockWindow("Directory Tree",
+  dock_left)`, `DockBuilderFinish()`. A `GetID()` call outside any
+  window would dereference a null `CurrentWindow` and crash
+  (`imgui.cpp:10052-10056`) — sidestepped entirely by letting
+  `DockSpaceOverViewport()` compute and return the ID itself, the same
+  approach it uses internally.
+- **`.ini` persistence policy, decided explicitly, not left to
+  default**: `io.IniFilename` now points at `SDL_GetPrefPath("fsv",
+  "fsv")` + `"imgui.ini"` (e.g. `~/Library/Application Support/fsv/
+  fsv/` on macOS) instead of ImGui's own default (`"imgui.ini"`,
+  relative to the process's *current directory*). The default would
+  have been actively wrong here: `scanfs.c` `chdir()`s into the scanned
+  root and never `chdir()`s back, so a relative `.ini` would land
+  inside whatever directory the user last scanned — not a stable
+  location, and Rescan/Change Root would keep relocating it underneath
+  itself. A user's own drag-to-rearrange now persists across runs at a
+  fixed path instead.
+- `ImGuiDockNodeFlags_PassthruCentralNode` matters for more than
+  cosmetics: `imgui.cpp`'s `DockNodeUpdate()` calls
+  `SetWindowHitTestHole()` on the empty central node, a *real* input
+  hit-test hole, not merely `NoBackground`. That is what keeps
+  `WantCaptureMouse` false over the 3D scene there, unchanged from
+  before docking existed.
+
+**Important 2 — file-list scroll-to silently broken under clipping.**
+`ImGui::SetScrollHereY()` in the per-row loop only ever fires for a row
+the `ImGuiListClipper` actually iterates — a row `filelist_show_entry()`
+(`camera.c:950`'s `post_pan_end()`, or a right-click) targets outside
+the *currently visible* range is clipped away entirely, never reaching
+the loop body at all, so the scroll silently never happens. Fixed with
+exactly the mechanism `imgui.h` documents for this
+(`IncludeItemByIndex()`, called *before* the first `Step()`): look up
+the target's index in `g_file_list` and call
+`clipper.IncludeItemByIndex(idx)` before entering the `while
+(clipper.Step())` loop. A `std::find()` miss (the target is not a row
+of *this* list — happens once per load, when `filelist_show_entry()` is
+called with the shown directory itself right after the intro pan, which
+is never a row within its own listing) now clears the stale pointer
+immediately instead of leaving it for every future frame to rescan for
+nothing.
+
+Verified against `/opt/homebrew/bin` (1519 entries, `ls -1 | LC_ALL=C
+sort | tail -1` → `zstdmt`, the same name the port's own alphabetical
+sort produces), driving `filelist_show_entry()` onto that last, far
+off-screen row via a temporary harness: the row's `ImGui::
+IsItemVisible()` read `false` at `rect_min_y=26145.0` (a `~26000px`
+scroll-target the clipper had never even considered before) on the
+exact frame the scroll-to was requested, then `true` at
+`rect_min_y=777.0` (inside the ~800px-tall window) on every one of the
+~80 subsequent frames observed — proving both that the row is now
+processed at all (`IncludeItemByIndex()` fix) and that it settles
+visibly on-screen (`SetScrollHereY()`, unchanged, now actually gets a
+chance to run).
+
+**Covering re-verification** (one combined headed run per target,
+temporary harness, fully reverted): both arms rebuilt clean from
+scratch, zero new warnings; `meson test scanfs` → `1/1 OK` on both.
+
+- **Docked layout, real proof, not a screenshot** (ImGui-overlay pixels
+  are still unverifiable by screen capture in this sandbox — Task 5.1's
+  disclosed gap): read the generated `imgui.ini` directly after a run
+  against `src`. `[Window][Directory Tree]` carries `DockId=
+  0x00000001,0`; `[Docking][Data]` shows `DockSpace ID=0x08BD597D ...
+  Split=X` with two child `DockNode`s — `ID=0x00000001 ... SizeRef=
+  319,800` (the panel's node, ~25% of a 1280-wide window) and
+  `ID=0x00000002 ... SizeRef=959,800 CentralNode=1` (the passthrough
+  node). Unambiguous, human-readable ground truth that this is a real
+  ImGui dock, not a floating window that merely looks similar.
+- **3D scene still receives clicks in the central node**: a real
+  middle-button press+drag+release injected at `(800,400)` — inside the
+  central node regardless of the exact split ratio (25% of 1280 is 320)
+  — dollied the camera (`distance` 1270.78→1022.58 on `src`;
+  8116.80→6531.49 on `/opt/homebrew/bin`), proving
+  `PassthruCentralNode`'s hit-test hole, not just its transparent
+  background, actually works with the dockspace now present.
+- **Panel↔3D sync regression check**: a real click on `root_dnode`'s
+  tree-row arrow, now at its *docked* position (`rect=(16,54)-(303,67)`
+  — the row moved down from the old floating layout's `(16,35)-
+  (240,48)`, an artifact of the dock node's own frame, not a bug — found
+  by re-discovering the live rect rather than assuming the old floating
+  coordinates still applied), collapsed `root_dnode`
+  (`toggled=1,open=0`) and a second click re-expanded it
+  (`toggled=1,open=1`) — the exact same `colexp()` round trip the
+  original Task 5.2 verification proved, now confirmed unaffected by
+  the `DockSpaceOverViewport()` change.
+
+**Minor 3 — process deviation, acknowledged**: Task 5.2's directory-tree
+and file-list panels landed in a single commit rather than one commit
+per panel as the brief's "Commit per green step" asks. Both panels
+share one file (`ui_panels.cpp`) and were developed and verified
+together as one coherent unit (the file list's own correctness depends
+on the tree's `g_shown_dir`/expansion state); splitting them into two
+commits after the fact would have meant an artificial first commit with
+a non-functional half (a file list with no way to select a directory
+to show). Noted here rather than repeated in the original section.
+
+**Minor 4 — file list's Size column disclosed as a deviation**: see
+"Deliberate deviations" above (item 4) — added to `docs/PORTING.md`
+alongside the other three rather than only in this fix-round note,
+per the review's own ask.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2024,3 +2163,6 @@ code is kept.
 | 2026-08-07 | Directory tree panel keeps `GNode->children`'s structural (dir-first, size-descending) order rather than re-sorting to match `dirtree.c`'s alphabetical insertion order | that order is geometrically significant (MapV/TreeV/DiscV layout depends on it), so it cannot be mutated; re-deriving an alphabetical view every frame for potentially large directories would cost real time for a cosmetic-only match. The file list *is* sorted alphabetically, matching `filelist.c` exactly, because it only re-sorts a cached copy on a directory change, not per frame |
 | 2026-08-07 | `dirtree_entry_expand()`/`_expand_recursive()` walk up to open every ancestor, a step GTK's own versions never needed | `GtkTreeStore` rows all exist regardless of expansion (collapsing only hides children); this file's tree walk only descends into rows already known to be open, so a closed ancestor would make the target permanently undrawable no matter its own flag |
 | 2026-08-07 | Verified the panel↔3D sync end-to-end with real `SDL_PushEvent`-injected input (motion, then press, then release as three separately-timed steps) rather than direct state calls | direct calls would only prove the notification plumbing, not that a real click on the actual rendered widget reaches it; the three-step split was required after bundling press+release in one frame silently failed `TreeNodeEx()`'s `OpenOnArrow` toggle (`ImGuiButtonFlags_PressedOnClick`) despite `IsItemClicked()` still reporting true |
+| 2026-08-07 | `io.IniFilename` set to an `SDL_GetPrefPath()`-derived absolute path rather than left at ImGui's cwd-relative default | `scanfs.c` permanently `chdir()`s into whatever directory was last scanned; a relative `imgui.ini` would follow it there instead of living anywhere stable, and would relocate itself on every Rescan/Change Root |
+| 2026-08-07 | Default dock layout seeded via `DockBuilder*` gated on the resulting node's `IsEmpty()`, not on whether `imgui.ini` exists on disk | `DockSpaceOverViewport()` already resolves/creates the node before the gate can run either way; checking the node's *own* structure (already restored from a prior `imgui.ini` load, if any, by the time this code runs) is what actually distinguishes "nothing to preserve" from "a user's layout exists", not a filesystem check that can't see what ImGui already loaded into memory |
+| 2026-08-07 | `ImGuiListClipper::IncludeItemByIndex()` before the first `Step()`, not a second, unclipped render pass | it is the one mechanism `imgui.h` documents for exactly this need (force a specific, possibly off-screen index to be processed at all) and composes with the clipper's own multi-pass `Step()` loop already in place, instead of bypassing clipping (and its perf benefit) entirely whenever any scroll-to is pending |
