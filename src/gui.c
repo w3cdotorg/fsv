@@ -36,46 +36,6 @@ gui_update( void )
 }
 
 
-/* This checks if the widget associated with the given adjustment is
- * currently busy redrawing/reconfiguring itself, or is in steady state
- * (this is used when animating widgets to avoid changing the adjustment
- * too often, otherwise the widget can't keep up and things slow down) */
-boolean
-gui_adjustment_widget_busy( GtkAdjustment *adj )
-{
-	static const double threshold = (1.0 / 18.0);
-	double t_prev;
-	double t_now;
-	double *tp;
-
-	/* ---- HACK ALERT ----
-	 * This doesn't actually check GTK+ internals-- I'm not sure which
-	 * ones are relevant here. This just checks the amount of time that
-	 * has passed since the last time the function was called with the
-	 * same adjustment and returned FALSE, and if it's below a certain
-	 * threshold, the object is considered "busy" (returning TRUE) */
-
-	t_now = xgettime( );
-
-	tp = g_object_get_data(G_OBJECT(adj), "t_prev");
-	if (tp == NULL) {
-		tp = NEW(double);
-		*tp = t_now;
-		g_object_set_data_full(G_OBJECT(adj), "t_prev", tp, _xfree);
-		return FALSE;
-	}
-
-	t_prev = *tp;
-
-	if ((t_now - t_prev) > threshold) {
-		*tp = t_now;
-		return FALSE;
-	}
-
-	return TRUE;
-}
-
-
 /* This places child_w into parent_w intelligently. expand and fill
  * flags are applicable only if parent_w is a box widget */
 static void

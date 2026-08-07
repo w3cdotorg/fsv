@@ -105,6 +105,19 @@ hook_scrollbar_adjustment( int axis )
 }
 
 
+/* Signal handler for the viewport scrollbars' "value_changed" signal --
+ * invoked whenever the *user* drags a scrollbar slider. Forwards the
+ * axis to camera_scrollbar_moved( ), which reads the new position back
+ * via fsv_platform.get_scroll( ) and updates the camera accordingly.
+ * Blocked around the programmatic updates in gtk_set_scroll( ) below, so
+ * the camera's own scrollbar pushes don't loop back into itself. */
+static void
+on_scrollbar_value_changed( GtkAdjustment *adj, gpointer user_data )
+{
+	camera_scrollbar_moved( GPOINTER_TO_INT(user_data) );
+}
+
+
 /* fsv_platform.set_scroll: update the scrollbar adjustment for the given
  * axis (0=x, 1=y) */
 static void
@@ -112,10 +125,12 @@ gtk_set_scroll( int axis, double lower, double upper, double page, double pos )
 {
 	GtkAdjustment *adj = hook_scrollbar_adjustment( axis );
 
+	g_signal_handlers_block_by_func( adj, G_CALLBACK(on_scrollbar_value_changed), GINT_TO_POINTER(axis) );
 	gtk_adjustment_set_lower( adj, lower );
 	gtk_adjustment_set_upper( adj, upper );
 	gtk_adjustment_set_page_size( adj, page );
 	gtk_adjustment_set_value( adj, pos );
+	g_signal_handlers_unblock_by_func( adj, G_CALLBACK(on_scrollbar_value_changed), GINT_TO_POINTER(axis) );
 }
 
 
@@ -312,7 +327,6 @@ window_init(GtkApplication *app, gpointer user_data)
 	dialog_pass_main_window_widget( main_window_w );
 	dirtree_pass_widget( dir_tree_w );
 	filelist_pass_widget( file_list_w );
-	camera_pass_scrollbar_widgets( x_scrollbar_w, y_scrollbar_w );
 
 	/* Install the GTK platform hooks. Must happen before anything
 	 * that can call redraw( ) (e.g. fsv_load( ) below) */
@@ -324,6 +338,13 @@ window_init(GtkApplication *app, gpointer user_data)
 	fsv_platform.viewport_size = gtk_viewport_size;
 	fsv_platform.set_scroll = gtk_set_scroll;
 	fsv_platform.get_scroll = gtk_get_scroll;
+
+	/* Forward user-driven scrollbar drags to the camera module (see
+	 * on_scrollbar_value_changed( ) above). This is the sole remaining
+	 * path from GtkAdjustment to camera state -- camera.c itself never
+	 * touches GTK directly. */
+	g_signal_connect( gtk_range_get_adjustment(GTK_RANGE(x_scrollbar_w)), "value_changed", G_CALLBACK(on_scrollbar_value_changed), GINT_TO_POINTER(0) );
+	g_signal_connect( gtk_range_get_adjustment(GTK_RANGE(y_scrollbar_w)), "value_changed", G_CALLBACK(on_scrollbar_value_changed), GINT_TO_POINTER(1) );
 
 	/* Showtime! */
 	gtk_widget_show( main_window_w );

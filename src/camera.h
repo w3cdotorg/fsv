@@ -76,9 +76,9 @@ extern Camera *camera;
 
 boolean camera_moving( void );
 void camera_init( FsvMode mode, boolean initial_view );
-#ifdef __GTK_H__
-void camera_pass_scrollbar_widgets( GtkWidget *x_scrollbar_w, GtkWidget *y_scrollbar_w );
-#endif
+/* Frontend calls this when the user drags a viewport scrollbar (axis:
+ * 0 = x, 1 = y, matching fsv_platform.set_scroll( )/get_scroll( )) */
+void camera_scrollbar_moved( int axis );
 void camera_update_scrollbars( boolean hard_update );
 void camera_pan_finish( void );
 void camera_pan_break( void );

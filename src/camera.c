@@ -13,13 +13,11 @@
 #include "common.h"
 #include "camera.h"
 
-#include <gtk/gtk.h>
-
 #include "animation.h"
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
 #include "filelist.h"
+#include "fsv-platform.h"
 #include "geometry.h"
-#include "gui.h"
 #include "window.h"
 
 
@@ -47,17 +45,22 @@ static union AnyCamera the_camera;
 /* More convenient pointer to the camera */
 Camera *camera = CAMERA(&the_camera);
 
-/* Viewport scrollbar adjustments */
-static GtkAdjustment *x_scrollbar_adj;
-static GtkAdjustment *y_scrollbar_adj;
+/* Scroll state for one axis of viewport scrolling: lower/upper bound,
+ * visible page size, and current position. Computed here and pushed to
+ * (or read back from) the frontend's scrollbar widgets via
+ * fsv_platform.set_scroll( ) / fsv_platform.get_scroll( ). */
+typedef struct {
+	double lower;
+	double upper;
+	double page;
+	double value;
+} ScrollState;
 
-/* Scrollbar adjustments at outset of a camera pan */
-static GtkAdjustment *prev_x_scrollbar_adj;
-static GtkAdjustment *prev_y_scrollbar_adj;
+/* Current viewport scroll state, indexed by X_AXIS/Y_AXIS */
+static ScrollState scroll_state[2];
 
-/* Strings for message passing */
-static char x_axis_mesg[] = "x_axis";
-static char y_axis_mesg[] = "y_axis";
+/* Scroll state at outset of a camera pan (for interpolation) */
+static ScrollState prev_scroll_state[2];
 
 /* TRUE if the camera is currently moving */
 static boolean camera_currently_moving = FALSE;
@@ -220,7 +223,7 @@ treev_camera_theta( double target_theta, GNode *target_node )
 }
 
 
-/* Helper function for camera_scrollbar_move_cb( ) */
+/* Helper function for camera_scrollbar_moved( ) */
 static void
 discv_scrollbar_move( double value, int axis )
 {
@@ -240,7 +243,7 @@ discv_scrollbar_move( double value, int axis )
 }
 
 
-/* Helper function for camera_scrollbar_move_cb( ) */
+/* Helper function for camera_scrollbar_moved( ) */
 static void
 mapv_scrollbar_move( double value, int axis )
 {
@@ -266,7 +269,7 @@ mapv_scrollbar_move( double value, int axis )
 }
 
 
-/* Helper function for camera_scrollbar_move_cb( ) */
+/* Helper function for camera_scrollbar_moved( ) */
 static void
 treev_scrollbar_move( double value, int axis )
 {
@@ -292,25 +295,19 @@ treev_scrollbar_move( double value, int axis )
 }
 
 
-/* This callback services the viewport scrollbars (or, more precisely,
- * their adjustments) whenever either is moved by the user */
-static void
-camera_scrollbar_move_cb( GtkAdjustment *adj, const char *mesg )
+/* Called by the frontend whenever the user manually moves one of the
+ * viewport scrollbars (i.e. drags the slider). Reads the new scrollbar
+ * position via fsv_platform.get_scroll( ) and updates the camera target
+ * for the current visualization mode accordingly.
+ * axis is 0 for the x-axis scrollbar, 1 for the y-axis scrollbar (same
+ * convention as fsv_platform.set_scroll( )/get_scroll( )) */
+void
+camera_scrollbar_moved( int axis )
 {
 	double value;
-	int axis;
 
 	/* Get value at center of scrollbar slider */
-	value = gtk_adjustment_get_value(adj) + 0.5 * gtk_adjustment_get_page_size(adj);
-
-	if (!strcmp( mesg, x_axis_mesg ))
-                axis = X_AXIS;
-	else if (!strcmp( mesg, y_axis_mesg ))
-		axis = Y_AXIS;
-	else {
-		g_assert_not_reached( );
-		return;
-	}
+	value = fsv_platform.get_scroll( axis ) + 0.5 * scroll_state[axis].page;
 
 	switch (globals.fsv_mode) {
 		case FSV_DISCV:
@@ -335,50 +332,34 @@ camera_scrollbar_move_cb( GtkAdjustment *adj, const char *mesg )
 }
 
 
-/* Correspondence from window_init( ) */
-void
-camera_pass_scrollbar_widgets( GtkWidget *x_scrollbar_w, GtkWidget *y_scrollbar_w )
-{
-	/* Get the adjustments */
-	x_scrollbar_adj = gtk_range_get_adjustment(GTK_RANGE(x_scrollbar_w));
-	y_scrollbar_adj = gtk_range_get_adjustment(GTK_RANGE(y_scrollbar_w));
-
-	/* Connect signal handlers */
-	g_signal_connect( x_scrollbar_adj, "value_changed", G_CALLBACK (camera_scrollbar_move_cb), x_axis_mesg );
-	g_signal_connect( y_scrollbar_adj, "value_changed", G_CALLBACK (camera_scrollbar_move_cb), y_axis_mesg );
-}
-
-
 /* Default scrollbar states */
 static void
-null_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
+null_get_scrollbar_state( ScrollState *x, ScrollState *y )
 {
-	gtk_adjustment_set_lower(x_adj, 0.0);
-	gtk_adjustment_set_upper(x_adj, 100.0);
-	gtk_adjustment_set_value(x_adj, 0.0);
-	gtk_adjustment_set_step_increment(x_adj, 0.0);
-	gtk_adjustment_set_page_increment(x_adj, 0.0);
-	gtk_adjustment_set_page_size(x_adj, 100.0);
-        *y_adj = *x_adj; /* struct assign */
+	x->lower = 0.0;
+	x->upper = 100.0;
+	x->value = 0.0;
+	x->page = 100.0;
+	*y = *x;
 }
 
 
 /* This produces the exact state the viewport scrollbars should have in
  * DiscV mode, given the current camera state and current node */
 static void
-discv_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
+discv_get_scrollbar_state( ScrollState *x, ScrollState *y )
 {
 
 	/* TODO: To be implemented... */
 
-	*x_adj = *x_scrollbar_adj; /* struct assign */
-	*y_adj = *y_scrollbar_adj; /* struct assign */
+	*x = scroll_state[X_AXIS];
+	*y = scroll_state[Y_AXIS];
 }
 
 
 /* Same as above, but for MapV mode */
 static void
-mapv_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
+mapv_get_scrollbar_state( ScrollState *x, ScrollState *y )
 {
 	GNode *dnode;
 	XYvec dims, margin;
@@ -416,33 +397,29 @@ mapv_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
 	c1.x = MAX(MAPV_GEOM_PARAMS(dnode)->c1.x - margin.x, MAPV_CAMERA(camera)->target.x);
 	c1.y = MAX(MAPV_GEOM_PARAMS(dnode)->c1.y - margin.y, MAPV_CAMERA(camera)->target.y);
 
-	/* Corrective offset (since adj->value actually indicates position
+	/* Corrective offset (since value actually indicates position
 	 * at top of scrollbar slider, not center) */
 	cofs = 0.5 * diameter;
 
 	/* x-scrollbar state */
-	gtk_adjustment_set_lower(x_adj, c0.x - cofs);
-	gtk_adjustment_set_upper(x_adj, c1.x + cofs);
-	gtk_adjustment_set_value(x_adj, MAPV_CAMERA(camera)->target.x - cofs);
-	gtk_adjustment_set_step_increment(x_adj, dims.x / 256.0);
-	gtk_adjustment_set_page_increment(x_adj, dims.x / 16.0);
-	gtk_adjustment_set_page_size(x_adj, diameter);
+	x->lower = c0.x - cofs;
+	x->upper = c1.x + cofs;
+	x->value = MAPV_CAMERA(camera)->target.x - cofs;
+	x->page = diameter;
 
 	/* y-scrollbar state
 	 * Note: lower, upper, and value have signs reversed to correct for
 	 * canonical scrollbar increment direction (wrong for our needs) */
-	gtk_adjustment_set_lower(y_adj, - c1.y - cofs);
-	gtk_adjustment_set_upper(y_adj, - c0.y + cofs);
-	gtk_adjustment_set_value(y_adj, - MAPV_CAMERA(camera)->target.y - cofs);
-	gtk_adjustment_set_step_increment(y_adj, dims.y / 256.0);
-	gtk_adjustment_set_page_increment(y_adj, dims.y / 16.0);
-	gtk_adjustment_set_page_size(y_adj, diameter);
+	y->lower = - c1.y - cofs;
+	y->upper = - c0.y + cofs;
+	y->value = - MAPV_CAMERA(camera)->target.y - cofs;
+	y->page = diameter;
 }
 
 
 /* Same as above, but for TreeV mode */
 static void
-treev_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
+treev_get_scrollbar_state( ScrollState *x, ScrollState *y )
 {
 	GNode *dnode;
 	RTvec area_dims, dir_pos;
@@ -454,7 +431,7 @@ treev_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
 
 	if (!dirtree_entry_expanded( root_dnode )) {
 		/* Disable scrolling in this circumstance */
-		null_get_scrollbar_states( x_adj, y_adj );
+		null_get_scrollbar_state( x, y );
                 return;
 	}
 
@@ -501,63 +478,35 @@ treev_get_scrollbar_states( GtkAdjustment *x_adj, GtkAdjustment *y_adj )
 
 	/* x-scrollbar state (signs reversed) */
 	cofs = 0.5 * vis_range.theta;
-	gtk_adjustment_set_lower(x_adj, - c1.theta - cofs);
-	gtk_adjustment_set_upper(x_adj, - c0.theta + cofs);
-	gtk_adjustment_set_value(x_adj, - TREEV_CAMERA(camera)->target.theta - cofs);
-	gtk_adjustment_set_step_increment(x_adj, area_dims.theta / 256.0);
-	gtk_adjustment_set_page_increment(x_adj, area_dims.theta / 16.0);
-	gtk_adjustment_set_page_size(x_adj, vis_range.theta);
+	x->lower = - c1.theta - cofs;
+	x->upper = - c0.theta + cofs;
+	x->value = - TREEV_CAMERA(camera)->target.theta - cofs;
+	x->page = vis_range.theta;
 
 	/* y-scrollbar state (signs reversed) */
 	cofs = 0.5 * vis_range.r;
-	gtk_adjustment_set_lower(y_adj, - c1.r - cofs);
-	gtk_adjustment_set_upper(y_adj, - c0.r + cofs);
-	gtk_adjustment_set_value(y_adj, - TREEV_CAMERA(camera)->target.r - cofs);
-	gtk_adjustment_set_step_increment(y_adj, area_dims.r / 256.0);
-	gtk_adjustment_set_page_increment(y_adj, area_dims.r / 16.0);
-	gtk_adjustment_set_page_size(y_adj, vis_range.r);
+	y->lower = - c1.r - cofs;
+	y->upper = - c0.r + cofs;
+	y->value = - TREEV_CAMERA(camera)->target.r - cofs;
+	y->page = vis_range.r;
 }
 
 
-/* Copies the values of from_adj into to_adj
- * (cannot do a struct assign, otherwise ID info is copied as well) */
-static void
-adj_copy( GtkAdjustment *to_adj, GtkAdjustment *from_adj )
-{
-	gtk_adjustment_set_lower(to_adj, gtk_adjustment_get_lower(from_adj));
-	gtk_adjustment_set_upper(to_adj, gtk_adjustment_get_upper(from_adj));
-	gtk_adjustment_set_value(to_adj, gtk_adjustment_get_value(from_adj));
-	gtk_adjustment_set_step_increment(to_adj, gtk_adjustment_get_step_increment(from_adj));
-	gtk_adjustment_set_page_increment(to_adj, gtk_adjustment_get_page_increment(from_adj));
-	gtk_adjustment_set_page_size(to_adj, gtk_adjustment_get_page_size(from_adj));
-}
-
-
-/* This sets the values of adj to be somewhere between the corresponding
- * values of a_adj and b_adj, specified by the interpolation factor k
- * (i.e. if k == 0, then adj = a_adj; if k == 1, then adj = b_adj, etc.
+/* Returns a ScrollState with each field linearly interpolated between the
+ * corresponding fields of a and b, according to interpolation factor k
+ * (i.e. if k == 0, result == *a; if k == 1, result == *b; etc.
  * k should be between 0 and 1 inclusive, of course) */
-static void
-adj_interpolate( GtkAdjustment *adj, double k, GtkAdjustment *a_adj, GtkAdjustment *b_adj )
+static ScrollState
+scroll_interpolate( double k, const ScrollState *a, const ScrollState *b )
 {
-	double a_lower = gtk_adjustment_get_lower(a_adj);
-	double b_lower = gtk_adjustment_get_lower(b_adj);
-	double a_upper = gtk_adjustment_get_upper(a_adj);
-	double b_upper = gtk_adjustment_get_upper(b_adj);
-	double a_value = gtk_adjustment_get_value(a_adj);
-	double b_value = gtk_adjustment_get_value(b_adj);
-	double a_step_increment = gtk_adjustment_get_step_increment(a_adj);
-	double b_step_increment = gtk_adjustment_get_step_increment(b_adj);
-	double a_page_increment = gtk_adjustment_get_page_increment(a_adj);
-	double b_page_increment = gtk_adjustment_get_page_increment(b_adj);
-	double a_page_size = gtk_adjustment_get_page_size(a_adj);
-	double b_page_size = gtk_adjustment_get_page_size(b_adj);
-	gtk_adjustment_set_lower(adj, a_lower + k * (b_lower - a_lower));
-	gtk_adjustment_set_upper(adj, a_upper + k * (b_upper - a_upper));
-	gtk_adjustment_set_value(adj, a_value + k * (b_value - a_value));
-	gtk_adjustment_set_step_increment(adj, a_step_increment + k * (b_step_increment - a_step_increment));
-	gtk_adjustment_set_page_increment(adj, a_page_increment + k * (b_page_increment - a_page_increment));
-	gtk_adjustment_set_page_size(adj, a_page_size + k * (b_page_size - a_page_size));
+	ScrollState out;
+
+	out.lower = a->lower + k * (b->lower - a->lower);
+	out.upper = a->upper + k * (b->upper - a->upper);
+	out.page  = a->page  + k * (b->page  - a->page);
+	out.value = a->value + k * (b->value - a->value);
+
+	return out;
 }
 
 
@@ -568,27 +517,31 @@ adj_interpolate( GtkAdjustment *adj, double k, GtkAdjustment *a_adj, GtkAdjustme
 void
 camera_update_scrollbars( boolean hard_update )
 {
-	GtkAdjustment *x_adj, *y_adj;
+	ScrollState x = {0}, y = {0};
 
-	x_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
-	y_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
+	/* hard_update no longer distinguishes any behavior here: pushing
+	 * scroll state through fsv_platform.set_scroll( ) is cheap and the
+	 * frontend is free to throttle/coalesce widget updates on its own
+	 * if it ever needs to. Kept in the signature for API stability
+	 * (many call sites pass either TRUE or FALSE). */
+	(void)hard_update;
 
 	/* Get current scrollbar states */
 	switch (globals.fsv_mode) {
 		case FSV_SPLASH:
-		null_get_scrollbar_states(x_adj, y_adj);
+		null_get_scrollbar_state(&x, &y);
 		break;
 
 		case FSV_DISCV:
-		discv_get_scrollbar_states(x_adj, y_adj);
+		discv_get_scrollbar_state(&x, &y);
 		break;
 
 		case FSV_MAPV:
-		mapv_get_scrollbar_states(x_adj, y_adj);
+		mapv_get_scrollbar_state(&x, &y);
 		break;
 
 		case FSV_TREEV:
-		treev_get_scrollbar_states(x_adj, y_adj);
+		treev_get_scrollbar_state(&x, &y);
 		break;
 
 		SWITCH_FAIL
@@ -597,29 +550,16 @@ camera_update_scrollbars( boolean hard_update )
 	if (camera_moving( )) {
 		/* Interpolate between current and previous scrollbar
 		 * states according to position in camera pan */
-		adj_interpolate( x_scrollbar_adj, camera->pan_part, prev_x_scrollbar_adj, x_adj );
-		adj_interpolate( y_scrollbar_adj, camera->pan_part, prev_y_scrollbar_adj, y_adj );
-	}
-	else {
-		/* Use scrollbar states as-is */
-		adj_copy( x_scrollbar_adj, x_adj );
-		adj_copy( y_scrollbar_adj, y_adj );
+		x = scroll_interpolate( camera->pan_part, &prev_scroll_state[X_AXIS], &x );
+		y = scroll_interpolate( camera->pan_part, &prev_scroll_state[Y_AXIS], &y );
 	}
 
-	/* Update the scrollbar widgets */
-	if (hard_update || !gui_adjustment_widget_busy( x_scrollbar_adj )) {
-		g_signal_handlers_block_by_func( x_scrollbar_adj, G_CALLBACK (camera_scrollbar_move_cb), x_axis_mesg );
-		g_signal_emit_by_name( x_scrollbar_adj, "changed" );
-		g_signal_handlers_unblock_by_func( x_scrollbar_adj, G_CALLBACK (camera_scrollbar_move_cb), x_axis_mesg );
-	}
-	if (hard_update || !gui_adjustment_widget_busy( y_scrollbar_adj )) {
-		g_signal_handlers_block_by_func( y_scrollbar_adj, G_CALLBACK (camera_scrollbar_move_cb), y_axis_mesg );
-		g_signal_emit_by_name( y_scrollbar_adj, "changed" );
-		g_signal_handlers_unblock_by_func( y_scrollbar_adj, G_CALLBACK (camera_scrollbar_move_cb), y_axis_mesg );
-	}
-	// Why does freeing this cause a crash?
-	//g_free(x_adj);
-	//g_free(y_adj);
+	scroll_state[X_AXIS] = x;
+	scroll_state[Y_AXIS] = y;
+
+	/* Push to the frontend's scrollbar widgets */
+	fsv_platform.set_scroll( X_AXIS, x.lower, x.upper, x.page, x.value );
+	fsv_platform.set_scroll( Y_AXIS, y.lower, y.upper, y.page, y.value );
 }
 
 
@@ -1026,20 +966,6 @@ pan_end_cb( Morph *morph )
 	camera_currently_moving = FALSE;
 }
 
-// Initialize the static GtkAdjustments
-static void
-init_static_adjs()
-{
-	if (!prev_x_scrollbar_adj)
-		prev_x_scrollbar_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
-	if (!prev_y_scrollbar_adj)
-		prev_y_scrollbar_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
-	if (!x_scrollbar_adj)
-		x_scrollbar_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
-	if (!y_scrollbar_adj)
-		y_scrollbar_adj = GTK_ADJUSTMENT(gtk_adjustment_new(0, 0, 0, 0, 0, 0));
-}
-
 
 /* Points the camera at the given node, using the specified motion
  * morph type and (optionally, if value is nonnegative) the specified
@@ -1068,9 +994,8 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 	}
 
 	/* Save current scrollbar states */
-	init_static_adjs();
-	adj_copy( prev_x_scrollbar_adj, x_scrollbar_adj );
-	adj_copy( prev_y_scrollbar_adj, y_scrollbar_adj );
+	prev_scroll_state[X_AXIS] = scroll_state[X_AXIS];
+	prev_scroll_state[Y_AXIS] = scroll_state[Y_AXIS];
 
 	/* Halt any ongoing camera pan */
 	camera_pan_break( );
@@ -1256,9 +1181,8 @@ camera_birdseye_view( boolean going_up )
 	window_set_access( FALSE );
 
 	/* Save current scrollbar states */
-	init_static_adjs();
-	adj_copy( prev_x_scrollbar_adj, x_scrollbar_adj );
-	adj_copy( prev_y_scrollbar_adj, y_scrollbar_adj );
+	prev_scroll_state[X_AXIS] = scroll_state[X_AXIS];
+	prev_scroll_state[Y_AXIS] = scroll_state[Y_AXIS];
 
 	/* Halt any ongoing camera pan */
 	camera_pan_break( );
