@@ -1,0 +1,24 @@
+Dear ImGui — vendored subset (docking branch)
+
+Upstream:  https://github.com/ocornut/imgui
+Tag:       v1.92.9b-docking
+Commit:    b48d1afbe8ee8b238e2961dc363a949dd7304e23
+
+Vendored on 2026-08-07 for the fsv macOS/Metal port (Task 2.1).
+
+Only the files needed to build ImGui with the SDL3 + SDLGPU3 backends
+were copied in (core sources/headers, stb single-header deps, LICENSE,
+and the sdl3/sdlgpu3 backend pair). No git history, no examples/,
+docs/, misc/ or .github/ from upstream are kept — this is a copy, not
+a submodule, so `subprojects/imgui/` can be committed as ordinary
+source and updated by re-running this same copy step against a newer
+tag.
+
+`example_sdl3_sdlgpu3_main.cpp.txt` is upstream's
+`examples/example_sdl3_sdlgpu3/main.cpp`, renamed with a `.txt`
+extension so it is never picked up by the build — kept only as an API
+reference for Task 2.2 (SDL3 main.cpp skeleton).
+
+To update: re-clone the new tag and re-copy the same file list (see
+subprojects/imgui/meson.build for exactly which files are compiled),
+then update the tag/commit above.
