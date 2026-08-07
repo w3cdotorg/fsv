@@ -19,6 +19,7 @@
 #include <imgui_impl_sdlgpu3.h>
 #include "gpu.h"
 #include "gpu_internal.hpp"
+#include "input.h"
 #include <cstring>
 extern "C" {
 #include "common.h"
@@ -476,6 +477,13 @@ main(int argc, char **argv)
 			ImGui_ImplSDL3_ProcessEvent(&ev);
 			if (ev.type == SDL_EVENT_QUIT)
 				running = false;
+			// ImGui gets the event first (above); input_handle_event()
+			// checks io.WantCaptureMouse itself before navigating, so
+			// a click/drag over an ImGui window never moves the
+			// camera. Mouse nav is fully live now (Task 4.1); node
+			// selection is plumbed through but inert until gpu_pick()
+			// (Task 4.2) can actually name a node.
+			input_handle_event(&ev);
 			// Any event (input, resize, expose, ...) may warrant a
 			// redraw. ImGui_ImplSDL3_ProcessEvent() just queues input
 			// internally when called outside of a NewFrame/Render

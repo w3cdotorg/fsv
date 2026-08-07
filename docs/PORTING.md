@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done through Task 3.4**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 done through Task 4.1**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -1069,6 +1069,187 @@ such file (see "Route chosen" above) and instead extended `gpu.h` and
 `text.*.spv` artifacts to `embed-shaders.py`'s input list) and
 `src/sdl/stubs.c` (removed the now-superseded `text_*()` no-ops).
 
+## Task 4.1 verification (input.cpp — mouse navigation and selection)
+
+`src/sdl/input.h` + `src/sdl/input.cpp` port `src/viewport.c`'s
+`viewport_cb()` (GTK's `GdkEvent` switch) onto SDL3's `SDL_Event`.
+`src/sdl/main.cpp` forwards every polled event to
+`input_handle_event()`, right after `ImGui_ImplSDL3_ProcessEvent()`.
+`viewport.c` itself is untouched; the GTK arm's build is unaffected
+(`grep -n "viewport.c" src/meson.build` still lists only the GTK
+target).
+
+### What viewport.c actually does (read before writing a line)
+
+The brief's gesture list (middle-drag "fly" with Shift for vertical,
+scroll-wheel dolly, double-click "activate") does not match this fork's
+actual `src/viewport.c`, confirmed by reading it in full plus
+`doc/mouse.html` (the shipped man-page-equivalent):
+
+- **Middle-button drag dollies** the camera (`camera_dolly()`), scaled
+  by `MOUSE_SENSITIVITY` (0.5) times the vertical pixel delta since the
+  last motion event. There is no "flight" and no Shift modifier
+  anywhere in the file.
+- **Ctrl+left-button drag revolves** the camera (`camera_revolve()`),
+  same sensitivity, both axes.
+- **No scroll-wheel gesture exists at all.** `doc/mouse.html` names the
+  middle-button drag as the viewport's *only* dolly input.
+- **Double-click is explicitly a no-op**: `GDK_2BUTTON_PRESS` is `/*
+  Ignore second click of a double-click */ break;`. The ordinary
+  `GDK_BUTTON_PRESS` for that same second click already ran normally.
+  There is no "activate"/warp/open-file action in the 3D viewport
+  itself — that exists in `dirtree.c`'s separate directory-tree pane
+  (Task 5.2's ImGui panel), not here.
+- **Left click selects + `camera_look_at()`s** the node under the
+  cursor (press picks and highlights; release, if still over the same
+  node and the camera isn't already panning, flies to it).
+- **Right click** brings up `context_menu()` (a GTK popup) for the
+  node under the cursor, plus `filelist_show_entry()`.
+- Motion-driven only: every gesture above fires from
+  `GDK_MOTION_NOTIFY`'s own delta. There is no timer and no busy
+  animation-loop tick that moves the camera while a button is held but
+  the mouse is stationary — so `input.cpp` declares no per-frame tick
+  function; `input_handle_event()` is the complete port of the
+  mechanism.
+
+This resolved the brief's own "NEEDS_CONTEXT if viewport.c's gesture
+math depends on GTK specifics without an SDL equivalent" clause: it
+doesn't — the math (`MOUSE_SENSITIVITY * pixel delta` fed straight into
+`camera_dolly()`/`camera_revolve()`) is GTK-independent. What differs is
+plumbing around it (coordinate scaling, modifier-state queries, pointer
+capture), each with a direct SDL equivalent, below.
+
+### Gesture mapping (GTK → SDL)
+
+| Gesture | viewport.c (GTK) | input.cpp (SDL) | Notes |
+|---|---|---|---|
+| Dolly | Middle-button drag, `GDK_BUTTON2_MASK` in `GDK_MOTION_NOTIFY` | Middle-button drag, `SDL_BUTTON_MMASK` in `SDL_EVENT_MOUSE_MOTION` | Identical math: `camera_dolly(-(0.5 * dy))` |
+| Revolve | Ctrl+left drag, `GDK_CONTROL_MASK` + `GDK_BUTTON1_MASK` | Ctrl+left drag, `SDL_GetModState() & SDL_KMOD_CTRL` + `SDL_BUTTON_LMASK` | Identical math: `camera_revolve(0.5*dx, 0.5*dy)` |
+| Select + fly-to | Left click (press picks/highlights, release flies) | Same, split across `SDL_EVENT_MOUSE_BUTTON_DOWN`/`_UP` | Pick routes through `gpu_pick()` (Task 4.2 stub) |
+| Context menu | Right click → `context_menu()` (GTK popup) | Right click → logged, `filelist_show_entry()` called for real | Inert until Task 5.1's ImGui menu |
+| Double-click | Explicit no-op (`GDK_2BUTTON_PRESS: break;`) | No branch on `ev->button.clicks` | Reproduces the no-op by construction — SDL has no extra event to ignore |
+| Scroll wheel | **Does not exist** | `SDL_EVENT_MOUSE_WHEEL` → `camera_dolly()` | **Addition**, not a port — brief and verification bar ask for it explicitly |
+| Cursor icon | `GDK_DOUBLE_ARROW`/`GDK_FLEUR` swap during dolly/revolve, reset on leave | Not ported | Cosmetic only; no gesture math depends on it |
+| Splash/About guard | `about(ABOUT_END)` + `fsv_mode == FSV_SPLASH` early-outs | Not ported | This frontend has no About/splash presentation at all (Task 3.3); both checks are permanently dead code here |
+| HiDPI coordinate scale | `gtk_widget_get_scale_factor()` | `SDL_GetWindowPixelDensity()` | Applied identically to click *and* drag-delta math, matching viewport.c's own scaled `prev_x`/`prev_y` |
+| Pointer capture across window bounds | GTK/X11's implicit per-widget grab on button-press | Explicit `SDL_CaptureMouse(true)` on middle-press or Ctrl+left-press, released on the matching button-up | SDL3 also auto-captures while any button is held (`SDL_HINT_MOUSE_AUTO_CAPTURE`, default on) — the explicit calls are kept anyway, both because the brief asks for them and so the intent doesn't rest silently on a hint default |
+| ImGui ownership | N/A | `ImGui::GetIO().WantCaptureMouse` gates every case; an in-progress capture keeps running even if the cursor is now over an ImGui window | New concern this port introduces; GTK had no overlapping widget to arbitrate against |
+| Node-id → GNode* lookup | Private `node_table` static in `viewport.c` | `viewport_node_for_id()`, new — added to `src/viewport.h`/`src/sdl/stubs.c` | The table itself already lived in `stubs.c` (Task 3.3); this task added the read-back accessor `node_at_cursor()` needs. GTK frontend never calls it |
+
+### What's live vs. plumbed-but-inert
+
+**Fully functional today:** middle-drag dolly, Ctrl+left-drag revolve,
+scroll-wheel dolly, ImGui-window event ownership (`WantCaptureMouse`),
+mouse capture across window bounds, hover highlighting/status-bar text
+(once `gpu_pick()` can name a node).
+
+**Plumbed but inert until Task 4.2** (`gpu_pick()` is still a stub
+returning 0 unconditionally): left-click selection and fly-to, right-click
+context menu, hover highlighting/status-bar text (all depend on
+`node_at_cursor()` resolving to a real `GNode*`, which cannot happen
+while every pick reads back id 0 = "nothing there"). Each path is
+exercised on every run without crashing; left-click logs its outcome
+(`input: left-click pick at (x,y) -> no node (gpu_pick stub; Task
+4.2)`) once per click. Right-click's log/`filelist_show_entry()` path
+is code-reviewed but could not be *live*-exercised in this task's
+testing, for the same reason: `g_indicated_node` can never be non-NULL
+while the stub returns 0, so the `btn3 && g_indicated_node != NULL`
+branch never fires yet.
+
+### Verification
+
+Two build trees, `-Dfrontend=sdl` and the GTK default, both from
+scratch:
+
+- **SDL arm:** `ninja -C builddir-sdl` — clean, zero warnings from
+  `main.cpp`/`input.cpp`. `meson test -C builddir-sdl scanfs` → `1/1
+  fsv:scanfs OK`.
+- **GTK arm:** `ninja -C builddir-gtk` — 8 targets (no `src/fsv` on
+  macOS, same pre-existing gate as every prior task), zero touch of
+  `input.cpp`. `meson test -C builddir-gtk scanfs` → `1/1 OK`.
+  `git diff --stat src/viewport.c` is empty.
+
+**Headed run, real directory (`src`), synthetic `SDL_PushEvent`
+injection** (screencapture is still blocked in this sandbox — same TCC
+restriction as every prior task; used the same offscreen-texture
+`gpu_screenshot_begin/end` capture the binary already exposes via
+`--screenshot`, temporarily driven by a scripted event sequence and
+reverted before commit, plus direct `camera->theta/phi/distance`
+logging for an unambiguous numeric readout alongside the images):
+
+| Step | camera state | Screenshot |
+|---|---|---|
+| Intro pan settled | `distance=1212.7` | `01-before-dolly` |
+| Inject middle-down, 3× motion (Δy +40 each), middle-up | `distance=950.1` (**decreased** — dragging down dollies toward the target, matching `camera_dolly(-dy)` with `dy>0`) | `02-after-dolly` |
+| Inject left-click at the same point | log: `input: left-click pick at (640,400) -> no node (gpu_pick stub; Task 4.2)`, no crash | — |
+| Inject wheel (`y=+3`) | `distance=727.4` (**decreased further**, per this task's own scroll-up-zooms-in convention) | `04-after-wheel` |
+| Inject left-click again | same stub log, no crash | — |
+| Show a real ImGui window over the cursor, settle hover, inject middle-down+drag+up *over that window* | `distance=727.4` (**unchanged**) | `05-after-imgui-drag`, byte-identical file size to `04` |
+
+The dolly and wheel screenshots show the pedestal-landscape scene
+visibly closer between each step, matching the logged distance
+decreases. The ImGui-capture screenshot is pixel-identical to the one
+before it, confirming `WantCaptureMouse` correctly blocked navigation.
+
+**Idle CPU** (production binary, no test scaffolding, intro pan
+settled): **0.6–0.7%** (`ps`), matching Task 3.2/3.3's baseline —
+`input_handle_event()` adds no per-frame cost, only per-event.
+
+**Verification gap, disclosed rather than glossed over:** this
+sandbox's SDL/macOS backend resyncs real keyboard-modifier state from
+the OS on every event pump, which overwrites a programmatic
+`SDL_SetModState()` (and an injected `SDL_EVENT_KEY_DOWN`/`_UP` pair)
+before the paired mouse-motion events are actually drained on a later
+poll cycle — confirmed by a debug trace showing the override reading
+back correctly immediately after the call, then reading back as
+cleared one poll cycle later. With no real Ctrl key physically held,
+Ctrl+left-drag revolve could not be live-verified end-to-end through
+synthetic event injection the way the other gestures were (an
+`osascript`/System Events attempt to send a genuine OS-level modifier
+key was also tried and blocked by the sandbox's Accessibility/TCC
+restrictions, the same class of restriction that blocks
+`screencapture`). Indirect evidence it is wired correctly: in the same
+test run, the injected drag was correctly dispatched to the
+*"pointless dragging"* branch instead (since `ctrl_key` read `false`,
+exactly as SDL reported it) and correctly left the camera unchanged —
+proving the branch dispatch itself is sound, just not proving the
+specific Ctrl-held branch's `camera_revolve()` call fired. That call is
+otherwise identical in shape to the already-proven dolly branch (same
+sensitivity-scaled delta from `g_prev_x`/`g_prev_y`, same
+call-and-clear-node pattern), differing only in which already-verified
+`camera.c` entry point it calls.
+
+### Deviations from the task brief
+
+1. **The brief's gesture list doesn't match viewport.c.** See "What
+   viewport.c actually does" above — there is no middle-drag "flight",
+   no Shift modifier, and no double-click "activate" in the 3D
+   viewport. Ported what the file actually does instead of what the
+   brief assumed it does; the scroll wheel (which the brief also asks
+   for, and which the checked-in verification bar explicitly wants
+   screenshotted) is implemented as a clearly-labeled addition, not a
+   port.
+2. **`viewport_node_for_id()`, new** in `src/viewport.h`/
+   `src/sdl/stubs.c` — the id→`GNode*` read-back `node_at_cursor()`
+   needs. The node table itself already lived in `stubs.c` (Task 3.3);
+   this is the accessor Task 4.2's real `gpu_pick()` will resolve
+   through, same as `node_at_cursor()` already does today against the
+   stub's 0.
+3. **Cursor icon swaps dropped** (GTK's `GDK_DOUBLE_ARROW`/`GDK_FLEUR`/
+   reset-on-leave). Purely cosmetic, no gesture math depends on it, and
+   SDL system-cursor plumbing wasn't otherwise needed by this task.
+4. **Release-event button/modifier reads use the event's own fields**
+   (`ev->button.button == SDL_BUTTON_LEFT`, `SDL_GetModState()`) rather
+   than reproducing GDK's X11-specific "state bitmask still reports the
+   releasing button as down" convention, which SDL's per-button release
+   event has no equivalent of. The natural reading of the same intent.
+5. **GTK's `!gtk_events_pending()` motion-event throttle is not
+   ported.** It exists to avoid working from a stale coordinate under
+   an event backlog; `SDL_PollEvent()` already delivers one event at a
+   time, and dropping it only ever costs a few redundant
+   `node_at_cursor()` calls under an unusually fast drag, never
+   correctness.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -1104,3 +1285,7 @@ code is kept.
 | 2026-08-07 | Port `tmaptext.c` in place behind six new `gpu.h` entry points, no `src/sdl/text3d.cpp` | its GL surface is small (55 calls: one texture, one program, one draw) against a lot of shared glyph-layout math; splitting into a second file would have duplicated that math or `#include`d the original, both worse than extending the contract Task 3.3 already established for `geometry.c` |
 | 2026-08-07 | Text pipeline: depth write ON, matching the GL original exactly, not the "typical" depth-write-off pattern for text overlays | `grep -n "glDepthMask" src/*.c` is empty everywhere in the codebase -- the old renderer never toggled it, so text always drew with GL's default (write enabled), same as scene geometry; matching reality was the brief's own instruction, and drawing all text after all scene geometry in one pass (see "Recording and replay") makes write-order moot anyway |
 | 2026-08-07 | Text draws get their own second recording arena (`g_text_vertices`/`_indices`/`_draws`), replayed after the scene's within the same render pass | different vertex format and pipeline from the scene (`FsvTextVertex` vs `FsvVertex`, alpha-blended+textured vs opaque+lit) rule out reusing the scene's `DrawCmd`/arena; a separate copy pass and transfer buffer is one more small allocation per frame in exchange for zero coupling between two arenas of very different size and churn |
+| 2026-08-07 | Ported viewport.c's *actual* gestures (middle-drag dolly, Ctrl+left-drag revolve), not the brief's assumed ones (middle-drag "flight", Shift for vertical) | read in full: viewport.c has no flight mechanic and no Shift modifier anywhere; porting an imagined gesture instead of the real one would silently diverge from upstream behavior |
+| 2026-08-07 | Scroll-wheel dolly is a labeled addition, not a port | viewport.c/doc/mouse.html have no scroll-wheel gesture at all; the brief and the verification bar both ask for one explicitly, so it is wired using the same `camera_dolly()` entry point and sensitivity shape as the middle-drag case rather than left unimplemented |
+| 2026-08-07 | Explicit `SDL_CaptureMouse()` on middle/Ctrl+left press despite SDL3's own mouse auto-capture already covering it | makes the intent self-documenting in the source rather than resting silently on a hint (`SDL_HINT_MOUSE_AUTO_CAPTURE`) whose default a user or future change could flip |
+| 2026-08-07 | `viewport_node_for_id()` added to the existing `src/sdl/stubs.c`/`src/viewport.h`, not deferred to Task 4.2 | the node table itself already lives in `stubs.c` (Task 3.3); Task 4.2 only has to make `gpu_pick()` return a real id, not build a second lookup path |

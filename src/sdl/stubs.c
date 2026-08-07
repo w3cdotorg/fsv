@@ -12,7 +12,11 @@
  *   dirtree_ / filelist_ -> Task 5.2 (ImGui panels)
  *   window_ ...          -> Task 5.1/5.3 (ImGui menu bar, dialogs)
  *   about ...            -> no About/splash presentation in this frontend
- *   viewport_ ...        -> Task 4.2 (picking owns the node table)
+ *   viewport_ ...        -> the node table lives here since Task 3.3;
+ *                           Task 4.1's src/sdl/input.cpp reads it back
+ *                           through viewport_node_for_id( ) below, and
+ *                           Task 4.2 is what makes gpu_pick( ) (the id
+ *                           this looks up) return anything but 0
  *
  * tmaptext.c's text_*() entry points are NOT here as of Task 3.4: this
  * build compiles src/tmaptext.c for real (see src/sdl/meson.build),
@@ -129,6 +133,21 @@ viewport_pass_node_table(GNode **new_node_table, size_t nz)
 		xfree(node_table);
 	node_table = new_node_table;
 	node_table_size = nz;
+}
+
+/* Node-id -> GNode * lookup for src/sdl/input.cpp's node_at_cursor( )
+ * (Task 4.1). Same bounds check and warning as viewport.c's
+ * node_at_location( ); id 0 ("nothing there") is not looked up at all. */
+GNode *
+viewport_node_for_id(unsigned int id)
+{
+	if (id == 0)
+		return NULL;
+	if (id >= node_table_size) {
+		g_warning("Got node id %u larger than node table size %zu\n", id, node_table_size);
+		return NULL;
+	}
+	return node_table[id];
 }
 
 /* window.h */
