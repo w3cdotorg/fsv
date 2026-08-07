@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 in progress through Task 3.2**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done through Task 3.4**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -856,6 +856,219 @@ render and stay at ~0.9% CPU.
   untracked when `camera.c` removed it ("Attempted to free unknown
   link" at startup).
 
+## Task 3.4 verification (3D text labels via SDL_GPU)
+
+`src/tmaptext.c` no longer contains a single GL call
+(`grep -c "\bgl[A-Z]" src/tmaptext.c` -> `0`, and it no longer includes
+`ogl.h`) and no longer includes `<gio/gio.h>`. Directory and file name
+labels render on both frontends.
+
+### Route chosen: ported tmaptext.c in place, not a new text3d.cpp
+
+The task brief offered a choice: port `tmaptext.c` in place behind a small
+addition to `gpu.h` (mirroring Task 3.3's `geometry.c` split), or create
+`src/sdl/text3d.cpp` per the plan's original file map. **In place**, for
+the same reason Task 3.3 kept `geometry.c` as one file instead of moving
+it into a frontend directory: `tmaptext.c`'s actual GL surface is small
+(55 calls, all texture upload, one shader program, and one VBO/EBO draw)
+and everything else -- `xbm_pixels()`, `get_char_dims()`,
+`get_char_tex_coords()`, and the three `text_draw_*()` layout functions --
+is pure math shared verbatim by both frontends. A `text3d.cpp` would have
+had to either duplicate that math into a second file (churn, and a new
+place for the two copies to drift) or `#include` `tmaptext.c` from it
+(worse). Six new `gpu.h` entry points -- `gpu_text_init()`,
+`gpu_text_begin()`/`gpu_text_end()`, `gpu_text_draw()`,
+`gpu_text_set_color()`, `gpu_text_upload_mvp()` -- get the same result
+with zero duplicated math, implemented once in `src/sdl/gpu.cpp`
+(SDL_GPU) and once in `src/ogl-gpu-compat.c` (epoxy/GL, so `-Dfrontend=gtk`
+keeps its exact old rendering). `src/sdl/meson.build` now lists
+`../tmaptext.c` as a compiled source next to `../geometry.c`, and the
+matching `text_*()` no-ops were deleted from `src/sdl/stubs.c`.
+
+`FsvTextVertex` (`{ pos[3], texcoord[2] }`) is `gpu.h`'s renamed version
+of tmaptext.c's old file-local `TextVertex` struct -- moved because it is
+now a cross-file contract, not because its layout changed.
+
+### Text pipeline state (src/sdl/gpu.cpp's `text_pipeline_for()`)
+
+| State | Value | Why |
+|---|---|---|
+| Blend | `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA`, same factors for color and alpha | `ogl_init()`'s one `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` call; the GL original never calls `glBlendFuncSeparate` |
+| Depth test | ON, `LESS` | Same as the scene's default; `text_pre()`/`text_post()` never touch `glDepthFunc` |
+| Depth **write** | **ON** | See below -- deliberately not the "typical" text-over-geometry choice |
+| Depth bias | never enabled | `GL_POLYGON_OFFSET_FILL` applies to *filled scene* polygons only, and `text_pre()` explicitly `glDisable`s it around every text draw |
+| Cull mode | `BACK`, CCW front face | Same as the scene pipeline; `GL_CULL_FACE` is global GL state that `text_pre()`/`text_post()` never touched, so text was always subject to it too |
+
+**Depth write is ON, not OFF, and that is a deliberate deviation from the
+brief's own "typical" pattern for text-over-geometry.** The brief asked to
+check the old GL code's `glDepthMask` state around text and match it
+exactly: `grep -n "glDepthMask" src/*.c` returns nothing at all, anywhere
+in the codebase. The old renderer never toggled the depth mask, meaning
+text always drew with GL's default (`GL_TRUE`, write enabled) -- the same
+as scene geometry. Matching that exactly, rather than switching to the
+"write off" idiom that is more typical for alpha-blended text overlays,
+is what `enable_depth_write = true` on the text pipeline does. This was
+verified not to matter visually at the scale this renderer draws labels
+at (one pass, few hundred quads, each drawn once) -- see "Recording and
+replay" below for why depth *write* order is a non-issue here regardless.
+
+### Recording and replay: text joins the same pass as geometry
+
+Task 3.3's handoff note called this out in advance: text drawn between
+`gpu_scene_begin()` and `gpu_scene_end()` has to join the same recording,
+because SDL_GPU forbids buffer copies inside a render pass and
+`geometry.c`'s `text_pre()`/`text_draw_*()`/`text_post()` calls are
+interleaved with `gpu_draw()` mid-tree-walk, exactly like the scene
+geometry itself.
+
+The scene's `DrawCmd` recording (vertices/indices/uniform snapshot per
+draw, replayed in one pass at `gpu_scene_end()`) already solved this for
+geometry; text needed the same shape but not the same arena, because its
+vertex format (`FsvTextVertex`: position + texcoord, no normal) and
+pipeline (alpha-blended, textured, its own uniform blocks) are entirely
+different from the scene's. So `gpu.cpp` carries a **second**, parallel
+recording: `g_text_vertices` / `g_text_indices` / `g_text_draws`, reset in
+`gpu_scene_begin()` alongside the scene's, uploaded by its own
+`upload_frame_text_geometry()` (a second copy pass, same command buffer,
+its own transfer buffer -- kept independent because label data is tiny
+and coupling its capacity growth to the scene arena's would buy nothing),
+and replayed by `replay_text_draws()` **after** `replay_draws()` inside
+the *same* render pass (SDL_GPU allows rebinding vertex/index buffers and
+pipelines mid-pass).
+
+Crucially, `gpu_text_draw()` snapshots the current mvp and color into its
+`TextDrawCmd` **at call time**, exactly like `gpu_draw()` does for the
+scene, not once per frame: `treev_draw_recursive()` /
+`mapv_draw_recursive()` (`src/geometry.c`) call `gpu_upload_matrices()`
+(hence `text_upload_mvp()`) and `text_set_color()` afresh at every
+directory node while re-walking the tree for its label pass, so a leaf
+label's mvp is genuinely different from its parent platform's. A single
+frame-wide uniform push would have painted every label with the last
+node's transform and color -- this was caught by reading
+`treev_draw_recursive()` before writing any recording code, not by
+debugging a wrong screenshot.
+
+Drawing all scene geometry before any text (rather than interleaving them
+in tree-walk order, which the immediate-mode GL original effectively did)
+is a small, intentional semantic improvement, not a regression: depth
+*testing* only cares about the final state of the depth buffer at the
+moment a fragment is tested, and by the time text replays, the depth
+buffer already holds the true nearest-surface depth from every node --
+so a label is correctly hidden behind whichever geometry is actually
+closest, regardless of which was recorded first. The old interleaved GL
+order could in principle show the opposite artifact (a label surviving in
+front of a nearer node drawn later in the same frame); this was not
+observed in testing but the recording order removes the possibility
+either way.
+
+`gpu_text_begin()`/`gpu_text_end()` (the `text_pre()`/`text_post()`
+backends) are no-ops on SDL_GPU: the GL original's toggles around every
+text batch (`glDisable(GL_POLYGON_OFFSET_FILL)`, `glEnable(GL_BLEND)`,
+bind/unbind the atlas texture) are all either baked into the text
+pipeline (blend, absent depth bias) or bound per-draw
+(`replay_text_draws()`'s `SDL_BindGPUFragmentSamplers()`). The GL compat
+shim (`src/ogl-gpu-compat.c`) still does the exact old GL state dance,
+because that backend has no per-draw sampler binding to substitute it
+with.
+
+### Atlas format and sampler
+
+The glyph atlas (`xbm_pixels()`'s single-channel bitmap, unchanged) uploads
+as `SDL_GPU_TEXTUREFORMAT_R8_UNORM` -- the direct SDL_GPU equivalent of
+the old code's `GL_RED` texture, sampled as `.r` and used as alpha by
+`text.frag` (ported in Task 3.1; already did exactly this). Upload is a
+one-off transfer-buffer + copy pass in `gpu_text_init()`, on its own
+command buffer, since the atlas never changes after startup and does not
+belong in the per-frame recording.
+
+The sampler is **linear filtering, clamp-to-edge, no mipmaps** -- simpler
+than the old GL sampler, which mixed `GL_LINEAR_MIPMAP_LINEAR`
+minification with `GL_NEAREST` magnification and called
+`glGenerateMipmap()`. With one mip level (the atlas is small and static,
+and mipmapping a font atlas mainly helps distant minification, which this
+renderer does not need enough to justify the extra levels), there is no
+minification filter left to choose between, so `LINEAR`/`LINEAR` is both
+simpler and a fair reading of the brief's "linear filtering,
+clamp-to-edge" instruction. The GL compat shim (`src/ogl-gpu-compat.c`)
+keeps the *exact* old GL sampler parameters unchanged, including the now
+purely decorative `GL_TEXTURE_BORDER_COLOR` call (dead even in the
+original, since the wrap mode is `GL_CLAMP_TO_EDGE`, never
+`GL_CLAMP_TO_BORDER`) -- preserving old GTK behavior byte-for-byte was
+the explicit mandate for that arm.
+
+### Bug caught during verification: missing sampler count on the shader
+
+The first build ran clean and recorded draws correctly (confirmed with
+temporary logging: real vertex data, non-zero mvp, correct black label
+color), but produced **zero visible pixels** -- not wrong-colored ones,
+none at all, even with culling and the depth test forced off for
+isolation. The cause: `create_shader()` (written in Task 3.2 for the
+scene shaders, which use no samplers) hard-coded
+`SDL_GPUShaderCreateInfo.num_samplers = 0` for every shader. `text.frag`
+declares one `sampler2D` (set=2, binding=0, the glyph atlas) --
+SDL_GPU/Metal needs that resource count to match what the shader actually
+binds, and the mismatch failed silently from this renderer's point of
+view (no error on stdout; Metal validation output goes through unified
+logging, not the captured stream). Fixed by giving `create_shader()` an
+optional `num_samplers` parameter (defaulted to 0, so the two scene call
+sites are untouched) and passing 1 for `text.frag`'s shader. This is the
+kind of bug the task's "visual proof mandatory" bar exists to catch: the
+build, the recording, and the draw-call bookkeeping were all correct, and
+only an actual rendered frame revealed the problem.
+
+### Verification
+
+- `grep -c "\bgl[A-Z]" src/tmaptext.c` -> `0`; no `epoxy`/`ogl.h` includes
+  outside `src/ogl-gpu-compat.c`.
+- **macOS / SDL**: clean `meson setup -Dfrontend=sdl` + `ninja` from
+  scratch, zero warnings from any file touched in this task (the two
+  pre-existing `G_LOG_DOMAIN` warnings in `fsv-scan.c`/`test_scanfs.c` are
+  unrelated). `meson test scanfs` -> `1/1 OK`.
+- **Linux / GTK** (Debian bookworm container): clean `meson setup` +
+  `ninja` from scratch, all 11 targets including `src/fsv`, zero warnings.
+  `nm` on the linked binary confirms `gpu_text_init`/`_begin`/`_end`/
+  `_draw`/`_set_color`/`_upload_mvp` and `text_init`/`_draw_straight`/
+  `_draw_straight_rotated`/`_draw_curved` all resolve; `text_init_shaders`
+  (the relocated program-linking helper) is file-local (`t`), as intended.
+  `meson test scanfs` -> `1/1 OK`. A headed GTK run is still not possible
+  in the container (no display), so this arm is verified to build and
+  link, exactly as in Task 3.3.
+- **Visual proof (`--screenshot`, offscreen readback, same mechanism as
+  Tasks 3.2/3.3)**: ran against this repo's own `src/` directory.
+  - **MapV**: every pedestal and directory face carries its name in black,
+    legible text sitting flush on the top face -- `geometry.c`,
+    `camera.c`, `gui.c`, `dialog.c`, `xmaps`, `sdl`, and the smaller
+    files' names squeezed to fit their narrower tops (`get_char_dims()`'s
+    horizontal squeeze, working as before). No boxes around the glyphs,
+    no z-fighting with the pedestal outlines or the folder-icon lines.
+  - **TreeV**: leaf node names in black on every small leaf platform,
+    correctly curved/rotated per `text_draw_straight_rotated()`; the root
+    platform's own name (`src`) renders large and legible, curved along
+    its inner edge in white via `text_draw_curved()`, over the red branch
+    stem, alpha-blended cleanly with no artifacts.
+  - **`tests/fixture`**: the narrow `file1.txt` pedestal shows its
+    (heavily squeezed) label, confirming the fixture path renders text
+    too, not just large real-world trees.
+  - Screenshots taken before *and* after reverting the temporary debug
+    instrumentation used to isolate the sampler-count bug; both are
+    pixel-identical in content (culling/depth-test-always was a debug aid
+    that turned out to be unnecessary once the real bug was fixed --
+    culling and the normal `LESS` depth test were never the problem).
+- `meson test scanfs` -> `1/1 OK` on both arms (repeated after the
+  from-scratch rebuilds above). Idle CPU on a real 2600-ish-node tree
+  (`src`, windowed, post intro-pan): **0.7%** (`ps`), matching Task 3.3's
+  baseline -- text rendering adds one extra copy pass and one pipeline
+  bind per frame, not a busy loop.
+
+### Deviation from the task brief
+
+The brief's file map suggested `src/sdl/text3d.cpp`; this task created no
+such file (see "Route chosen" above) and instead extended `gpu.h` and
+`src/ogl-gpu-compat.c`/`src/sdl/gpu.cpp`, plus `src/sdl/meson.build`
+(added `../tmaptext.c` as a compiled source, and the four `text.*.msl`/
+`text.*.spv` artifacts to `embed-shaders.py`'s input list) and
+`src/sdl/stubs.c` (removed the now-superseded `text_*()` no-ops).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -888,3 +1101,6 @@ code is kept.
 | 2026-08-07 | Expand fans/strips/loops into indexed TRIANGLELIST/LINELIST rather than add strip pipelines | halves the pipeline count and costs only integer appends over data already being copied; no strip pipeline could have served the fan or the loop anyway |
 | 2026-08-07 | Splash screen + "fsv" logo move from geometry.c to about.c | they are the only geometry drawn through the separate *about* shader program, which Task 3.1 never ported; keeping them would force a second pipeline into the shared gpu.h contract that only GTK could implement |
 | 2026-08-07 | Accept 1-pixel lines on SDL_GPU instead of emulating `glLineWidth` with quads | SDL_GPU has no line-width control on any backend; the cursor reads thinner than on GTK, which is a cosmetic difference not worth a quad-expansion path |
+| 2026-08-07 | Port `tmaptext.c` in place behind six new `gpu.h` entry points, no `src/sdl/text3d.cpp` | its GL surface is small (55 calls: one texture, one program, one draw) against a lot of shared glyph-layout math; splitting into a second file would have duplicated that math or `#include`d the original, both worse than extending the contract Task 3.3 already established for `geometry.c` |
+| 2026-08-07 | Text pipeline: depth write ON, matching the GL original exactly, not the "typical" depth-write-off pattern for text overlays | `grep -n "glDepthMask" src/*.c` is empty everywhere in the codebase -- the old renderer never toggled it, so text always drew with GL's default (write enabled), same as scene geometry; matching reality was the brief's own instruction, and drawing all text after all scene geometry in one pass (see "Recording and replay") makes write-order moot anyway |
+| 2026-08-07 | Text draws get their own second recording arena (`g_text_vertices`/`_indices`/`_draws`), replayed after the scene's within the same render pass | different vertex format and pipeline from the scene (`FsvTextVertex` vs `FsvVertex`, alpha-blended+textured vs opaque+lit) rule out reusing the scene's `DrawCmd`/arena; a separate copy pass and transfer buffer is one more small allocation per frame in exchange for zero coupling between two arenas of very different size and churn |
