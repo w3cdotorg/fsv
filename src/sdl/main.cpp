@@ -133,9 +133,37 @@ main(int argc, char **argv)
 			ImGui_ImplSDL3_ProcessEvent(&ev);
 			if (ev.type == SDL_EVENT_QUIT)
 				running = false;
+			// Any event (input, resize, expose, ...) may warrant a
+			// redraw. ImGui_ImplSDL3_ProcessEvent() just queues input
+			// internally when called outside of a NewFrame/Render
+			// pair, so it's safe to keep draining the event queue
+			// below without rendering yet -- the queued input is
+			// consumed at the next ImGui::NewFrame() once we do
+			// render. This is also how window resize/expose events
+			// end up triggering a re-render: they're regular events.
+			g_frame_requested = true;
+		}
+		if (!running)
+			break;
+
+		// Mirror the vendored example: don't bother building or
+		// rendering a frame while minimized.
+		if (SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) {
+			SDL_Delay(10);
+			continue;
 		}
 
 		bool animating = fsv_animation_tick() != 0;
+
+		if (!animating && !g_frame_requested) {
+			// Nothing to draw this iteration: block until the next
+			// event (or 16ms, whichever comes first) instead of
+			// unconditionally building+submitting a frame every
+			// ~16ms, so idle CPU actually stays near zero.
+			SDL_WaitEventTimeout(nullptr, 16);
+			continue;
+		}
+		g_frame_requested = false;
 
 		ImGui_ImplSDLGPU3_NewFrame();
 		ImGui_ImplSDL3_NewFrame();
@@ -144,7 +172,7 @@ main(int argc, char **argv)
 		ImGui::Render();
 
 		ImDrawData *draw_data = ImGui::GetDrawData();
-		const bool minimized = draw_data->DisplaySize.x <= 0.0f ||
+		const bool empty_draw = draw_data->DisplaySize.x <= 0.0f ||
 		    draw_data->DisplaySize.y <= 0.0f;
 
 		SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
@@ -152,7 +180,7 @@ main(int argc, char **argv)
 		SDL_WaitAndAcquireGPUSwapchainTexture(cmd, g_window, &swapchain,
 		    nullptr, nullptr);
 
-		if (swapchain != nullptr && !minimized) {
+		if (swapchain != nullptr && !empty_draw) {
 			// Mandatory before the render pass: uploads vertex/index
 			// buffers for this frame's draw data.
 			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
@@ -170,12 +198,6 @@ main(int argc, char **argv)
 		}
 
 		SDL_SubmitGPUCommandBuffer(cmd);
-
-		// Idle-wait when nothing requested a frame and no animation is
-		// in flight, so idle CPU stays near zero instead of spinning.
-		if (!animating && !g_frame_requested)
-			SDL_WaitEventTimeout(nullptr, 16);
-		g_frame_requested = false;
 	}
 
 	// Shutdown order per the vendored example: platform backend, then
