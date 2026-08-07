@@ -503,6 +503,17 @@ color_read_config( void )
 
 		nvs_change_path( fsvrc, ".." );
 	}
+	/* Close the "group" vector opened above -- mirrors
+	 * color_write_config()'s own nvs_vector_end() before its
+	 * defaultcolor write below. Missing this left the vector open with
+	 * `current` still == the wpattern node: nvs_read_string_default()'s
+	 * scalar_get() (nvstore.c) would then treat "defaultcolor" as if it
+	 * were itself the N-th repeat of a vector key, requiring an N-th
+	 * *sibling* named "defaultcolor" that doesn't exist (there is only
+	 * ever one) -- returning "" -> hex2rgb("") -> black, for every
+	 * unmatched file, on every load after at least one wildcard group
+	 * had ever been saved. */
+	nvs_vector_end( fsvrc );
 	/* Default color */
 	str = nvs_read_string_default( fsvrc, key_wpattern_default_color, default_wpattern_default_color );
 	color_config.by_wpattern.default_color = hex2rgb( str ); /* struct assign */
