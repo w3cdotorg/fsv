@@ -28,6 +28,7 @@ extern "C" {
 #include "fsv-platform.h"
 #include "geometry.h"
 #include "scanfs.h"
+#include "window.h" /* StatusBarID, window_statusbar( ) */
 }
 
 // ---- Platform hook implementations -----------------------------------
@@ -38,6 +39,17 @@ extern "C" {
 
 static bool g_frame_requested = true; // render at least the first frame
 static SDL_Window *g_window = nullptr;
+
+static bool g_imgui_ready = false;   // ImGui backends initialized
+static bool g_quit_requested = false;
+// Set only around scanfs(). gui_update() is the core's generic "let the
+// frontend breathe" call and fires from colexp.c and common.c too, which
+// Tasks 4.1/5.2 will make reachable -- from inside the main loop, i.e.
+// potentially between its imgui_new_frame() and submit_frame(). Rendering
+// a nested frame there would re-enter ImGui::NewFrame(). During the scan
+// there is no such outer frame, and the main loop is not running, which
+// is exactly when this frontend needs to drive one itself.
+static bool g_scanning = false;
 
 static void
 sdl_request_frame(void)
@@ -126,7 +138,16 @@ enter_mode(FsvMode mode)
 static bool
 load_filesystem(const char *dir, FsvMode mode)
 {
+	// Before scanning, not after: the scan renders progress frames (see
+	// gui_update()), and FSV_NONE is what tells draw_scene() there is no
+	// geometry to walk yet. globals.fsv_mode is zero-initialized, which
+	// is FSV_DISCV, not FSV_NONE.
+	globals.fsv_mode = FSV_NONE;
+
+	g_scanning = true;
 	scanfs(dir);
+	g_scanning = false;
+
 	if (globals.fstree == NULL || root_dnode == NULL) {
 		SDL_Log("fsv: nothing to visualize in \"%s\"", dir);
 		return false;
@@ -136,7 +157,6 @@ load_filesystem(const char *dir, FsvMode mode)
 	globals.history = NULL;
 	globals.current_node = root_dnode;
 
-	globals.fsv_mode = FSV_NONE;
 	enter_mode(mode);
 	return true;
 }
@@ -150,9 +170,168 @@ draw_scene(void)
 	// TRUE = high detail: node labels (Task 3.4) and the node cursor.
 	// The GTK frontend passes TRUE from its render() callback too; only
 	// picking passes FALSE.
+	//
+	// FSV_NONE means "no geometry laid out yet" -- during the scan, and
+	// between load_filesystem() and enter_mode(). Note FSV_NONE is 4, not
+	// 0, so this guard only holds because load_filesystem() assigns it
+	// before scanning; a zero-initialized globals.fsv_mode reads as
+	// FSV_DISCV and would send geometry_draw() into an empty tree.
 	if (globals.fsv_mode != FSV_NONE)
 		geometry_draw(TRUE);
 	gpu_scene_end();
+}
+
+// Builds this frame's ImGui content between these two: imgui_new_frame(),
+// widgets, ImGui::Render(), submit_frame(). Split this way because the
+// scan-progress frames below need the same command-buffer/pass sequence
+// with different (and much simpler) UI content.
+static void
+imgui_new_frame(void)
+{
+	ImGui_ImplSDLGPU3_NewFrame();
+	ImGui_ImplSDL3_NewFrame();
+	ImGui::NewFrame();
+}
+
+// Records and submits one frame: the scene pass, then ImGui on top of the
+// same swapchain texture. Expects ImGui::Render() to have been called.
+static void
+submit_frame(void)
+{
+	ImDrawData *draw_data = ImGui::GetDrawData();
+	const bool empty_draw = draw_data == nullptr ||
+	    draw_data->CmdListsCount == 0 ||
+	    draw_data->DisplaySize.x <= 0.0f ||
+	    draw_data->DisplaySize.y <= 0.0f;
+
+	SDL_GPUCommandBuffer *cmd = gpu_frame_begin();
+	if (cmd == nullptr) {
+		// Nothing was drawn, so the redraw this frame owed is still
+		// owed. Without re-arming, the loop can go back to blocking in
+		// SDL_WaitEventTimeout() and sit on a stale image until some
+		// unrelated event happens to wake it.
+		g_frame_requested = true;
+		return;
+	}
+
+	SDL_GPUTexture *swapchain = gpu_frame_swapchain_texture();
+	if (swapchain == nullptr) {
+		// Same reasoning; the command buffer still has to be submitted
+		// (gpu_frame_end()) to release the acquired swapchain.
+		g_frame_requested = true;
+	} else {
+		// Mandatory before any render pass: uploads ImGui's
+		// vertex/index buffers for this frame (a copy pass, which
+		// cannot be nested inside a render pass).
+		if (!empty_draw)
+			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
+
+		// Pass 1: the 3-D scene. Clears color + depth.
+		draw_scene();
+
+		// Pass 2: ImGui on top of the same swapchain texture,
+		// LOADOP_LOAD so the scene survives, and with no depth target
+		// so the UI is never depth-tested.
+		if (!empty_draw) {
+			SDL_GPUColorTargetInfo target = {};
+			target.texture = swapchain;
+			target.load_op = SDL_GPU_LOADOP_LOAD;
+			target.store_op = SDL_GPU_STOREOP_STORE;
+
+			SDL_GPURenderPass *pass =
+			    SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
+			ImGui_ImplSDLGPU3_RenderDrawData(draw_data, cmd, pass);
+			SDL_EndGPURenderPass(pass);
+		}
+	}
+
+	gpu_frame_end();
+}
+
+// ---- Scan progress ---------------------------------------------------
+//
+// scanfs() blocks this thread for the whole scan -- minutes on a large
+// tree. The GTK frontend stays alive through it because scanfs.c calls
+// gui_update() after every directory entry (scanfs.c:174) and gui.c's
+// implementation iterates the GLib main loop, which repaints and services
+// the window manager. With a no-op gui_update() the SDL window never
+// pumps its event queue and macOS marks the app "Not Responding".
+//
+// So gui_update() is implemented here rather than stubbed: it pumps
+// events, keeps ImGui fed, and paints a progress overlay. It is called
+// per directory entry, hence the time-based throttle -- rendering a frame
+// per entry would dominate the scan.
+
+// Latest message per status bar, as pushed by the core. scanfs.c puts
+// "Scanning: <dir>" in SB_RIGHT for every directory it enters, which is
+// the progress readout this frontend has; SB_LEFT gets a stats/sec figure
+// from scan_monitor(), a GLib timeout that never fires here (there is no
+// GLib main loop), so it stays empty in practice.
+static char g_statusbar[2][512];
+
+extern "C" void
+window_statusbar(StatusBarID sb_id, const char *message)
+{
+	const int i = (sb_id == SB_LEFT) ? 0 : 1;
+	SDL_strlcpy(g_statusbar[i], message != NULL ? message : "",
+	    sizeof(g_statusbar[i]));
+}
+
+extern "C" void
+gui_update(void)
+{
+	if (!g_scanning || !g_imgui_ready)
+		return; // outside the scan, or --screenshot: nothing to drive
+
+	// ~100ms between frames. The scan calls this per directory entry
+	// (tens of thousands of times per second on a warm cache), so the
+	// throttle is what keeps the progress display from costing more
+	// than the scan itself.
+	static Uint64 last_ms = 0;
+	const Uint64 now = SDL_GetTicks();
+	if (last_ms != 0 && now - last_ms < 100)
+		return;
+	last_ms = now;
+
+	SDL_Event ev;
+	while (SDL_PollEvent(&ev)) {
+		ImGui_ImplSDL3_ProcessEvent(&ev);
+		if (ev.type == SDL_EVENT_QUIT)
+			// scanfs() has no abort path, so this cannot stop the
+			// scan; main() checks the flag once it returns and
+			// exits before opening the main loop. The window stays
+			// responsive in the meantime, which is the point.
+			g_quit_requested = true;
+	}
+
+	if (SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED)
+		return;
+
+	imgui_new_frame();
+
+	// A plain overlay in the corner: no title bar, no interaction, no
+	// saved settings. Nothing else is on screen during the scan.
+	const ImGuiViewport *vp = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(
+	    ImVec2(vp->WorkPos.x + 20.0f, vp->WorkPos.y + 20.0f));
+	ImGui::SetNextWindowBgAlpha(0.0f);
+	if (ImGui::Begin("##scan", nullptr,
+	    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+	    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+	    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
+		ImGui::Text("Scanning%s", g_quit_requested ?
+		    " (quitting after this scan)..." : "...");
+		if (g_statusbar[1][0] != '\0')
+			ImGui::TextUnformatted(g_statusbar[1]);
+		if (g_statusbar[0][0] != '\0')
+			ImGui::TextUnformatted(g_statusbar[0]);
+	}
+	ImGui::End();
+	ImGui::Render();
+
+	// globals.fsv_mode is FSV_NONE throughout the scan, so the scene
+	// pass inside submit_frame() clears the window and draws nothing.
+	submit_frame();
 }
 
 // ---- Command line ----------------------------------------------------
@@ -234,6 +413,25 @@ main(int argc, char **argv)
 	// equivalent of.
 	color_init();
 
+	// Before the scan, not after: scanning a large tree takes minutes,
+	// and gui_update() paints its progress overlay through these
+	// backends the whole time. --screenshot skips them (and so renders
+	// no progress frames) because it never opens a window loop.
+	if (screenshot_path == nullptr) {
+		IMGUI_CHECKVERSION();
+		ImGui::CreateContext();
+		ImGui::StyleColorsDark();
+
+		ImGui_ImplSDL3_InitForSDLGPU(g_window);
+		ImGui_ImplSDLGPU3_InitInfo init_info = {};
+		init_info.Device = device;
+		init_info.ColorTargetFormat =
+		    SDL_GetGPUSwapchainTextureFormat(device, g_window);
+		init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
+		ImGui_ImplSDLGPU3_Init(&init_info);
+		g_imgui_ready = true;
+	}
+
 	if (!load_filesystem(root_dir, initial_mode))
 		return 1;
 
@@ -263,19 +461,9 @@ main(int argc, char **argv)
 		return ok ? 0 : 1;
 	}
 
-	IMGUI_CHECKVERSION();
-	ImGui::CreateContext();
-	ImGui::StyleColorsDark();
-
-	ImGui_ImplSDL3_InitForSDLGPU(g_window);
-	ImGui_ImplSDLGPU3_InitInfo init_info = {};
-	init_info.Device = device;
-	init_info.ColorTargetFormat =
-	    SDL_GetGPUSwapchainTextureFormat(device, g_window);
-	init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
-	ImGui_ImplSDLGPU3_Init(&init_info);
-
-	bool running = true;
+	// A quit arriving during the scan cannot abort scanfs(), so it takes
+	// effect here instead, before the main loop opens.
+	bool running = !g_quit_requested;
 	while (running) {
 		SDL_Event ev;
 		while (SDL_PollEvent(&ev)) {
@@ -314,52 +502,14 @@ main(int argc, char **argv)
 		}
 		g_frame_requested = false;
 
-		ImGui_ImplSDLGPU3_NewFrame();
-		ImGui_ImplSDL3_NewFrame();
-		ImGui::NewFrame();
+		imgui_new_frame();
 		// No ImGui windows yet: the menu bar and the dirtree/filelist
 		// panels are Tasks 5.1/5.2. The backends stay wired up (and
-		// the pass below stays in the frame) so that landing them is
-		// a matter of adding widgets here, not re-plumbing the frame.
+		// the pass inside submit_frame() stays in the frame) so that
+		// landing them is a matter of adding widgets here, not
+		// re-plumbing the frame.
 		ImGui::Render();
-
-		ImDrawData *draw_data = ImGui::GetDrawData();
-		const bool empty_draw = draw_data->CmdListsCount == 0 ||
-		    draw_data->DisplaySize.x <= 0.0f ||
-		    draw_data->DisplaySize.y <= 0.0f;
-
-		SDL_GPUCommandBuffer *cmd = gpu_frame_begin();
-		if (cmd == nullptr)
-			continue;
-		SDL_GPUTexture *swapchain = gpu_frame_swapchain_texture();
-
-		if (swapchain != nullptr) {
-			// Mandatory before any render pass: uploads ImGui's
-			// vertex/index buffers for this frame (a copy pass,
-			// which cannot be nested inside a render pass).
-			if (!empty_draw)
-				ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
-
-			// Pass 1: the 3-D scene. Clears color + depth.
-			draw_scene();
-
-			// Pass 2: ImGui on top of the same swapchain texture,
-			// LOADOP_LOAD so the scene survives, and with no depth
-			// target so the UI is never depth-tested.
-			if (!empty_draw) {
-				SDL_GPUColorTargetInfo target = {};
-				target.texture = swapchain;
-				target.load_op = SDL_GPU_LOADOP_LOAD;
-				target.store_op = SDL_GPU_STOREOP_STORE;
-
-				SDL_GPURenderPass *pass =
-				    SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
-				ImGui_ImplSDLGPU3_RenderDrawData(draw_data, cmd, pass);
-				SDL_EndGPURenderPass(pass);
-			}
-		}
-
-		gpu_frame_end();
+		submit_frame();
 	}
 
 	// Shutdown order per the vendored example: platform backend, then
