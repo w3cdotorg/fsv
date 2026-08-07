@@ -74,6 +74,7 @@
 
 #include "nvstore.h"
 
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,6 +292,61 @@ decode_value( const char *v )
 }
 
 
+/**** Locale-independent float formatting ****************/
+//
+// nvs_write_float()/nvs_read_float() round-trip a double through
+// snprintf("%.17g")/atof(), and both of those consult the process's
+// *current* LC_NUMERIC locale for the decimal-point character -- not
+// necessarily '.'. This is live, not theoretical: src/fsv.c calls
+// setlocale(LC_ALL, "") on the GTK frontend, so a user running under
+// e.g. LC_NUMERIC=fr_FR.UTF-8 would get "1,5" out of snprintf() here,
+// which atof() -- back in whatever locale is active at *read* time,
+// possibly a different one on a shared config file -- would parse as
+// 1.0, silently truncating at the comma. (Currently dead code in this
+// codebase: color.c never calls either function. Still part of the
+// nvstore.h contract this task implements, so it gets the same
+// correctness bar as every path that *is* exercised.)
+//
+// Fixed by normalizing around the locale's own separator rather than
+// forcing the whole process into the C locale: nvstore.c is a leaf
+// library with no business calling setlocale() itself (main() owns
+// that), and this project deliberately keeps lib/ dependency-free
+// (see this file's own header comment), so no locale_t/uselocale()
+// (POSIX, not universally available the same way on every libc this
+// project targets) and no new glib dependency either --
+// localeconv() is plain ISO C89, always available, no new dependency.
+
+static char
+locale_decimal_point( void )
+{
+	const char *dp = localeconv( )->decimal_point;
+
+	return (dp != NULL && dp[0] != '\0') ? dp[0] : '.';
+}
+
+
+/* Returns a newly allocated copy of `s` with every occurrence of `from`
+ * replaced by `to`. Used in both directions: on write, the locale's
+ * decimal point (whatever snprintf() just used) -> '.', so the file
+ * always stores the canonical, locale-independent form; on read, '.'
+ * (what the file always stores) -> the *current* locale's decimal
+ * point, so atof() -- which only understands its own locale's
+ * separator -- parses the value the writer intended rather than
+ * truncating at the first character it doesn't recognize. */
+static char *
+translate_char( const char *s, char from, char to )
+{
+	char *out = xstrdup( s );
+	char *p;
+
+	if (from != to)
+		for (p = out; *p != '\0'; p++)
+			if (*p == from)
+				*p = to;
+	return out;
+}
+
+
 /**** File I/O ****************/
 
 static char *
@@ -338,32 +394,77 @@ write_children( FILE *f, NVSNode *parent, int depth )
 }
 
 
+/* Atomic: write to "<filename>.tmp" then rename() over the real path.
+ * rename() on the same filesystem is a single directory-entry swap on
+ * every POSIX platform this project targets, so a crash or kill
+ * mid-write leaves either the old file untouched or the new one fully
+ * written -- never a half-written file at `nvs->filename` itself. That
+ * matters here specifically because load_file() below now *trusts*
+ * this file's structure (rather than tolerating a truncated write with
+ * a best-effort parse): a save that dies partway through must not be
+ * able to hand the next nvs_open() a corrupt structural read. */
 static NVS_BOOL
 save_file( NVStore *nvs )
 {
-	FILE *f = fopen( nvs->filename, "w" );
+	char *tmp_path;
+	size_t len;
+	FILE *f;
+	NVS_BOOL ok = 0;
 
-	if (f == NULL)
+	len = strlen( nvs->filename );
+	tmp_path = xmalloc( len + 5 ); /* + ".tmp" + '\0' */
+	snprintf( tmp_path, len + 5, "%s.tmp", nvs->filename );
+
+	f = fopen( tmp_path, "w" );
+	if (f == NULL) {
+		xfree( tmp_path );
 		return 0;
+	}
 	write_children( f, nvs->root, 0 );
-	fclose( f );
-	return 1;
+	if (fclose( f ) == 0)
+		ok = (rename( tmp_path, nvs->filename ) == 0);
+	xfree( tmp_path );
+	return ok;
 }
 
 
 #define NVS_MAX_DEPTH 64
 
+/* Parses `nvs->filename` into `nvs->root`'s children. Trusts the file's
+ * *structure* -- every line's indentation must be either the same as,
+ * one deeper than, or shallower than the previous line's, with every
+ * ancestor slot up to that depth genuinely populated by an *unbroken*
+ * chain of lines already seen -- rather than tolerating a corrupt one
+ * with a best-effort guess. A hand-edited or truncated (e.g. crash
+ * mid-write, before save_file()'s atomic rename() existed) file that
+ * violates that -- a first line that starts with a tab, or any depth
+ * jump greater than +1 -- previously read `stack_at_depth[depth - 1]`
+ * uninitialized (a wild pointer, not merely a wrong one: the array had
+ * no initializer at all) and node_append_child()'d through it. Now:
+ * abandon the whole load and fall back to defaults, logging once,
+ * rather than build a tree on top of a first bad line -- a skip-this-
+ * line recovery would still leave later, structurally-fine-looking
+ * lines silently re-parenting themselves under a *stale* slot from an
+ * earlier, unrelated subtree (this function clears every slot deeper
+ * than the current line specifically to prevent that staleness, which
+ * is what makes "just skip the bad line and keep going" unsafe here:
+ * the slot invalidation and the abandon-on-error path are the same
+ * mechanism, not two independent choices). */
 static void
 load_file( NVStore *nvs )
 {
 	FILE *f = fopen( nvs->filename, "r" );
 	NVSNode *stack_at_depth[NVS_MAX_DEPTH];
 	char line[4096];
+	int i;
 
 	if (f == NULL)
 		return; /* No config yet -- every *_default() call below just
 		         * returns its default, same as the old all-stub
 		         * behavior for a fresh install. */
+
+	for (i = 0; i < NVS_MAX_DEPTH; i++)
+		stack_at_depth[i] = NULL;
 
 	while (fgets( line, sizeof(line), f ) != NULL) {
 		size_t len = strlen( line );
@@ -382,7 +483,11 @@ load_file( NVStore *nvs )
 		if (depth >= NVS_MAX_DEPTH)
 			depth = NVS_MAX_DEPTH - 1; /* this writer never nests
 			                            * this deep; defends against a
-			                            * hand-edited file that does */
+			                            * hand-edited file that does --
+			                            * still subject to the same
+			                            * populated-parent-slot check
+			                            * below, so a garbage read here
+			                            * still can't happen */
 
 		rest = line + depth;
 		if (rest[0] == '\0')
@@ -400,11 +505,32 @@ load_file( NVStore *nvs )
 			continue; /* malformed -- skip rather than crash */
 		}
 
+		/* The real fix: depth > 0 requires stack_at_depth[depth - 1] to
+		 * be genuinely populated by the *immediately enclosing* line
+		 * already parsed -- not stale (see the file-level comment
+		 * above) and never uninitialized. A first line starting with a
+		 * tab, or any jump of more than one level, fails this. */
+		if (depth > 0 && stack_at_depth[depth - 1] == NULL) {
+			fprintf( stderr,
+			    "nvstore: malformed config file '%s' (bad indentation) "
+			    "-- ignoring it, using defaults\n", nvs->filename );
+			node_clear_children( nvs->root ); /* drop whatever partial tree was parsed so far */
+			xfree( value );
+			fclose( f );
+			return;
+		}
+
 		parent = (depth == 0) ? nvs->root : stack_at_depth[depth - 1];
 		node = node_new( name );
 		node->value = value; /* already decoded, or NULL */
 		node_append_child( parent, node );
 		stack_at_depth[depth] = node;
+		/* This line ends any subtree that was open deeper than it --
+		 * invalidate those slots so a later, shallower-then-deeper line
+		 * can never inherit a stale parent pointer left over from an
+		 * earlier, unrelated sibling's subtree. */
+		for (i = depth + 1; i < NVS_MAX_DEPTH; i++)
+			stack_at_depth[i] = NULL;
 	}
 	fclose( f );
 }
@@ -617,6 +743,18 @@ nvs_read_int( NVStore *nvs, const char *path )
 }
 
 
+/* Returns -1 -- a documented sentinel, not "tokens[0]" -- when the key
+ * is absent OR present with a value that matches none of `tokens` (a
+ * hand-edited/corrupt file, or a token set that changed between
+ * versions). Distinguishing "no match" from "matched index 0" matters
+ * to nvs_read_int_token_default() below: silently aliasing an
+ * unrecognized value to tokens[0] would mean a corrupt colormode value
+ * on disk always came back as COLOR_BY_NODETYPE (index 0) instead of
+ * whatever default_val the caller actually asked for. The only caller
+ * in this codebase (color.c) only ever uses the *_default() wrapper,
+ * never this function directly, so redefining "not found" here changes
+ * no observable behavior for it -- only for a future direct caller,
+ * which this comment exists to warn. */
 int
 nvs_read_int_token( NVStore *nvs, const char *path, const char **tokens )
 {
@@ -624,11 +762,11 @@ nvs_read_int_token( NVStore *nvs, const char *path, const char **tokens )
 	int i;
 
 	if (v == NULL)
-		return 0;
+		return -1;
 	for (i = 0; tokens[i] != NULL; i++)
 		if (!strcmp( tokens[i], v ))
 			return i;
-	return 0;
+	return -1;
 }
 
 
@@ -636,8 +774,19 @@ double
 nvs_read_float( NVStore *nvs, const char *path )
 {
 	const char *v = scalar_get( nvs, path );
+	char *localized;
+	double result;
 
-	return v != NULL ? atof( v ) : 0.0;
+	if (v == NULL)
+		return 0.0;
+	/* The file always stores '.' (nvs_write_float()'s own doing) --
+	 * translate it to whatever the *current* locale's atof() expects
+	 * before parsing. See the "Locale-independent float formatting"
+	 * section above. */
+	localized = translate_char( v, '.', locale_decimal_point( ) );
+	result = atof( localized );
+	xfree( localized );
+	return result;
 }
 
 
@@ -667,7 +816,16 @@ nvs_read_int_default( NVStore *nvs, const char *path, int default_val )
 int
 nvs_read_int_token_default( NVStore *nvs, const char *path, const char **tokens, int default_val )
 {
-	return scalar_present( nvs, path ) ? nvs_read_int_token( nvs, path, tokens ) : default_val;
+	int result;
+
+	if (!scalar_present( nvs, path ))
+		return default_val;
+	/* Present, but nvs_read_int_token() returns -1 ("no match") for a
+	 * value that doesn't correspond to any of `tokens` -- treated the
+	 * same as "absent" here, not as index 0. See that function's own
+	 * doc comment. */
+	result = nvs_read_int_token( nvs, path, tokens );
+	return result >= 0 ? result : default_val;
 }
 
 
@@ -713,9 +871,16 @@ void
 nvs_write_float( NVStore *nvs, const char *path, double val )
 {
 	char buf[64];
+	char *canonical;
 
 	snprintf( buf, sizeof(buf), "%.17g", val );
-	scalar_set( nvs, path, buf );
+	/* snprintf() just used the *current* locale's decimal point --
+	 * normalize it to '.' so the file is readable back regardless of
+	 * what locale is active next time. See the "Locale-independent
+	 * float formatting" section above. */
+	canonical = translate_char( buf, locale_decimal_point( ), '.' );
+	scalar_set( nvs, path, canonical );
+	xfree( canonical );
 }
 
 
