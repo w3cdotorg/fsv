@@ -9,13 +9,21 @@
  * SPDX-License-Identifier:  LGPL-2.1-or-later
  */
 
+/* Ported to src/gpu.h for the SDL_GPU / Metal port (see docs/PORTING.md
+ * Task 3.4): this file keeps every bit of font-atlas generation and
+ * glyph-layout math it always had -- xbm_pixels( ), get_char_dims( ),
+ * get_char_tex_coords( ), and the three text_draw_*( ) entry points are
+ * untouched apart from the vertex struct now living in gpu.h (so both
+ * frontends agree on its layout). What moved out is exactly the GL calls:
+ * texture upload, shader program, and the VBO/EBO draw, which are now
+ * gpu_text_init( )/gpu_text_draw( )/etc., implemented once per frontend
+ * (src/sdl/gpu.cpp for SDL_GPU, src/ogl-gpu-compat.c for GTK/epoxy) --
+ * the same split geometry.c went through in Task 3.3. */
 
 #include "common.h"
 #include "tmaptext.h"
 
-#include "ogl.h"
-
-#include <gio/gio.h>
+#include "gpu.h"
 
 /* Bitmap font definition */
 #define char_width 16
@@ -30,32 +38,6 @@
 /* Normal character aspect ratio */
 static const double char_aspect_ratio = (double)char_width / (double)char_height;
 
-/* Font texture object */
-static GLuint text_tobj;
-
-// Global state for modern GL
-static struct FsvGlTextState {
-	// Don't need a VAO as we just use the one global VAO which is
-	// always active.
-
-	GLuint program; // Handle for the shaders
-
-	// These _location variables are handles to input 'slots' in the
-	// vertex shader.
-	GLint mvp_location;
-	GLint position_location;
-	GLint texcoord_location;
-	GLint texture_location;
-	GLint color_location;
-
-	// Projection and modelview matrices (using cglm library) from the
-	// global state.
-} glt;
-
-typedef struct {
-	GLfloat position[3];
-	GLfloat texCoord[2];
-} TextVertex;
 
 /* Simple XBM parser - bits to bytes. Caller assumes responsibility for
  * freeing the returned pixel buffer */
@@ -88,110 +70,20 @@ xbm_pixels( const byte *xbm_bits, int pixel_count )
 }
 
 
-// Initialize OpenGL text shaders
-static GLuint
-text_init_shaders()
-{
-	GBytes *source;
-	GLuint program = 0, vertex = 0, fragment = 0;
-
-	/* load the vertex shader */
-	source = g_resources_lookup_data("/jabl/fsv/fsv-text-vertex.glsl", 0, NULL);
-	vertex = ogl_create_shader(GL_VERTEX_SHADER, g_bytes_get_data(source, NULL));
-	g_bytes_unref(source);
-	if (vertex == 0)
-		goto out;
-
-	/* load the fragment shader */
-	source = g_resources_lookup_data("/jabl/fsv/fsv-text-fragment.glsl", 0, NULL);
-	fragment = ogl_create_shader(GL_FRAGMENT_SHADER, g_bytes_get_data(source, NULL));
-	g_bytes_unref(source);
-	if (fragment == 0)
-		goto out;
-
-	/* link the vertex and fragment shaders together */
-	program = glCreateProgram();
-	glAttachShader(program, vertex);
-	glAttachShader(program, fragment);
-	glLinkProgram(program);
-
-	GLint status = 0;
-	glGetProgramiv(program, GL_LINK_STATUS, &status);
-	if (status == GL_FALSE)
-	{
-		GLint log_len = 0;
-		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
-
-		char *buffer = g_malloc(log_len + 1);
-		glGetProgramInfoLog(program, log_len, NULL, buffer);
-
-		g_error("Linking failure in program: %s", buffer);
-
-		g_free(buffer);
-
-		glDeleteProgram(program);
-		program = 0;
-
-		goto out;
-	}
-
-	/* get the location of the "mvp" uniform */
-	glt.mvp_location = glGetUniformLocation(program, "mvp");
-	glt.color_location = glGetUniformLocation(program, "color");
-	glt.texture_location = glGetUniformLocation(program, "tex");
-
-	/* get the location of the "position" and "color" attributes */
-	glt.position_location = glGetAttribLocation(program, "position");
-	glt.texcoord_location = glGetAttribLocation(program, "texcoord");
-
-	/* the individual shaders can be detached and destroyed */
-	glDetachShader(program, vertex);
-	glDetachShader(program, fragment);
-
-out:
-	if (vertex != 0)
-		glDeleteShader(vertex);
-	if (fragment != 0)
-		glDeleteShader(fragment);
-
-	return program;
-}
-
 /* Initializes texture-mapping state for drawing text */
 void
 text_init( void )
 {
-	float border_color[] = { 0.0, 0.0, 0.0, 1.0 };
 	byte *charset_pixels;
 
-	/* Set up text texture object */
-	glGenTextures( 1, &text_tobj );
-	glBindTexture( GL_TEXTURE_2D, text_tobj );
-
-	/* Set up texture-mapping parameters */
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
-
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
-	glTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border_color );
-
-	/* Load texture */
-	glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
+	/* Load texture. The old unpack-alignment, single-channel format,
+	 * mipmap generation and sampler parameter calls all moved into
+	 * gpu_text_init( ) -- see the note there and in docs/PORTING.md
+	 * about the sampler differing (by design) between the two
+	 * backends. */
 	charset_pixels = xbm_pixels( charset_bits, charset_width * charset_height );
-	// In modern GL GL_RED is the only supported single channel texture format.
-	// But actually the texture is an alpha map that decides where the color
-	// (specified via a uniform) will be shown and where it will be transparent.
-	// In the fragment shader the red component in the texture is swizzled to
-	// the alpha component of the output color.
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, charset_width, charset_height,
-		     0, GL_RED, GL_UNSIGNED_BYTE, charset_pixels);
-	glGenerateMipmap(GL_TEXTURE_2D);
+	gpu_text_init( charset_pixels, charset_width, charset_height );
 	xfree( charset_pixels );
-
-	glt.program = text_init_shaders();
-	if (!glt.program)
-		g_error("Compiling shaders failed");
 }
 
 
@@ -199,9 +91,7 @@ text_init( void )
 void
 text_pre( void )
 {
-	glDisable( GL_POLYGON_OFFSET_FILL );
-	glEnable( GL_BLEND );
-	glBindTexture( GL_TEXTURE_2D, text_tobj );
+	gpu_text_begin( );
 }
 
 
@@ -209,9 +99,7 @@ text_pre( void )
 void
 text_post( void )
 {
-	glDisable( GL_BLEND );
-	glEnable( GL_POLYGON_OFFSET_FILL );
-	glBindTexture(GL_TEXTURE_2D, 0);
+	gpu_text_end( );
 }
 
 
@@ -280,33 +168,21 @@ get_char_tex_coords( int c, XYvec *t_c0, XYvec *t_c1 )
 }
 
 
-// Draw a set of text vertices with a specified color.
-// Use indexed drawing.
-// The vertices for each char must be in order
-// LL - LR - UL - UR
+/* Draw a set of text vertices with a specified color.
+ * Use indexed drawing.
+ * The vertices for each char must be in order
+ * LL - LR - UL - UR */
 static void
-draw_text_vertices(TextVertex *tv, size_t nchars)
+draw_text_vertices(FsvTextVertex *tv, size_t nchars)
 {
-	GLsizeiptr ntv = nchars * 4;
-	GLsizei idx_len = nchars * 6;
-	static GLuint vbo;
-	if (!vbo)
-		glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(TextVertex) * ntv, tv, GL_STREAM_DRAW);
+	size_t idx_len = nchars * 6;
+	unsigned int *idx;
+	size_t i;
 
-	glEnableVertexAttribArray(glt.position_location);
-	glVertexAttribPointer(glt.position_location, 3, GL_FLOAT, GL_FALSE,
-			      sizeof(TextVertex), (void *)offsetof(TextVertex, position));
-
-	glEnableVertexAttribArray(glt.texcoord_location);
-	glVertexAttribPointer(glt.texcoord_location, 2, GL_FLOAT, GL_FALSE,
-			      sizeof(TextVertex), (void *)offsetof(TextVertex, texCoord));
-
-	GLushort *idx = NEW_ARRAY(GLushort, idx_len);
-	for (size_t i = 0; i < nchars; i++) {
+	idx = NEW_ARRAY(unsigned int, idx_len);
+	for (i = 0; i < nchars; i++) {
 		size_t j = 6 * i;  // 6 indices per char
-		GLushort v = 4 * i;  // 4 Vertices per char
+		unsigned int v = 4 * i;  // 4 Vertices per char
 		// First triangle in a character
 		idx[j] = v;
 		idx[j + 1] = v + 1;
@@ -317,20 +193,7 @@ draw_text_vertices(TextVertex *tv, size_t nchars)
 		idx[j + 5] = v + 3;
 	}
 
-	static GLuint ebo;
-	if (!ebo)
-		glGenBuffers(1, &ebo);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLushort) * idx_len, idx, GL_STREAM_DRAW);
-
-	glUseProgram(glt.program);
-
-	// Set the texture unit. TODO. Move to text_init()?
-	glUniform1i(glt.texture_location, 0);
-	glDrawElements(GL_TRIANGLES, idx_len, GL_UNSIGNED_SHORT, 0);
-	glUseProgram(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	gpu_text_draw(tv, nchars * 4, idx, idx_len);
 	xfree(idx);
 }
 
@@ -352,20 +215,19 @@ text_draw_straight( const char *text, const XYZvec *text_pos, const XYvec *text_
 	c1.x = c0.x + cdims.x;
 	c1.y = c0.y + cdims.y;
 
-	GLsizeiptr nverts = len * 4;
-	TextVertex *tv = NEW_ARRAY(TextVertex, nverts);
+	FsvTextVertex *tv = NEW_ARRAY(FsvTextVertex, len * 4);
 	for (size_t i = 0; i < len; i++) {
 		get_char_tex_coords( text[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Each char defined by corners in zigzag order
 		// Lower left {pos, texcoords}
-		tv[j] = (TextVertex){{c0.x, c0.y, text_pos->z}, {t_c0.x, t_c0.y}};
+		tv[j] = (FsvTextVertex){{c0.x, c0.y, text_pos->z}, {t_c0.x, t_c0.y}};
 		// Lower right
-		tv[j + 1] = (TextVertex){{c1.x, c0.y, text_pos->z}, {t_c1.x, t_c0.y}};
+		tv[j + 1] = (FsvTextVertex){{c1.x, c0.y, text_pos->z}, {t_c1.x, t_c0.y}};
 		// Upper left
-		tv[j + 2] = (TextVertex){{c0.x, c1.y, text_pos->z}, {t_c0.x, t_c1.y}};
+		tv[j + 2] = (FsvTextVertex){{c0.x, c1.y, text_pos->z}, {t_c0.x, t_c1.y}};
 		// Upper right
-		tv[j + 3] = (TextVertex){{c1.x, c1.y, text_pos->z}, {t_c1.x, t_c1.y}};
+		tv[j + 3] = (FsvTextVertex){{c1.x, c1.y, text_pos->z}, {t_c1.x, t_c1.y}};
 
 		c0.x = c1.x;
 		c1.x += cdims.x;
@@ -406,21 +268,20 @@ text_draw_straight_rotated( const char *text, const RTZvec *text_pos, const XYve
 	c1.x = c0.x + hdelta.x + vdelta.x;
 	c1.y = c0.y + hdelta.y + vdelta.y;
 
-	GLsizeiptr nverts = len * 4;
-	TextVertex *tv = NEW_ARRAY(TextVertex, nverts);
+	FsvTextVertex *tv = NEW_ARRAY(FsvTextVertex, len * 4);
 	for (size_t i = 0; i < len; i++) {
 		get_char_tex_coords( text[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Lower left
-		tv[j] = (TextVertex){{c0.x, c0.y, text_pos->z}, {t_c0.x, t_c0.y}};
+		tv[j] = (FsvTextVertex){{c0.x, c0.y, text_pos->z}, {t_c0.x, t_c0.y}};
 		// Lower right
-		tv[j + 1] = (TextVertex){{c0.x + hdelta.x, c0.y + hdelta.y, text_pos->z},
+		tv[j + 1] = (FsvTextVertex){{c0.x + hdelta.x, c0.y + hdelta.y, text_pos->z},
 					 {t_c1.x, t_c0.y}};
 		// Upper left
-		tv[j + 2] = (TextVertex){{c1.x - hdelta.x, c1.y - hdelta.y, text_pos->z},
+		tv[j + 2] = (FsvTextVertex){{c1.x - hdelta.x, c1.y - hdelta.y, text_pos->z},
 					 {t_c0.x, t_c1.y}};
 		// Upper right
-		tv[j + 3] = (TextVertex){{c1.x, c1.y, text_pos->z}, {t_c1.x, t_c1.y}};
+		tv[j + 3] = (FsvTextVertex){{c1.x, c1.y, text_pos->z}, {t_c1.x, t_c1.y}};
 
 		c0.x += hdelta.x;
 		c0.y += hdelta.y;
@@ -460,8 +321,7 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 
 	theta = text_pos->theta + 0.5 * (double)(len - 1) * char_arc_width;
 
-	GLsizeiptr nverts = len * 4;
-	TextVertex *tv = NEW_ARRAY(TextVertex, nverts);
+	FsvTextVertex *tv = NEW_ARRAY(FsvTextVertex, len * 4);
 	for (size_t i = 0; i < len; i++) {
 		sin_theta = sin( RAD(theta) );
 		cos_theta = cos( RAD(theta) );
@@ -478,16 +338,16 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 		get_char_tex_coords( text[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Lower left
-		tv[j] = (TextVertex){{char_pos.x - fwsl.x, char_pos.y - fwsl.y, text_pos->z},
+		tv[j] = (FsvTextVertex){{char_pos.x - fwsl.x, char_pos.y - fwsl.y, text_pos->z},
 				     {t_c0.x, t_c0.y}};
 		// Lower right
-		tv[j + 1] = (TextVertex){{char_pos.x + bwsl.x, char_pos.y + bwsl.y, text_pos->z},
+		tv[j + 1] = (FsvTextVertex){{char_pos.x + bwsl.x, char_pos.y + bwsl.y, text_pos->z},
 					 {t_c1.x, t_c0.y}};
 		// Upper left
-		tv[j + 2] = (TextVertex){{char_pos.x - bwsl.x, char_pos.y - bwsl.y, text_pos->z},
+		tv[j + 2] = (FsvTextVertex){{char_pos.x - bwsl.x, char_pos.y - bwsl.y, text_pos->z},
 					 {t_c0.x, t_c1.y}};
 		// Upper right
-		tv[j + 3] = (TextVertex){{char_pos.x + fwsl.x, char_pos.y + fwsl.y, text_pos->z},
+		tv[j + 3] = (FsvTextVertex){{char_pos.x + fwsl.x, char_pos.y + fwsl.y, text_pos->z},
 					 {t_c1.x, t_c1.y}};
 
 		theta -= char_arc_width;
@@ -500,9 +360,7 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 void
 text_set_color(float red, float green, float blue)
 {
-	glUseProgram(glt.program);
-	glUniform3f(glt.color_location, red, green, blue);
-	glUseProgram(0);
+	gpu_text_set_color(red, green, blue);
 }
 
 
@@ -510,9 +368,7 @@ text_set_color(float red, float green, float blue)
 void
 text_upload_mvp(float* mvp)
 {
-	glUseProgram(glt.program);
-	glUniformMatrix4fv(glt.mvp_location, 1, GL_FALSE, mvp);
-	glUseProgram(0);
+	gpu_text_upload_mvp(mvp);
 }
 
 /* end tmaptext.c */

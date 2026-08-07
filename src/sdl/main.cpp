@@ -28,6 +28,7 @@ extern "C" {
 #include "fsv-platform.h"
 #include "geometry.h"
 #include "scanfs.h"
+#include "tmaptext.h" /* text_init( ) */
 #include "window.h" /* StatusBarID, window_statusbar( ) */
 }
 
@@ -387,6 +388,11 @@ main(int argc, char **argv)
 	if (!gpu_ready())
 		return 1;
 	SDL_GPUDevice *device = gpu_device();
+
+	// Uploads the glyph atlas and builds the text pipeline (Task 3.4):
+	// needs the device gpu_init() just created, so it cannot run any
+	// earlier. Port of ogl_init()'s trailing text_init() call.
+	text_init();
 
 	// Install all five hooks the core requires before any libfsvcore
 	// call that might touch fsv_platform (scanfs() and the animation

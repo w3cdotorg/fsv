@@ -5,15 +5,18 @@
  * The fsv core notifies its frontend through a set of one-way hooks
  * (redraw a widget, update a status bar, label a node). The GTK frontend
  * implements them in dirtree.c/filelist.c/gui.c/window.c/viewport.c/
- * tmaptext.c/about.c; this build implements the ones that already have an
- * SDL counterpart for real, and no-ops the rest until the task that owns
+ * about.c; this build implements the ones that already have an SDL
+ * counterpart for real, and no-ops the rest until the task that owns
  * them lands:
  *
- *   text_ ...            -> Task 3.4 (tmaptext.c -> text3d.cpp)
  *   dirtree_ / filelist_ -> Task 5.2 (ImGui panels)
  *   window_ ...          -> Task 5.1/5.3 (ImGui menu bar, dialogs)
  *   about ...            -> no About/splash presentation in this frontend
  *   viewport_ ...        -> Task 4.2 (picking owns the node table)
+ *
+ * tmaptext.c's text_*() entry points are NOT here as of Task 3.4: this
+ * build compiles src/tmaptext.c for real (see src/sdl/meson.build),
+ * exactly like geometry.c.
  *
  * This is deliberately separate from tools/fsv-headless-stubs.c, which
  * fsv-scan and test_scanfs use: that one also stubs out geometry.c, which
@@ -34,7 +37,6 @@
 #include "dirtree.h"
 #include "filelist.h"
 #include "gui.h"
-#include "tmaptext.h"
 #include "viewport.h"
 #include "window.h"
 
@@ -145,63 +147,6 @@ window_set_color_mode(ColorMode mode)
 void
 window_birdseye_view_off(void)
 {
-}
-
-/* tmaptext.h — the texture-mapped text engine is Task 3.4 */
-void
-text_init(void)
-{
-}
-
-void
-text_pre(void)
-{
-}
-
-void
-text_post(void)
-{
-}
-
-void
-text_draw_straight(const char *text, const XYZvec *text_pos,
-    const XYvec *text_max_dims)
-{
-	(void)text;
-	(void)text_pos;
-	(void)text_max_dims;
-}
-
-void
-text_draw_straight_rotated(const char *text, const RTZvec *text_pos,
-    const XYvec *text_max_dims)
-{
-	(void)text;
-	(void)text_pos;
-	(void)text_max_dims;
-}
-
-void
-text_draw_curved(const char *text, const RTZvec *text_pos,
-    const RTvec *text_max_dims)
-{
-	(void)text;
-	(void)text_pos;
-	(void)text_max_dims;
-}
-
-void
-text_set_color(float red, float green, float blue)
-{
-	(void)red;
-	(void)green;
-	(void)blue;
-}
-
-void
-text_upload_mvp(float *mvp)
-{
-	(void)mvp;
 }
 
 /* about.h — no About presentation or splash screen in this frontend */

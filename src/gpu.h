@@ -184,6 +184,70 @@ extern FsvGpuMatrices gpu_mat;
  * stages them for the next draw call. Replaces ogl_upload_matrices( ). */
 void gpu_upload_matrices(void);
 
+/**** Texture-mapped text (src/tmaptext.c) ****************/
+/*
+ * tmaptext.c is shared by both frontends, exactly like geometry.c: it
+ * keeps its font-atlas generation and glyph-layout math (get_char_dims( ),
+ * get_char_tex_coords( ), text_draw_straight/_rotated/_curved( )) and
+ * draws through this small extra slice of the same contract instead of
+ * owning a GL texture/program of its own. See docs/PORTING.md Task 3.4
+ * for why this file was ported in place rather than split into a new
+ * src/sdl/text3d.cpp.
+ *
+ *   glGenTextures/glTexImage2D/glGenerateMipmap  -> gpu_text_init( )
+ *   text_pre( ) / text_post( )                   -> gpu_text_begin( ) / gpu_text_end( )
+ *   glBufferData + glDrawElements (text VBO/EBO)  -> gpu_text_draw( )
+ *   glUniform3f(glt.color_location, ...)          -> gpu_text_set_color( )
+ *   glUniformMatrix4fv(glt.mvp_location, ...)     -> gpu_text_upload_mvp( )
+ */
+
+/* One glyph-quad vertex, matching shaders/src/text.vert's `position`
+ * (world space, shares the scene's mvp) / `texcoord` (into the atlas)
+ * inputs -- tmaptext.c's old TextVertex struct, renamed and moved here
+ * because it is now the vertex format of a cross-file contract. */
+typedef struct {
+	float pos[3];
+	float texcoord[2];
+} FsvTextVertex;
+
+/* Uploads the glyph atlas: a single-channel bitmap, row-major,
+ * `pixels[y*width+x]` in [0,255], sampled as alpha by shaders/src/
+ * text.frag's `alpha.r`. Call once, from text_init( ). */
+void gpu_text_init(const unsigned char *pixels, int width, int height);
+
+/* Brackets one batch of gpu_text_draw( ) calls -- what text_pre( ) /
+ * text_post( ) used to do directly (glDisable(GL_POLYGON_OFFSET_FILL),
+ * glEnable(GL_BLEND), bind/unbind the atlas texture). The SDL_GPU backend
+ * bakes blend state and the absence of depth bias into its text pipeline,
+ * so these are a no-op there; the GL compat shim still does the exact
+ * old state dance. */
+void gpu_text_begin(void);
+void gpu_text_end(void);
+
+/* Draws one batch of glyph quads -- 4 vertices / char, indices in the
+ * same LL-LR-UL-UR-per-char order tmaptext.c's draw_text_vertices( )
+ * built -- with the current text color and mvp (gpu_text_set_color( ) /
+ * gpu_text_upload_mvp( )). Same recording contract as gpu_draw( ) on the
+ * SDL_GPU backend (must be called between gpu_scene_begin( ) and
+ * gpu_scene_end( ), and it is *this* call that snapshots the current
+ * color/mvp -- both can and do change between calls within one high-
+ * detail pass, once per node); draws immediately on the GL compat shim. */
+void gpu_text_draw(const FsvTextVertex *verts, int nverts,
+                    const unsigned int *indices, int nindices);
+
+/* Text tint, per label (glUniform3f on the old glt.color_location). */
+void gpu_text_set_color(float r, float g, float b);
+
+/* Text mvp. Independent of gpu_upload_matrices( )'s scene mvp in
+ * principle, but every real caller keeps them equal: geometry.c places
+ * labels in world space (not billboards), and gpu_upload_matrices( )
+ * itself calls text_upload_mvp( ) with the same matrix right after
+ * updating the scene one, so a label always shares its node's current
+ * transform. about_splash_draw( ) (GTK only, no SDL_GPU equivalent) is
+ * the one place that calls text_upload_mvp( ) directly with a different,
+ * orthographic matrix. */
+void gpu_text_upload_mvp(const float *mvp);
+
 #ifdef __cplusplus
 }
 #endif

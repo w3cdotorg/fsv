@@ -77,10 +77,11 @@
 extern "C" {
 #include "common.h"
 #include "camera.h"
+#include "tmaptext.h" /* text_upload_mvp( ) -- see gpu_upload_matrices() */
 }
 
-// Byte arrays for shaders/compiled/scene.{vert,frag}.{msl,spv}, generated
-// at build time by tools/embed-shaders.py.
+// Byte arrays for shaders/compiled/{scene,text}.{vert,frag}.{msl,spv},
+// generated at build time by tools/embed-shaders.py.
 #include "shaders_embedded.h"
 
 // ---- Uniform blocks --------------------------------------------------
@@ -129,6 +130,27 @@ static_assert(offsetof(SceneFragUBO, lightning_enabled) == 28, "std140 offset");
 // contract too (24-byte stride, attributes at 0 and 12).
 static_assert(sizeof(FsvVertex) == 24, "scene pipeline vertex stride");
 static_assert(offsetof(FsvVertex, normal) == 12, "vertex attribute 1 offset");
+
+// Mirrors of the std140 blocks in shaders/src/text.vert / text.frag. See
+// the "Text rendering" section below for the pipeline these feed.
+
+struct alignas(16) TextVertUBO {
+	float mvp[16]; // offset 0
+};
+static_assert(sizeof(TextVertUBO) == 64,
+    "TextVertUBO must match the std140 layout of text.vert's TextVertUBO");
+
+struct alignas(16) TextFragUBO {
+	float color[3]; // offset 0
+	float pad_;      // std140 rounds a lone vec3 block up to 16 bytes
+};
+static_assert(sizeof(TextFragUBO) == 16,
+    "TextFragUBO must match the std140 layout of text.frag's TextFragUBO");
+
+// FsvTextVertex (src/gpu.h) is the text pipeline's vertex input state.
+static_assert(sizeof(FsvTextVertex) == 20, "text pipeline vertex stride");
+static_assert(offsetof(FsvTextVertex, texcoord) == 12,
+    "text vertex attribute 1 offset");
 
 // ---- Module state ----------------------------------------------------
 
@@ -219,6 +241,64 @@ Uint32 g_index_capacity;  // bytes
 SDL_GPUTransferBuffer *g_transfer;
 Uint32 g_transfer_capacity; // bytes
 
+// ---- Text rendering (src/tmaptext.c via src/gpu.h's gpu_text_*()) ----
+//
+// tmaptext.c no longer touches GL directly (Task 3.4); it draws through
+// the six gpu_text_*() entry points below. Text gets its own texture, its
+// own pipeline (alpha-blended, no depth bias -- see text_pipeline_for())
+// and its own recording arena, built and replayed the same way as the
+// scene's and for the same reason: geometry.c's text_pre()/
+// text_draw_*()/text_post() calls are interleaved with gpu_draw() calls
+// mid-tree-walk, and SDL_GPU forbids buffer copies inside a render pass
+// regardless of which pipeline the data is for.
+//
+// mvp and color are snapshotted per gpu_text_draw() call, not once per
+// frame: TreeV's label pass re-walks the tree with a fresh
+// gpu_upload_matrices() (hence a fresh text_upload_mvp()) and a fresh
+// text_set_color() at every node -- see mapv_draw_recursive()/
+// treev_draw_recursive() in geometry.c. A single frame-wide uniform push
+// would paint every label with the last node's color and transform.
+
+SDL_GPUShader *g_text_vert_shader;
+SDL_GPUShader *g_text_frag_shader;
+
+// One pipeline per color-target format (swapchain vs the offscreen
+// R8G8B8A8 capture/id target), same NUM_TARGETS dimension as the scene's
+// g_pipelines. No primitive-type or depth-test dimension: text is always
+// triangles, always FSV_DEPTH_LESS (geometry.c never changes the depth
+// function around a label).
+SDL_GPUGraphicsPipeline *g_text_pipelines[NUM_TARGETS];
+
+// The glyph atlas (one texture, uploaded once by gpu_text_init()) and its
+// sampler.
+SDL_GPUTexture *g_text_texture;
+SDL_GPUSampler *g_text_sampler;
+
+// Shadow copies of the text uniform blocks, written by gpu_text_set_color()
+// / gpu_text_upload_mvp() and snapshotted into a TextDrawCmd by every
+// gpu_text_draw().
+TextVertUBO g_text_vert_ubo;
+TextFragUBO g_text_frag_ubo;
+
+struct TextDrawCmd {
+	Uint32 first_index;
+	Uint32 num_indices;
+	Sint32 vertex_offset;
+	TextVertUBO vert_ubo;
+	TextFragUBO frag_ubo;
+};
+
+std::vector<FsvTextVertex> g_text_vertices;
+std::vector<Uint32> g_text_indices;
+std::vector<TextDrawCmd> g_text_draws;
+
+SDL_GPUBuffer *g_text_vertex_buffer;
+SDL_GPUBuffer *g_text_index_buffer;
+Uint32 g_text_vertex_capacity; // bytes
+Uint32 g_text_index_capacity;  // bytes
+SDL_GPUTransferBuffer *g_text_transfer;
+Uint32 g_text_transfer_capacity; // bytes
+
 // ---- Shaders and pipelines -------------------------------------------
 
 // Returns the viewport's current aspect ratio (width / height). Port of
@@ -248,7 +328,7 @@ struct ShaderBlob {
 // rather than swallowed, and the next candidate format is tried.
 SDL_GPUShader *
 create_shader(SDL_GPUShaderStage stage, const ShaderBlob *candidates,
-    int num_candidates, Uint32 num_uniform_buffers)
+    int num_candidates, Uint32 num_uniform_buffers, Uint32 num_samplers = 0)
 {
 	const SDL_GPUShaderFormat supported = SDL_GetGPUShaderFormats(g_device);
 
@@ -263,7 +343,7 @@ create_shader(SDL_GPUShaderStage stage, const ShaderBlob *candidates,
 		info.entrypoint = blob.entrypoint;
 		info.format = blob.format;
 		info.stage = stage;
-		info.num_samplers = 0;
+		info.num_samplers = num_samplers;
 		info.num_storage_textures = 0;
 		info.num_storage_buffers = 0;
 		info.num_uniform_buffers = num_uniform_buffers;
@@ -381,6 +461,106 @@ pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 		SDL_Log("gpu: pipeline creation failed (prim %d, depth %d, "
 		    "target %d): %s", (int)prim, (int)depth_test, target,
 		    SDL_GetError());
+	return slot;
+}
+
+// Returns the text pipeline for one color-target format, building it on
+// first use. See the "Text rendering" module-state comment above for why
+// this is a much smaller cache than pipeline_for()'s.
+SDL_GPUGraphicsPipeline *
+text_pipeline_for(int target)
+{
+	SDL_GPUGraphicsPipeline *&slot = g_text_pipelines[target];
+	if (slot != nullptr)
+		return slot;
+
+	SDL_GPUVertexBufferDescription vertex_buffer_desc = {};
+	vertex_buffer_desc.slot = 0;
+	vertex_buffer_desc.pitch = sizeof(FsvTextVertex);
+	vertex_buffer_desc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+	SDL_GPUVertexAttribute vertex_attributes[2] = {};
+	vertex_attributes[0].location = 0; // text.vert: in vec3 position
+	vertex_attributes[0].buffer_slot = 0;
+	vertex_attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+	vertex_attributes[0].offset = offsetof(FsvTextVertex, pos);
+	vertex_attributes[1].location = 1; // text.vert: in vec2 texcoord
+	vertex_attributes[1].buffer_slot = 0;
+	vertex_attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+	vertex_attributes[1].offset = offsetof(FsvTextVertex, texcoord);
+
+	SDL_GPUVertexInputState vertex_input_state = {};
+	vertex_input_state.vertex_buffer_descriptions = &vertex_buffer_desc;
+	vertex_input_state.num_vertex_buffers = 1;
+	vertex_input_state.vertex_attributes = vertex_attributes;
+	vertex_input_state.num_vertex_attributes = 2;
+
+	// Same cull/winding as the scene pipeline: ogl_init()'s
+	// glEnable(GL_CULL_FACE) was never disabled around text --
+	// text_pre()/text_post() only ever touched GL_POLYGON_OFFSET_FILL
+	// and GL_BLEND. No depth bias here: GL_POLYGON_OFFSET_FILL applies
+	// to filled *scene* polygons and text_pre() explicitly disabled it
+	// for the duration of every text draw, so the text pipeline simply
+	// never carries the depth-bias fields pipeline_for() sets for
+	// triangles.
+	SDL_GPURasterizerState rasterizer_state = {};
+	rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+	rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+
+	// Depth test ON, depth WRITE ON. This matches the GL original
+	// exactly rather than the "depth write off" pattern that is typical
+	// for text-over-geometry: grep -n "glDepthMask" src/*.c is empty, so
+	// the old code never touched the depth mask anywhere, meaning text
+	// drew with GL's default (write enabled) the whole time, same as
+	// scene geometry. See docs/PORTING.md Task 3.4 for what the
+	// "typical" alternative would have changed.
+	SDL_GPUDepthStencilState depth_stencil_state = {};
+	depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+	depth_stencil_state.enable_depth_test = true;
+	depth_stencil_state.enable_depth_write = true;
+	depth_stencil_state.enable_stencil_test = false;
+
+	// Alpha-blended: ogl_init()'s single glBlendFunc(GL_SRC_ALPHA,
+	// GL_ONE_MINUS_SRC_ALPHA) call (the GL original never calls
+	// glBlendFuncSeparate, so color and alpha share one factor pair)
+	// plus text_pre()'s glEnable(GL_BLEND).
+	SDL_GPUColorTargetBlendState blend_state = {};
+	blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+	blend_state.dst_color_blendfactor =
+	    SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+	blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+	blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+	blend_state.dst_alpha_blendfactor =
+	    SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+	blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+	blend_state.enable_blend = true;
+
+	SDL_GPUColorTargetDescription color_target_desc = {};
+	color_target_desc.format = target == 0
+	    ? SDL_GetGPUSwapchainTextureFormat(g_device, g_window)
+	    : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	color_target_desc.blend_state = blend_state;
+
+	SDL_GPUGraphicsPipelineTargetInfo target_info = {};
+	target_info.color_target_descriptions = &color_target_desc;
+	target_info.num_color_targets = 1;
+	target_info.depth_stencil_format = g_depth_format;
+	target_info.has_depth_stencil_target = true;
+
+	SDL_GPUGraphicsPipelineCreateInfo info = {};
+	info.vertex_shader = g_text_vert_shader;
+	info.fragment_shader = g_text_frag_shader;
+	info.vertex_input_state = vertex_input_state;
+	info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+	info.rasterizer_state = rasterizer_state;
+	info.depth_stencil_state = depth_stencil_state;
+	info.target_info = target_info;
+
+	slot = SDL_CreateGPUGraphicsPipeline(g_device, &info);
+	if (slot == nullptr)
+		SDL_Log("gpu: text pipeline creation failed (target %d): %s",
+		    target, SDL_GetError());
 	return slot;
 }
 
@@ -752,6 +932,114 @@ replay_draws(SDL_GPURenderPass *pass)
 	}
 }
 
+// Uploads the frame's text arenas in their own copy pass, the same shape
+// as upload_frame_geometry() but into the text buffers. A second, separate
+// transfer buffer rather than sharing the geometry one: text data is tiny
+// (a few hundred labels at most) and keeping the two independent avoids
+// coupling their capacity growth for no benefit.
+bool
+upload_frame_text_geometry(void)
+{
+	const Uint32 vertex_bytes =
+	    (Uint32)(g_text_vertices.size() * sizeof(FsvTextVertex));
+	const Uint32 index_bytes =
+	    (Uint32)(g_text_indices.size() * sizeof(Uint32));
+
+	if (!ensure_buffer(&g_text_vertex_buffer, &g_text_vertex_capacity,
+	        vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX) ||
+	    !ensure_buffer(&g_text_index_buffer, &g_text_index_capacity,
+	        index_bytes, SDL_GPU_BUFFERUSAGE_INDEX))
+		return false;
+
+	const Uint32 total = vertex_bytes + index_bytes;
+	if (g_text_transfer == nullptr || g_text_transfer_capacity < total) {
+		if (g_text_transfer != nullptr)
+			SDL_ReleaseGPUTransferBuffer(g_device, g_text_transfer);
+		SDL_GPUTransferBufferCreateInfo transfer_info = {};
+		transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+		transfer_info.size = total;
+		g_text_transfer =
+		    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+		if (g_text_transfer == nullptr) {
+			SDL_Log("gpu: text SDL_CreateGPUTransferBuffer failed: %s",
+			    SDL_GetError());
+			g_text_transfer_capacity = 0;
+			return false;
+		}
+		g_text_transfer_capacity = total;
+	}
+
+	void *mapped = SDL_MapGPUTransferBuffer(g_device, g_text_transfer, true);
+	if (mapped == nullptr) {
+		SDL_Log("gpu: text SDL_MapGPUTransferBuffer failed: %s",
+		    SDL_GetError());
+		return false;
+	}
+	memcpy(mapped, g_text_vertices.data(), vertex_bytes);
+	memcpy((char *)mapped + vertex_bytes, g_text_indices.data(), index_bytes);
+	SDL_UnmapGPUTransferBuffer(g_device, g_text_transfer);
+
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
+
+	SDL_GPUTransferBufferLocation source = {};
+	SDL_GPUBufferRegion destination = {};
+
+	source.transfer_buffer = g_text_transfer;
+	source.offset = 0;
+	destination.buffer = g_text_vertex_buffer;
+	destination.offset = 0;
+	destination.size = vertex_bytes;
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
+
+	source.offset = vertex_bytes;
+	destination.buffer = g_text_index_buffer;
+	destination.offset = 0;
+	destination.size = index_bytes;
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
+
+	SDL_EndGPUCopyPass(copy_pass);
+	return true;
+}
+
+// Replays the frame's text draws into `pass`, after replay_draws() and
+// before the pass ends -- same render pass, different pipeline and vertex/
+// index buffers, which SDL_GPU allows rebinding mid-pass. Depth-testing
+// against the just-replayed scene geometry's depth buffer is exactly the
+// point: it is what lets a label be correctly hidden behind whatever
+// geometry is actually nearest, regardless of which was recorded first.
+void
+replay_text_draws(SDL_GPURenderPass *pass)
+{
+	SDL_GPUGraphicsPipeline *pipeline = text_pipeline_for(g_target_index);
+	if (pipeline == nullptr)
+		return;
+
+	SDL_GPUBufferBinding vertex_binding = {};
+	vertex_binding.buffer = g_text_vertex_buffer;
+	SDL_BindGPUVertexBuffers(pass, 0, &vertex_binding, 1);
+
+	SDL_GPUBufferBinding index_binding = {};
+	index_binding.buffer = g_text_index_buffer;
+	SDL_BindGPUIndexBuffer(pass, &index_binding,
+	    SDL_GPU_INDEXELEMENTSIZE_32BIT);
+
+	SDL_BindGPUGraphicsPipeline(pass, pipeline);
+
+	SDL_GPUTextureSamplerBinding sampler_binding = {};
+	sampler_binding.texture = g_text_texture;
+	sampler_binding.sampler = g_text_sampler;
+	SDL_BindGPUFragmentSamplers(pass, 0, &sampler_binding, 1);
+
+	for (const TextDrawCmd &cmd : g_text_draws) {
+		SDL_PushGPUVertexUniformData(g_cmd, 0, &cmd.vert_ubo,
+		    sizeof cmd.vert_ubo);
+		SDL_PushGPUFragmentUniformData(g_cmd, 0, &cmd.frag_ubo,
+		    sizeof cmd.frag_ubo);
+		SDL_DrawGPUIndexedPrimitives(pass, cmd.num_indices, 1,
+		    cmd.first_index, cmd.vertex_offset, 0);
+	}
+}
+
 } // namespace
 
 // ---- Public API ------------------------------------------------------
@@ -782,6 +1070,13 @@ gpu_upload_matrices(void)
 	memcpy(g_vert_ubo.mvp, mvp, sizeof mvp);
 	memcpy(g_vert_ubo.modelview, gpu_mat.modelview, sizeof(mat4));
 	memcpy(g_vert_ubo.normal_matrix, normmat4, sizeof normmat4);
+
+	// Port of ogl-gpu-compat.c's identical call: the text engine's mvp is
+	// always refreshed alongside the scene's (see gpu.h's note on
+	// gpu_text_upload_mvp()). about_splash_draw() -- GTK-only, no SDL_GPU
+	// equivalent -- is the one caller that wants something different and
+	// calls text_upload_mvp() directly afterwards.
+	text_upload_mvp((float *)mvp);
 }
 
 void
@@ -951,6 +1246,37 @@ gpu_shutdown(void)
 	g_index_buffer = nullptr;
 	g_transfer = nullptr;
 	g_vertex_capacity = g_index_capacity = g_transfer_capacity = 0;
+
+	for (int t = 0; t < NUM_TARGETS; t++) {
+		if (g_text_pipelines[t] == nullptr)
+			continue;
+		SDL_ReleaseGPUGraphicsPipeline(g_device, g_text_pipelines[t]);
+		g_text_pipelines[t] = nullptr;
+	}
+	if (g_text_vert_shader != nullptr)
+		SDL_ReleaseGPUShader(g_device, g_text_vert_shader);
+	if (g_text_frag_shader != nullptr)
+		SDL_ReleaseGPUShader(g_device, g_text_frag_shader);
+	if (g_text_sampler != nullptr)
+		SDL_ReleaseGPUSampler(g_device, g_text_sampler);
+	if (g_text_texture != nullptr)
+		SDL_ReleaseGPUTexture(g_device, g_text_texture);
+	if (g_text_vertex_buffer != nullptr)
+		SDL_ReleaseGPUBuffer(g_device, g_text_vertex_buffer);
+	if (g_text_index_buffer != nullptr)
+		SDL_ReleaseGPUBuffer(g_device, g_text_index_buffer);
+	if (g_text_transfer != nullptr)
+		SDL_ReleaseGPUTransferBuffer(g_device, g_text_transfer);
+	g_text_vert_shader = nullptr;
+	g_text_frag_shader = nullptr;
+	g_text_sampler = nullptr;
+	g_text_texture = nullptr;
+	g_text_vertex_buffer = nullptr;
+	g_text_index_buffer = nullptr;
+	g_text_transfer = nullptr;
+	g_text_vertex_capacity = g_text_index_capacity =
+	    g_text_transfer_capacity = 0;
+
 	g_ready = false;
 
 	SDL_ReleaseWindowFromGPUDevice(g_device, g_window);
@@ -1026,6 +1352,9 @@ gpu_scene_begin(void)
 	g_vertices.clear();
 	g_indices.clear();
 	g_draws.clear();
+	g_text_vertices.clear();
+	g_text_indices.clear();
+	g_text_draws.clear();
 	g_depth_test = FSV_DEPTH_LESS;
 	g_recording = true;
 }
@@ -1079,6 +1408,8 @@ gpu_scene_end(void)
 
 	const bool have_geometry =
 	    !g_draws.empty() && upload_frame_geometry();
+	const bool have_text =
+	    !g_text_draws.empty() && upload_frame_text_geometry();
 
 	SDL_GPUColorTargetInfo color_target = {};
 	color_target.texture = g_color_target;
@@ -1110,7 +1441,186 @@ gpu_scene_end(void)
 	}
 	if (have_geometry)
 		replay_draws(pass);
+	if (have_text)
+		replay_text_draws(pass);
 	SDL_EndGPURenderPass(pass);
+}
+
+// ---- Text rendering (public API, src/tmaptext.c via src/gpu.h) -------
+
+// Uploads the glyph atlas and builds the text shaders/pipelines. Called
+// once, from text_init() (itself called once, from main.cpp, after
+// gpu_init() has succeeded -- the device has to exist first).
+void
+gpu_text_init(const unsigned char *pixels, int width, int height)
+{
+	if (g_device == nullptr)
+		return;
+
+	const ShaderBlob vert_blobs[] = {
+		{ SDL_GPU_SHADERFORMAT_MSL, "main0", text_vert_msl,
+		  sizeof text_vert_msl, "text.vert.msl" },
+		{ SDL_GPU_SHADERFORMAT_SPIRV, "main", text_vert_spv,
+		  sizeof text_vert_spv, "text.vert.spv" },
+	};
+	const ShaderBlob frag_blobs[] = {
+		{ SDL_GPU_SHADERFORMAT_MSL, "main0", text_frag_msl,
+		  sizeof text_frag_msl, "text.frag.msl" },
+		{ SDL_GPU_SHADERFORMAT_SPIRV, "main", text_frag_spv,
+		  sizeof text_frag_spv, "text.frag.spv" },
+	};
+	g_text_vert_shader = create_shader(SDL_GPU_SHADERSTAGE_VERTEX,
+	    vert_blobs, (int)SDL_arraysize(vert_blobs), /* uniform buffers */ 1);
+	// text.frag declares one sampler2D (set=2, binding=0, the glyph
+	// atlas) -- the resource count SDL_CreateGPUShader needs has to
+	// match what the shader actually binds, or the pipeline silently
+	// draws nothing (this was Task 3.4's first bug: create_shader()
+	// used to hardcode num_samplers=0 for every shader, which is
+	// correct for the scene shaders but wrong here).
+	g_text_frag_shader = create_shader(SDL_GPU_SHADERSTAGE_FRAGMENT,
+	    frag_blobs, (int)SDL_arraysize(frag_blobs), /* uniform buffers */ 1,
+	    /* samplers */ 1);
+	if (g_text_vert_shader == nullptr || g_text_frag_shader == nullptr) {
+		SDL_Log("gpu: no usable text shader");
+		return;
+	}
+
+	// The glyph atlas: a single-channel bitmap, sampled as alpha by
+	// text.frag's `alpha.r`. R8_UNORM is the SDL_GPU equivalent of the
+	// old GL code's GL_RED texture.
+	SDL_GPUTextureCreateInfo tex_info = {};
+	tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+	tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+	tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+	tex_info.width = (Uint32)width;
+	tex_info.height = (Uint32)height;
+	tex_info.layer_count_or_depth = 1;
+	tex_info.num_levels = 1;
+	tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+	g_text_texture = SDL_CreateGPUTexture(g_device, &tex_info);
+	if (g_text_texture == nullptr) {
+		SDL_Log("gpu: SDL_CreateGPUTexture (text atlas) failed: %s",
+		    SDL_GetError());
+		return;
+	}
+
+	// Linear filtering, clamp-to-edge. Simpler than the old GL sampler,
+	// which mixed GL_LINEAR_MIPMAP_LINEAR minification with GL_NEAREST
+	// magnification: this atlas has one mip level, so there is no
+	// minification filter left to choose -- see docs/PORTING.md Task 3.4.
+	SDL_GPUSamplerCreateInfo sampler_info = {};
+	sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
+	sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+	sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+	sampler_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+	sampler_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+	sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+	g_text_sampler = SDL_CreateGPUSampler(g_device, &sampler_info);
+	if (g_text_sampler == nullptr) {
+		SDL_Log("gpu: SDL_CreateGPUSampler (text atlas) failed: %s",
+		    SDL_GetError());
+		return;
+	}
+
+	// One-off upload on its own command buffer: the atlas never changes
+	// after this, so it does not belong in the per-frame recording.
+	const Uint32 bytes = (Uint32)width * (Uint32)height;
+	SDL_GPUTransferBufferCreateInfo transfer_info = {};
+	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+	transfer_info.size = bytes;
+	SDL_GPUTransferBuffer *upload =
+	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+	if (upload == nullptr) {
+		SDL_Log("gpu: text atlas transfer buffer failed: %s",
+		    SDL_GetError());
+		return;
+	}
+	void *mapped = SDL_MapGPUTransferBuffer(g_device, upload, false);
+	if (mapped == nullptr) {
+		SDL_Log("gpu: text atlas map failed: %s", SDL_GetError());
+		SDL_ReleaseGPUTransferBuffer(g_device, upload);
+		return;
+	}
+	memcpy(mapped, pixels, bytes);
+	SDL_UnmapGPUTransferBuffer(g_device, upload);
+
+	SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(g_device);
+	if (cmd != nullptr) {
+		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(cmd);
+		SDL_GPUTextureTransferInfo source = {};
+		source.transfer_buffer = upload;
+		source.pixels_per_row = (Uint32)width;
+		source.rows_per_layer = (Uint32)height;
+		SDL_GPUTextureRegion destination = {};
+		destination.texture = g_text_texture;
+		destination.w = (Uint32)width;
+		destination.h = (Uint32)height;
+		destination.d = 1;
+		SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+		SDL_EndGPUCopyPass(copy_pass);
+		SDL_SubmitGPUCommandBuffer(cmd);
+	} else
+		SDL_Log("gpu: text atlas upload command buffer failed: %s",
+		    SDL_GetError());
+	SDL_ReleaseGPUTransferBuffer(g_device, upload);
+
+	// Build both pipeline variants up front (swapchain + capture
+	// formats), so a broken text pipeline is a startup failure, exactly
+	// like gpu_init()'s scene pipelines.
+	text_pipeline_for(0);
+	text_pipeline_for(1);
+}
+
+// No-ops by design: text_pre()/text_post()'s old GL_BLEND/
+// GL_POLYGON_OFFSET_FILL toggles and texture bind/unbind are all baked
+// into the text pipeline (see text_pipeline_for()) or bound per-draw
+// (see replay_text_draws()) on this backend. The GL compat shim still
+// does the real state dance -- see src/ogl-gpu-compat.c.
+void
+gpu_text_begin(void)
+{
+}
+
+void
+gpu_text_end(void)
+{
+}
+
+void
+gpu_text_draw(const FsvTextVertex *verts, int nverts,
+    const unsigned int *indices, int nindices)
+{
+	if (!g_recording || verts == nullptr || nverts <= 0 ||
+	    indices == nullptr || nindices <= 0)
+		return;
+
+	const Sint32 vertex_offset = (Sint32)g_text_vertices.size();
+	const Uint32 first_index = (Uint32)g_text_indices.size();
+
+	g_text_indices.insert(g_text_indices.end(), indices, indices + nindices);
+	g_text_vertices.insert(g_text_vertices.end(), verts, verts + nverts);
+
+	TextDrawCmd cmd;
+	cmd.first_index = first_index;
+	cmd.num_indices = (Uint32)nindices;
+	cmd.vertex_offset = vertex_offset;
+	cmd.vert_ubo = g_text_vert_ubo;
+	cmd.frag_ubo = g_text_frag_ubo;
+	g_text_draws.push_back(cmd);
+}
+
+void
+gpu_text_set_color(float r, float g, float b)
+{
+	g_text_frag_ubo.color[0] = r;
+	g_text_frag_ubo.color[1] = g;
+	g_text_frag_ubo.color[2] = b;
+}
+
+void
+gpu_text_upload_mvp(const float *mvp)
+{
+	memcpy(g_text_vert_ubo.mvp, mvp, sizeof g_text_vert_ubo.mvp);
 }
 
 unsigned int

@@ -3,24 +3,25 @@
 # SDL3 + Metal (SDL_GPU) frontend: window, main loop, ImGui (SDL3 +
 # SDLGPU3 backends) and the core animation tick (main.cpp, Task 2.2),
 # plus the renderer core — device, pipelines, mesh buffers, camera
-# matrices (gpu.cpp, Task 3.2). Scene geometry lands in Task 3.3.
+# matrices (gpu.cpp, Task 3.2). Scene geometry lands in Task 3.3; the
+# texture-mapped text engine (tmaptext.c) in Task 3.4.
 #
 # The SDL frontend implements only part of the frontend surface the fsv
-# core notifies (see the header of src/sdl/stubs.c): the ImGui panels,
-# menus and the texture-mapped text engine land in later tasks, so their
-# entry points are no-ops for now. geometry.c, by contrast, is compiled
-# for real here -- which is why this target uses its own stub file rather
-# than tools/fsv-headless-stubs.c, whose geometry_* no-ops would collide.
+# core notifies (see the header of src/sdl/stubs.c): the ImGui panels and
+# menus land in later tasks, so their entry points are no-ops for now.
+# geometry.c and tmaptext.c, by contrast, are compiled for real here --
+# which is why this target uses its own stub file rather than
+# tools/fsv-headless-stubs.c, whose geometry_*/text_* no-ops would
+# collide.
 #
-# geometry.c is listed as a source rather than folded into libfsvcore: it
-# now calls gpu.h, which each frontend implements, and libfsvcore's other
-# consumers (fsv-scan, test_scanfs) have no renderer to link against.
-core_gl_src = files('stubs.c', '../geometry.c')
+# Neither file is folded into libfsvcore: both now call gpu.h, which each
+# frontend implements, and libfsvcore's other consumers (fsv-scan,
+# test_scanfs) have no renderer to link against.
+core_gl_src = files('stubs.c', '../geometry.c', '../tmaptext.c')
 
 # The compiled shader artifacts (Task 3.1) are baked into the binary as
 # byte arrays rather than loaded from disk — see the rationale at the top
-# of tools/embed-shaders.py. Only the scene shaders are needed here; the
-# text ones join the list in Task 3.4.
+# of tools/embed-shaders.py.
 python3 = find_program('python3')
 embed_shaders_py = files('../../tools/embed-shaders.py')
 shaders_embedded_h = custom_target('shaders_embedded.h',
@@ -28,7 +29,11 @@ shaders_embedded_h = custom_target('shaders_embedded.h',
     '../../shaders/compiled/scene.vert.msl',
     '../../shaders/compiled/scene.vert.spv',
     '../../shaders/compiled/scene.frag.msl',
-    '../../shaders/compiled/scene.frag.spv'),
+    '../../shaders/compiled/scene.frag.spv',
+    '../../shaders/compiled/text.vert.msl',
+    '../../shaders/compiled/text.vert.spv',
+    '../../shaders/compiled/text.frag.msl',
+    '../../shaders/compiled/text.frag.spv'),
   output: 'shaders_embedded.h',
   command: [python3, embed_shaders_py, '@OUTPUT@', '@INPUT@'])
 

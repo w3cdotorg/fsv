@@ -48,6 +48,7 @@
 #include "gpu.h"
 
 #include <epoxy/gl.h>
+#include <gio/gio.h> /* g_resources_lookup_data( ), text shader source */
 
 #include "ogl.h"
 #include "tmaptext.h" /* text_upload_mvp( ) */
@@ -224,6 +225,197 @@ gpu_draw( FsvTopology topology, const FsvVertex *verts, int nverts,
 	glBufferData( GL_ARRAY_BUFFER, sizeof(FsvVertex) * nverts, NULL,
 		      GL_STREAM_DRAW );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+}
+
+
+/* ---- Texture-mapped text (src/gpu.h's text slice, src/tmaptext.c) ----
+ *
+ * tmaptext.c used to own its own GL program (`glt`) and texture object
+ * (`text_tobj`) directly -- a second, independent GL program alongside
+ * gl.program, loaded from the same still-unported GLSL 140 resources
+ * (/jabl/fsv/fsv-text-{vertex,fragment}.glsl) as before Task 3.1, since
+ * that port only touched shaders/src/text.{vert,frag} (the SDL_GPU/MSL
+ * side). Moving here is purely mechanical: same program, same texture
+ * parameters, same draw -- just relocated behind gpu_text_*( ) so
+ * tmaptext.c itself no longer contains GL.
+ */
+
+static struct {
+	GLuint program;
+	GLint mvp_location;
+	GLint position_location;
+	GLint texcoord_location;
+	GLint texture_location;
+	GLint color_location;
+} glt;
+
+static GLuint text_tobj;
+
+
+/* Port of tmaptext.c's old text_init_shaders( ). */
+static GLuint
+text_init_shaders( void )
+{
+	GBytes *source;
+	GLuint program = 0, vertex = 0, fragment = 0;
+
+	source = g_resources_lookup_data("/jabl/fsv/fsv-text-vertex.glsl", 0, NULL);
+	vertex = ogl_create_shader(GL_VERTEX_SHADER, g_bytes_get_data(source, NULL));
+	g_bytes_unref(source);
+	if (vertex == 0)
+		goto out;
+
+	source = g_resources_lookup_data("/jabl/fsv/fsv-text-fragment.glsl", 0, NULL);
+	fragment = ogl_create_shader(GL_FRAGMENT_SHADER, g_bytes_get_data(source, NULL));
+	g_bytes_unref(source);
+	if (fragment == 0)
+		goto out;
+
+	program = glCreateProgram();
+	glAttachShader(program, vertex);
+	glAttachShader(program, fragment);
+	glLinkProgram(program);
+
+	GLint status = 0;
+	glGetProgramiv(program, GL_LINK_STATUS, &status);
+	if (status == GL_FALSE) {
+		GLint log_len = 0;
+		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
+		char *buffer = g_malloc(log_len + 1);
+		glGetProgramInfoLog(program, log_len, NULL, buffer);
+		g_error("Linking failure in text program: %s", buffer);
+		g_free(buffer);
+		glDeleteProgram(program);
+		program = 0;
+		goto out;
+	}
+
+	glt.mvp_location = glGetUniformLocation(program, "mvp");
+	glt.color_location = glGetUniformLocation(program, "color");
+	glt.texture_location = glGetUniformLocation(program, "tex");
+	glt.position_location = glGetAttribLocation(program, "position");
+	glt.texcoord_location = glGetAttribLocation(program, "texcoord");
+
+	glDetachShader(program, vertex);
+	glDetachShader(program, fragment);
+
+out:
+	if (vertex != 0)
+		glDeleteShader(vertex);
+	if (fragment != 0)
+		glDeleteShader(fragment);
+
+	return program;
+}
+
+
+/* Port of tmaptext.c's old text_init( )'s texture half. */
+void
+gpu_text_init( const unsigned char *pixels, int width, int height )
+{
+	float border_color[] = { 0.0, 0.0, 0.0, 1.0 };
+
+	glGenTextures( 1, &text_tobj );
+	glBindTexture( GL_TEXTURE_2D, text_tobj );
+
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+	glTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border_color );
+
+	glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
+	/* GL_RED is the only single-channel format modern GL guarantees; the
+	 * fragment shader swizzles it into the output alpha. */
+	glTexImage2D( GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED,
+		      GL_UNSIGNED_BYTE, pixels );
+	glGenerateMipmap( GL_TEXTURE_2D );
+	glBindTexture( GL_TEXTURE_2D, 0 );
+
+	glt.program = text_init_shaders( );
+	if (!glt.program)
+		g_error( "Compiling text shaders failed" );
+}
+
+
+/* Port of tmaptext.c's old text_pre( ) / text_post( ). */
+void
+gpu_text_begin( void )
+{
+	glDisable( GL_POLYGON_OFFSET_FILL );
+	glEnable( GL_BLEND );
+	glBindTexture( GL_TEXTURE_2D, text_tobj );
+}
+
+
+void
+gpu_text_end( void )
+{
+	glDisable( GL_BLEND );
+	glEnable( GL_POLYGON_OFFSET_FILL );
+	glBindTexture( GL_TEXTURE_2D, 0 );
+}
+
+
+/* Port of tmaptext.c's old draw_text_vertices( ). One streaming VBO/EBO
+ * pair, same shape as gpu_draw( )'s -- see the note at the top of this
+ * file about why indices are re-uploaded rather than cached. */
+void
+gpu_text_draw( const FsvTextVertex *verts, int nverts,
+	       const unsigned int *indices, int nindices )
+{
+	static GLuint vbo, ebo;
+
+	if (verts == NULL || nverts <= 0 || indices == NULL || nindices <= 0)
+		return;
+
+	if (!vbo)
+		glGenBuffers( 1, &vbo );
+	glBindBuffer( GL_ARRAY_BUFFER, vbo );
+	glBufferData( GL_ARRAY_BUFFER, sizeof(FsvTextVertex) * nverts, verts,
+		      GL_STREAM_DRAW );
+
+	glEnableVertexAttribArray( glt.position_location );
+	glVertexAttribPointer( glt.position_location, 3, GL_FLOAT, GL_FALSE,
+			       sizeof(FsvTextVertex), (void *)offsetof(FsvTextVertex, pos) );
+	glEnableVertexAttribArray( glt.texcoord_location );
+	glVertexAttribPointer( glt.texcoord_location, 2, GL_FLOAT, GL_FALSE,
+			       sizeof(FsvTextVertex), (void *)offsetof(FsvTextVertex, texcoord) );
+
+	if (!ebo)
+		glGenBuffers( 1, &ebo );
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, ebo );
+	glBufferData( GL_ELEMENT_ARRAY_BUFFER, sizeof(unsigned int) * nindices,
+		      indices, GL_STREAM_DRAW );
+
+	glUseProgram( glt.program );
+	glUniform1i( glt.texture_location, 0 );
+	glDrawElements( GL_TRIANGLES, nindices, GL_UNSIGNED_INT, 0 );
+	glUseProgram( 0 );
+
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
+	/* Avoid implicit sync by allowing GL to dealloc memory */
+	glBufferData( GL_ARRAY_BUFFER, sizeof(FsvTextVertex) * nverts, NULL,
+		      GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+}
+
+
+void
+gpu_text_set_color( float r, float g, float b )
+{
+	glUseProgram( glt.program );
+	glUniform3f( glt.color_location, r, g, b );
+	glUseProgram( 0 );
+}
+
+
+void
+gpu_text_upload_mvp( const float *mvp )
+{
+	glUseProgram( glt.program );
+	glUniformMatrix4fv( glt.mvp_location, 1, GL_FALSE, mvp );
+	glUseProgram( 0 );
 }
 
 
