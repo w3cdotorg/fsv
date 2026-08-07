@@ -77,6 +77,7 @@
 extern "C" {
 #include "common.h"
 #include "camera.h"
+#include "geometry.h" /* geometry_draw( ) -- see gpu_pick() */
 #include "tmaptext.h" /* text_upload_mvp( ) -- see gpu_upload_matrices() */
 }
 
@@ -1418,7 +1419,16 @@ gpu_scene_end(void)
 	// window background. Kept as Task 2.2's dark slate so an empty
 	// scene is still visibly "the app running" rather than a black
 	// screen indistinguishable from a hang.
-	color_target.clear_color = SDL_FColor{ 0.08f, 0.10f, 0.12f, 1.0f };
+	//
+	// The id-color pass (gpu_pick(), Task 4.2) is the one exception:
+	// ogl_select_modern() cleared to (0,0,0,0) so that a pixel nothing
+	// draws over decodes as node id 0 ("nothing there") -- the dark
+	// slate's non-zero bytes would otherwise read back as a bogus id
+	// for e.g. a click on empty sky. gpu_pick() sets g_render_mode
+	// before this call and restores it right after.
+	color_target.clear_color = g_render_mode == FSV_RENDER_SELECT
+	    ? SDL_FColor{ 0.0f, 0.0f, 0.0f, 0.0f }
+	    : SDL_FColor{ 0.08f, 0.10f, 0.12f, 1.0f };
 	color_target.load_op = SDL_GPU_LOADOP_CLEAR;
 	color_target.store_op = SDL_GPU_STOREOP_STORE;
 
@@ -1623,18 +1633,163 @@ gpu_text_upload_mvp(const float *mvp)
 	memcpy(g_text_vert_ubo.mvp, mvp, sizeof g_text_vert_ubo.mvp);
 }
 
+// Port of ogl_select_modern() (src/ogl.c:456): renders geometry.c's id-color
+// pass into a private off-screen target and reads back the one texel under
+// the cursor. `x`/`y` are already in viewport pixels (input.cpp's
+// pixel_scale()), top-left origin -- see the Y-flip note below.
+//
+// Own command buffer, entirely outside any swapchain frame. This matters
+// because gpu_scene_begin()/gpu_scene_end() are keyed off module-global state
+// (g_cmd, g_color_target, g_target_index, g_recording, the g_vertices/
+// g_indices/g_draws arenas) that the *visible* frame also uses --
+// interleaving the two would corrupt whichever one runs second. It is safe
+// here because input_handle_event() (this function's only caller, via
+// node_at_cursor()) always runs inside main.cpp's SDL_PollEvent() loop,
+// strictly before that iteration's own gpu_frame_begin()/submit_frame():
+// see the loop in src/sdl/main.cpp. g_cmd is therefore always null on entry;
+// the check below turns a violation of that invariant into a logged no-op
+// pick rather than stomping the in-flight frame.
 unsigned int
 gpu_pick(int x, int y)
 {
-	/* Task 4.2: set g_render_mode to FSV_RENDER_SELECT, run
-	 * gpu_scene_begin()/geometry_draw()/gpu_scene_end() against an
-	 * offscreen R8G8B8A8 texture (pipeline_for()'s target == 1 already
-	 * builds for that format), then SDL_DownloadFromGPUTexture() one
-	 * pixel and decode the id. geometry.c paints its own id colors --
-	 * see node_set_color(), src/geometry.c. */
-	(void)x;
-	(void)y;
-	return 0;
+	if (!g_ready || g_window == nullptr)
+		return 0;
+	if (g_cmd != nullptr || g_recording) {
+		SDL_Log("gpu: gpu_pick() called while a scene frame is in "
+		    "flight; ignoring pick");
+		return 0;
+	}
+
+	int width = 0, height = 0;
+	SDL_GetWindowSizeInPixels(g_window, &width, &height);
+	if (width <= 0 || height <= 0)
+		return 0;
+	// Matches node_at_cursor()'s only other guard (viewport_node_for_id()'s
+	// bounds check on the id, not the pixel) -- a pixel outside the
+	// current swapchain size can otherwise be handed in by a stale event
+	// mid-resize.
+	if (x < 0 || y < 0 || x >= width || y >= height)
+		return 0;
+
+	if (!ensure_depth_texture((Uint32)width, (Uint32)height))
+		return 0;
+
+	// Private RGBA8 target, swapchain-sized, released at the end of this
+	// call -- picking is click-frequency, not per-frame, so there is no
+	// need to keep it around the way g_depth_texture is.
+	SDL_GPUTextureCreateInfo tex_info = {};
+	tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+	tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	tex_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	tex_info.width = (Uint32)width;
+	tex_info.height = (Uint32)height;
+	tex_info.layer_count_or_depth = 1;
+	tex_info.num_levels = 1;
+	tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+	SDL_GPUTexture *pick_texture =
+	    SDL_CreateGPUTexture(g_device, &tex_info);
+	if (pick_texture == nullptr) {
+		SDL_Log("gpu: pick texture creation failed: %s",
+		    SDL_GetError());
+		return 0;
+	}
+
+	g_cmd = SDL_AcquireGPUCommandBuffer(g_device);
+	if (g_cmd == nullptr) {
+		SDL_Log("gpu: pick command buffer failed: %s", SDL_GetError());
+		SDL_ReleaseGPUTexture(g_device, pick_texture);
+		return 0;
+	}
+
+	// Reuses gpu_screenshot_*()'s "redirect the scene pass at an
+	// offscreen target" trick (g_capture_texture) instead of a second
+	// mechanism: gpu_scene_begin() already knows how to point
+	// g_color_target/g_target_index at whatever g_capture_texture holds.
+	// FSV_RENDER_SELECT makes node_set_color() (src/geometry.c) paint
+	// flat id colors instead of lit real ones, and makes gpu_scene_end()
+	// clear to (0,0,0,0) instead of the visible frame's dark-slate
+	// background -- see the comment there.
+	g_capture_texture = pick_texture;
+	g_render_mode = FSV_RENDER_SELECT;
+
+	gpu_scene_begin();
+	geometry_draw(FALSE); // no text, no cursor -- exactly ogl_select_modern()
+	gpu_scene_end();
+
+	g_render_mode = FSV_RENDER_NORMAL;
+	g_capture_texture = nullptr;
+
+	SDL_GPUTransferBufferCreateInfo transfer_info = {};
+	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+	transfer_info.size = 4; // one RGBA8 texel
+	SDL_GPUTransferBuffer *download =
+	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+	if (download == nullptr) {
+		SDL_Log("gpu: pick transfer buffer failed: %s", SDL_GetError());
+		SDL_SubmitGPUCommandBuffer(g_cmd);
+		g_cmd = nullptr;
+		SDL_ReleaseGPUTexture(g_device, pick_texture);
+		return 0;
+	}
+
+	unsigned int node_id = 0;
+	{
+		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
+		SDL_GPUTextureRegion source = {};
+		source.texture = pick_texture;
+		source.x = (Uint32)x;
+		// SDL_GPU texture regions are top-left origin (SDL_gpu.h:
+		// SDL_GPUTextureRegion::y is "the *top* offset of the
+		// region"), same as the swapchain and same as the (x, y)
+		// input.cpp already hands in. ogl_select_modern()'s `yy =
+		// viewport[3] - y` exists purely to convert into
+		// glReadPixels()'s bottom-left-origin convention; there is
+		// nothing to convert here. Verified by clicking a node near
+		// the top vs. bottom of the window and confirming both
+		// resolve to the node actually drawn there (an inverted flip
+		// would have swapped top and bottom hits) -- see
+		// docs/PORTING.md Task 4.2.
+		source.y = (Uint32)y;
+		source.w = 1;
+		source.h = 1;
+		source.d = 1;
+		SDL_GPUTextureTransferInfo destination = {};
+		destination.transfer_buffer = download;
+		destination.offset = 0;
+		destination.pixels_per_row = 1;
+		destination.rows_per_layer = 1;
+		SDL_DownloadFromGPUTexture(copy_pass, &source, &destination);
+		SDL_EndGPUCopyPass(copy_pass);
+
+		SDL_GPUFence *fence =
+		    SDL_SubmitGPUCommandBufferAndAcquireFence(g_cmd);
+		g_cmd = nullptr;
+		if (fence != nullptr) {
+			SDL_WaitForGPUFences(g_device, true, &fence, 1);
+			SDL_ReleaseGPUFence(g_device, fence);
+		}
+
+		const Uint8 *pixel = (const Uint8 *)
+		    SDL_MapGPUTransferBuffer(g_device, download, false);
+		if (pixel == nullptr)
+			SDL_Log("gpu: pick map failed: %s", SDL_GetError());
+		else {
+			// Byte order matches node_set_color()'s encode
+			// (src/geometry.c: r = id & 0xFF, g = (id>>8) & 0xFF,
+			// b = (id>>16) & 0xFF) and ogl_select_modern()'s
+			// decode (src/ogl.c:456: color[0] + (color[1]<<8) +
+			// (color[2]<<16)) exactly.
+			node_id = (unsigned int)pixel[0] |
+			    ((unsigned int)pixel[1] << 8) |
+			    ((unsigned int)pixel[2] << 16);
+			SDL_UnmapGPUTransferBuffer(g_device, download);
+		}
+	}
+
+	SDL_ReleaseGPUTransferBuffer(g_device, download);
+	SDL_ReleaseGPUTexture(g_device, pick_texture);
+	return node_id;
 }
 
 // ---- --screenshot ----------------------------------------------------

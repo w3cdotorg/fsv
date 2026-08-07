@@ -1250,6 +1250,153 @@ call-and-clear-node pattern), differing only in which already-verified
    `node_at_cursor()` calls under an unusually fast drag, never
    correctness.
 
+## Task 4.2 verification (gpu_pick — color-ID picking readback)
+
+`gpu_pick(x, y)` (`src/sdl/gpu.cpp`) replaces the stub Task 3.2 left in
+place, as a direct port of `ogl_select_modern()` (`src/ogl.c:456`).
+`src/sdl/input.cpp`'s `node_at_cursor()` and the two debug `SDL_Log()`
+placeholders it fed (button-down left-click, right-click) are removed —
+they were standing in for exactly this. Nothing on the GTK arm changed:
+`ogl-gpu-compat.c` already documents `gpu_pick()` as SDL-only, and
+`viewport.c` still calls `ogl_select_modern()` directly (confirmed by
+`grep -n "gpu_pick\|ogl_select_modern" src/viewport.c src/ogl.c
+src/ogl-gpu-compat.c`).
+
+### How it renders the id pass
+
+No new pipeline or shader: Task 3.2 already built `pipeline_for()` with
+a `target` dimension (0 = swapchain format, 1 = `R8G8B8A8_UNORM`), and
+`node_set_color()` (`src/geometry.c`, survived Task 3.3 unpruned) already
+branches on `gpu_render_mode()` to paint flat id colors with lighting off
+instead of lit real ones. `gpu_pick()` only had to drive those two
+existing seams:
+
+1. Create a private `R8G8B8A8_UNORM` texture, swapchain-sized, and point
+   `g_capture_texture` at it — reusing `gpu_screenshot_begin()`'s own
+   trick, since `gpu_scene_begin()` already knows to redirect
+   `g_color_target`/`g_target_index` at whatever `g_capture_texture`
+   holds (see `gpu_scene_begin()`'s first two lines).
+2. Set `g_render_mode = FSV_RENDER_SELECT`.
+3. `gpu_scene_begin(); geometry_draw(FALSE); gpu_scene_end();` — no text,
+   no cursor, exactly what `ogl_select_modern()`'s own
+   `geometry_draw(FALSE)` call skipped.
+4. Restore `g_render_mode`/`g_capture_texture`, then
+   `SDL_DownloadFromGPUTexture()` the 1×1 region at `(x, y)` through a
+   4-byte transfer buffer, fenced with
+   `SDL_SubmitGPUCommandBufferAndAcquireFence()` +
+   `SDL_WaitForGPUFences()`.
+
+One behavioral fix was needed to make this correct: `gpu_scene_end()`
+hardcoded the visible frame's dark-slate clear color
+(`{0.08, 0.10, 0.12, 1.0}`, Task 2.2) for every pass, id or not. Its
+non-zero bytes would have decoded as a bogus id for any pixel nothing
+draws over — e.g. every click on empty sky. `gpu_scene_end()` now
+clears to `(0,0,0,0)` when `g_render_mode == FSV_RENDER_SELECT`,
+matching `ogl_select_modern()`'s own `glClearColor(0,0,0,0)` before its
+pick draw.
+
+### Byte order
+
+`node_set_color()`'s encode (`r = id & 0xFF`, `g = (id>>8) & 0xFF`,
+`b = (id>>16) & 0xFF`) and `ogl_select_modern()`'s decode
+(`color[0] + (color[1]<<8) + (color[2]<<16)`) already agreed with each
+other pre-port; `gpu_pick()` decodes the same way
+(`pixel[0] | pixel[1]<<8 | pixel[2]<<16`) and the round-trip is confirmed
+by the click tests below resolving to the exact node drawn at that
+screen position.
+
+### Y-flip finding
+
+**No flip is needed**, unlike `ogl_select_modern()`'s
+`yy = viewport[3] - y`. That subtraction exists purely to convert into
+`glReadPixels()`'s bottom-left-origin convention. SDL_GPU texture
+regions are top-left origin — `SDL_gpu.h`'s `SDL_GPUTextureRegion::y`
+is documented as "the *top* offset of the region" — the same convention
+the swapchain and `input.cpp`'s `(x, y)` already use (this matches the
+Y-flip finding Task 3.1/3.2 already made for the swapchain itself).
+Verified empirically, not just read off the header: clicking a node near
+the top of the window (`xmaps`, a folder pedestal) and a node mid-window
+(`camera.c`) both resolved to the correct node; an inverted flip would
+have swapped which one hit which.
+
+### Own-command-buffer design
+
+`gpu_pick()` acquires its own `SDL_GPUCommandBuffer` rather than reusing
+whatever the main loop is doing, and temporarily repoints the module's
+shared `g_cmd`/`g_color_target`/`g_target_index`/`g_render_mode`/
+`g_capture_texture` state at its own private target for the duration of
+one `gpu_scene_begin()`/`geometry_draw()`/`gpu_scene_end()` call, then
+restores it. This is safe — not just convenient — because
+`input_handle_event()` (the only caller, via `node_at_cursor()`) always
+runs inside `main.cpp`'s `SDL_PollEvent()` loop, strictly before that
+iteration's own `gpu_frame_begin()`/`submit_frame()`: there is never an
+in-flight scene command buffer at the point a pick can happen. `gpu_pick()`
+checks `g_cmd != nullptr || g_recording` on entry and turns a violation of
+that invariant into a logged no-op pick rather than corrupting whichever
+frame runs second.
+
+### What's live now
+
+`node_at_cursor()`'s hover path, left-click select+highlight, and
+button-up `camera_look_at()` fly-to are no longer plumbed-but-inert
+(Task 4.1's own description) — they resolve real nodes end to end.
+Right-click's `filelist_show_entry()` call is exercised for real too
+(still a no-op body until Task 5.2); its ImGui context-menu is still
+Task 5.1.
+
+### Manual verification
+
+Built both arms from scratch (`meson setup builddir && ninja -C
+builddir` for the GTK/headless arm — the `fsv` GTK executable itself is
+gated off on Darwin, pre-existing and unrelated to this task, see
+`src/meson.build`; `meson setup builddir-sdl -Dfrontend=sdl && ninja -C
+builddir-sdl` for the Metal arm). Zero warnings from `gpu.cpp`/
+`input.cpp`/`main.cpp`. `meson test -C builddir scanfs` and `meson test
+-C builddir-sdl scanfs` both → `1/1 fsv:scanfs OK`.
+
+Verified with a temporary, fully-reverted hook in `--screenshot` mode
+(env-var gated, `git diff src/sdl/main.cpp` is clean of it — the
+committed diff there is a one-comment update): direct `gpu_pick(x, y)`
+calls cross-checked against a screenshot of `src` (this repo) rendered
+in MapV, and a full `input_handle_event()` drive (synthetic
+`SDL_Event`s, no real event queue needed) to prove the production
+hover/click/fly-to path, not just `gpu_pick()` itself:
+
+- `gpu_pick(480, 445)` on the `src` MapV pedestal layout → id 9 →
+  `src/camera.c`, matching the visibly labeled pedestal at that screen
+  position.
+- `gpu_pick(676, 445)` → id 37 → `src/gui.c`, same layout, adjacent
+  pedestal.
+- `gpu_pick(598, 150)` (near the top of the window) → id 60 →
+  `src/xmaps`, the folder pedestal drawn there — this is the pick that
+  falsifies an inverted Y-flip (see above).
+- `gpu_pick(100, 100)` on empty sky → id 0, no node, no crash.
+- Same four checks repeated on `tests/fixture` (smaller tree): the
+  visible `file1.txt` pedestal resolved correctly by id, empty sky → 0.
+- Full `input_handle_event()` drive at `(480, 445)` (the `camera.c`
+  pedestal): a synthetic hover motion event visibly brightens
+  `camera.c`'s pedestal in a screenshot (`geometry_highlight_node()`
+  through the real `node_at_cursor()` path, not a direct `gpu_pick()`
+  call) — confirms indicated_node/hover highlighting is live end to
+  end. A synthetic press+release pair then reports `camera_moving() ==
+  1` immediately, and a further 3s of ticked animation shows the camera
+  visibly closer to `camera.c` in a screenshot pair — `camera_look_at()`
+  fires from the real button-up handler.
+- Same drive at `(100, 100)` (empty sky): `camera_moving() == 0` before
+  and after, no crash — clicking nothing does nothing, as it should.
+- Screenshots taken immediately after every `gpu_pick()`/click call
+  (the normal `--screenshot` capture that already follows in that code
+  path) are visually identical to a pick-free run of the same
+  directory — the id-color pass never reaches the visible frame,
+  confirming the private-target design doesn't leak into what the user
+  sees.
+- Pick latency, timed around the `gpu_pick()` call only (three repeated
+  clicks on the same node, same process, timer code not kept in the
+  committed diff): 1.85 ms, 9.29 ms, 6.79 ms — the higher one is the
+  first call, which pays pipeline_for()'s one-time lazy-build cost for
+  the `target == 1` combination; all three are far under the 50 ms
+  click-frequency budget.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -1289,3 +1436,6 @@ code is kept.
 | 2026-08-07 | Scroll-wheel dolly is a labeled addition, not a port | viewport.c/doc/mouse.html have no scroll-wheel gesture at all; the brief and the verification bar both ask for one explicitly, so it is wired using the same `camera_dolly()` entry point and sensitivity shape as the middle-drag case rather than left unimplemented |
 | 2026-08-07 | Explicit `SDL_CaptureMouse()` on middle/Ctrl+left press despite SDL3's own mouse auto-capture already covering it | makes the intent self-documenting in the source rather than resting silently on a hint (`SDL_HINT_MOUSE_AUTO_CAPTURE`) whose default a user or future change could flip |
 | 2026-08-07 | `viewport_node_for_id()` added to the existing `src/sdl/stubs.c`/`src/viewport.h`, not deferred to Task 4.2 | the node table itself already lives in `stubs.c` (Task 3.3); Task 4.2 only has to make `gpu_pick()` return a real id, not build a second lookup path |
+| 2026-08-07 | `gpu_pick()` reuses `gpu_screenshot_*()`'s `g_capture_texture` redirect instead of a second offscreen-target mechanism | `gpu_scene_begin()` already keys `g_color_target`/`g_target_index` off `g_capture_texture`; a second mechanism would duplicate that branch for no benefit — the two callers (screenshot, pick) never run concurrently |
+| 2026-08-07 | `gpu_scene_end()`'s clear color branches on `g_render_mode == FSV_RENDER_SELECT` rather than giving picking its own render-pass function | the dark-slate clear (Task 2.2) decodes as a non-zero, bogus node id for any pixel the id pass draws nothing over (e.g. empty sky); one branch on already-shared state was simpler than a parallel copy of `gpu_scene_end()` |
+| 2026-08-07 | `gpu_pick()` acquires its own `SDL_GPUCommandBuffer` rather than piggybacking on the main loop's | `input_handle_event()` always runs before that iteration's `gpu_frame_begin()`, so `g_cmd` is provably null at call time; a dedicated command buffer keeps the pick's copy pass and fence wait from ever touching the frame the user is about to see |

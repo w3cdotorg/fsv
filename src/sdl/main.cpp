@@ -480,9 +480,8 @@ main(int argc, char **argv)
 			// ImGui gets the event first (above); input_handle_event()
 			// checks io.WantCaptureMouse itself before navigating, so
 			// a click/drag over an ImGui window never moves the
-			// camera. Mouse nav is fully live now (Task 4.1); node
-			// selection is plumbed through but inert until gpu_pick()
-			// (Task 4.2) can actually name a node.
+			// camera. Mouse nav (Task 4.1) and node selection
+			// (gpu_pick(), Task 4.2) are both fully live now.
 			input_handle_event(&ev);
 			// Any event (input, resize, expose, ...) may warrant a
 			// redraw. ImGui_ImplSDL3_ProcessEvent() just queues input

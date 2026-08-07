@@ -107,16 +107,11 @@ pixel_scale(SDL_WindowID window_id)
 // inline is now viewport_node_for_id() (src/sdl/stubs.c), since the table
 // itself lives there (Task 3.3), not in this file.
 //
-// gpu_pick() is still a stub (returns 0 unconditionally) until Task 4.2
-// implements the offscreen id-color readback, which makes this function
-// -- and therefore every selection gesture below -- a real, exercised
-// call that always resolves to "no node" today. Silent, exactly like
-// viewport.c's own node_at_location(): this runs on *every* hover motion
-// event even with no button held (see the MOTION_NOTIFY port below), so
-// logging in here would flood stdout on ordinary mouse movement. The
-// left-click case (the one the Task 4.1 brief asks to make visible) logs
-// once per click at its own call site instead -- see
-// SDL_EVENT_MOUSE_BUTTON_DOWN below.
+// gpu_pick() is a real offscreen id-color readback as of Task 4.2, so this
+// resolves to an actual GNode* whenever the cursor is over one. Silent,
+// exactly like viewport.c's own node_at_location(): this runs on *every*
+// hover motion event even with no button held (see the MOTION_NOTIFY port
+// below), so logging in here would flood stdout on ordinary mouse movement.
 static GNode *
 node_at_cursor(int x, int y)
 {
@@ -211,35 +206,22 @@ input_handle_event(const SDL_Event *ev)
 			else
 				g_indicated_node = node_at_cursor((int)x, (int)y);
 
-			if (btn1) {
-				// Left-click: "select node under cursor" (task
-				// brief) -> node_at_cursor() -> gpu_pick() (Task 4.2
-				// stub, always 0 today). Logged once per click, at
-				// this call site rather than inside node_at_cursor()
-				// itself, so ordinary hover movement -- which also
-				// calls node_at_cursor() on every motion event, see
-				// SDL_EVENT_MOUSE_MOTION below -- does not flood the
-				// log.
-				SDL_Log("input: left-click pick at (%d,%d) -> %s",
-				    (int)x, (int)y,
-				    g_indicated_node != NULL ?
-				        node_absname(g_indicated_node) :
-				        "no node (gpu_pick stub; Task 4.2)");
-			}
-
+			// Left-click: "select node under cursor" (task brief) ->
+			// node_at_cursor() -> gpu_pick() (Task 4.2), which now
+			// resolves a real node. update_highlight() right below is
+			// the actual selection behavior (highlight + status bar);
+			// the fly-to itself happens on button-up, below, per
+			// viewport.c's own press/release split.
 			update_highlight(btn1);
 
 			if (g_indicated_node != NULL && btn3) {
 				// Right-click: viewport.c brings up context_menu()
 				// (a GTK popup) here. Task 5.1 owns the ImGui
-				// equivalent; until then this is plumbed but inert --
-				// logged so the gesture is visibly exercised without
-				// a crash. filelist_show_entry() is called for real:
-				// it is already a legitimate (if currently no-op)
-				// entry point in stubs.c, and calling it now needs no
+				// equivalent; until then this is plumbed but inert.
+				// filelist_show_entry() is called for real: it is
+				// already a legitimate (if currently no-op) entry
+				// point in stubs.c, and calling it now needs no
 				// changes once Task 5.2 fills it in.
-				SDL_Log("input: right-click on \"%s\" -> context menu (inert; Task 5.1)",
-				    node_absname(g_indicated_node));
 				filelist_show_entry(g_indicated_node);
 			}
 		}
