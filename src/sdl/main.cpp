@@ -96,12 +96,13 @@ main(int argc, char **argv)
 	}
 
 	// Creates the GPU device, claims the window, builds the scene
-	// pipelines. Everything below needs the device, so bail if it
-	// failed rather than crawling on with a NULL one.
+	// pipelines. Everything below needs all of that, so bail on a
+	// partial init rather than running on and re-logging the same
+	// failure every frame; gpu_init() has already logged the reason.
 	gpu_init(g_window);
-	SDL_GPUDevice *device = gpu_device();
-	if (device == nullptr)
+	if (!gpu_ready())
 		return 1;
+	SDL_GPUDevice *device = gpu_device();
 
 	// Install all five hooks the core requires before any libfsvcore
 	// call that might touch fsv_platform (fsv_animation_tick(), below).

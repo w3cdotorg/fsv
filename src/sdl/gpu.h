@@ -62,12 +62,6 @@ void fsv_mesh_upload(FsvMesh *m, const FsvVertex *verts, int nverts,
  * gpu_set_lighting( ) / gpu_upload_matrices( ) state. */
 void fsv_mesh_draw(FsvMesh *m);
 
-/* Same, but paints the mesh in the flat color that encodes `id` for
- * color-ID picking (the RENDERMODE_SELECT path of src/geometry.c), with
- * lighting forced off. The color/lighting state set by the caller is
- * restored afterwards. */
-void fsv_mesh_draw_id(FsvMesh *m, unsigned int id);
-
 /**** Device / frame ****************/
 
 /* Creates the GPU device and claims `sdl_window` (an SDL_Window *; typed
@@ -91,11 +85,14 @@ unsigned int gpu_pick(int x, int y);
 /**** Camera matrices ****************/
 
 /* The SDL_GPU counterpart of FsvGlState.projection / .modelview
- * (src/ogl.h). Public for the same reason they were public there:
- * geometry.c saves, translates/rotates/scales and restores `modelview`
- * around each subtree it draws, and reads `projection` to compute an MVP
- * for its own culling math (src/geometry.c:995). Call
- * gpu_upload_matrices( ) after mutating either. */
+ * (src/ogl.h). `modelview` is public because geometry.c saves,
+ * translates/rotates/scales and restores it around every subtree it
+ * draws (src/geometry.c:459, 1127, 2485, ...) and then calls
+ * gpu_upload_matrices( ). `projection` is public only because it is
+ * where setup_projection_matrix( ) puts its result and what
+ * gpu_upload_matrices( ) multiplies by; no code outside gpu.cpp reads it
+ * today (geometry.c's one read, at line 999, is inside an `#if 0` debug
+ * block). Call gpu_upload_matrices( ) after mutating either. */
 typedef struct {
 	mat4 projection;
 	mat4 modelview;

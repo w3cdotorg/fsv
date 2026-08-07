@@ -111,14 +111,23 @@ static_assert(offsetof(FsvVertex, color) == 24, "vertex attribute 2 offset");
 SDL_Window *g_window;
 SDL_GPUDevice *g_device;
 
+// False until gpu_init() has completed *every* step. gpu_init() returns
+// void (that is the C contract geometry.c compiles against), so this is
+// how main.cpp tells "renderer up" from "renderer half-built": without
+// it, a failed device/shader/pipeline step would leave the app running
+// and logging the same error once per frame forever.
+bool g_ready;
+
 SDL_GPUGraphicsPipeline *g_scene_pipeline;
 // Same shaders and state as g_scene_pipeline, but targeting an offscreen
 // R8G8B8A8_UNORM texture instead of the swapchain: a pipeline's color
 // target format is fixed at creation, and Task 4.2 renders id-colors into
 // a readback texture of a format it controls (the swapchain's is the
 // driver's choice, and may be BGRA or sRGB). Picking needs no separate
-// *shader*: fsv_mesh_draw_id() just pushes a flat color with lighting
-// off, exactly as geometry.c does today in RENDERMODE_SELECT.
+// *shader*: geometry.c's node_set_color() (src/geometry.c:88) already
+// computes the flat id color itself in RENDERMODE_SELECT and pushes it
+// through the ordinary color + lighting uniforms, which port to
+// gpu_set_color() + gpu_set_lighting(0).
 SDL_GPUGraphicsPipeline *g_id_pipeline;
 
 SDL_GPUTexture *g_depth_texture;
@@ -521,28 +530,35 @@ gpu_init(void *sdl_window)
 	    vert_blobs, (int)SDL_arraysize(vert_blobs), /* uniform buffers */ 1);
 	SDL_GPUShader *frag = create_shader(SDL_GPU_SHADERSTAGE_FRAGMENT,
 	    frag_blobs, (int)SDL_arraysize(frag_blobs), /* uniform buffers */ 1);
-	if (vert == nullptr || frag == nullptr) {
+
+	if (vert != nullptr && frag != nullptr) {
+		g_scene_pipeline = create_scene_pipeline(vert, frag,
+		    SDL_GetGPUSwapchainTextureFormat(g_device, g_window));
+		if (g_scene_pipeline == nullptr)
+			SDL_Log("gpu: scene pipeline creation failed: %s",
+			    SDL_GetError());
+
+		g_id_pipeline = create_scene_pipeline(vert, frag,
+		    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+		if (g_id_pipeline == nullptr)
+			SDL_Log("gpu: id pipeline creation failed: %s",
+			    SDL_GetError());
+	} else {
 		SDL_Log("gpu: no usable scene shader");
-		return;
 	}
 
-	g_scene_pipeline = create_scene_pipeline(vert, frag,
-	    SDL_GetGPUSwapchainTextureFormat(g_device, g_window));
-	if (g_scene_pipeline == nullptr)
-		SDL_Log("gpu: scene pipeline creation failed: %s",
-		    SDL_GetError());
+	// The pipelines hold their own references to the shader modules, so
+	// both are released here whether or not the pipelines were built --
+	// releasing each independently, since one stage can load while the
+	// other fails.
+	if (vert != nullptr)
+		SDL_ReleaseGPUShader(g_device, vert);
+	if (frag != nullptr)
+		SDL_ReleaseGPUShader(g_device, frag);
 
-	g_id_pipeline = create_scene_pipeline(vert, frag,
-	    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-	if (g_id_pipeline == nullptr)
-		SDL_Log("gpu: id pipeline creation failed: %s", SDL_GetError());
-
-	// The pipelines hold their own references to the shader modules.
-	SDL_ReleaseGPUShader(g_device, vert);
-	SDL_ReleaseGPUShader(g_device, frag);
-
-	if (g_scene_pipeline != nullptr && g_id_pipeline != nullptr)
-		SDL_Log("gpu: scene + id pipelines created");
+	if (g_scene_pipeline == nullptr || g_id_pipeline == nullptr)
+		return; // g_ready stays false; main.cpp exits
+	SDL_Log("gpu: scene + id pipelines created");
 
 	// Initial matrix state, from ogl_init() (src/ogl.c:182): a
 	// right-handed frame with +z straight up and the camera at the
@@ -566,6 +582,14 @@ gpu_init(void *sdl_window)
 	gpu_set_color(1.0f, 1.0f, 1.0f, 1.0f);
 	gpu_set_lighting(1); // ogl_init() calls ogl_enable_lightning()
 	gpu_upload_matrices();
+
+	g_ready = true;
+}
+
+bool
+gpu_ready(void)
+{
+	return g_ready;
 }
 
 void
@@ -583,6 +607,7 @@ gpu_shutdown(void)
 	g_scene_pipeline = nullptr;
 	g_id_pipeline = nullptr;
 	g_depth_texture = nullptr;
+	g_ready = false;
 
 	SDL_ReleaseWindowFromGPUDevice(g_device, g_window);
 	SDL_DestroyGPUDevice(g_device);
@@ -601,6 +626,10 @@ gpu_frame_begin(void)
 {
 	g_swapchain = nullptr;
 	g_swapchain_width = g_swapchain_height = 0;
+	// Defensive: a pass belongs to one command buffer, so a stale
+	// pointer surviving into the next frame would make fsv_mesh_draw()
+	// record into a dead encoder instead of tripping its assertion.
+	g_scene_pass = nullptr;
 
 	g_cmd = SDL_AcquireGPUCommandBuffer(g_device);
 	if (g_cmd == nullptr) {
@@ -690,9 +719,12 @@ gpu_scene_end(void)
 unsigned int
 gpu_pick(int x, int y)
 {
-	/* Task 4.2: render the scene through g_id_pipeline into an
-	 * offscreen R8G8B8A8 texture with fsv_mesh_draw_id(), then
-	 * SDL_DownloadFromGPUTexture() one pixel and decode the id. */
+	/* Task 4.2: open a pass on an offscreen R8G8B8A8 texture with
+	 * g_id_pipeline bound, run geometry_draw() through it (geometry.c
+	 * paints its own id colors -- see node_set_color(), src/geometry.c:88),
+	 * then SDL_DownloadFromGPUTexture() one pixel and decode the id.
+	 * That pass machinery is 4.2's to build: gpu_scene_begin() only ever
+	 * targets the swapchain, so nothing here can reach g_id_pipeline yet. */
 	(void)x;
 	(void)y;
 	return 0;
@@ -819,18 +851,24 @@ fsv_mesh_upload(FsvMesh *m, const FsvVertex *verts, int nverts,
 	SDL_GPUTransferBufferLocation source = {};
 	SDL_GPUBufferRegion destination = {};
 
+	// cycle = true on both: ensure_buffer() above keeps and reuses a
+	// buffer that is large enough, and a rescan re-uploads a mesh that
+	// a still-in-flight frame may be reading from. Without cycling,
+	// SDL_UploadToGPUBuffer "overwrites the data" in place
+	// (SDL_gpu.h:3919) -- a read/write hazard. Both uploads replace the
+	// whole region, which is exactly the case cycling is meant for.
 	source.transfer_buffer = transfer;
 	source.offset = 0;
 	destination.buffer = m->vertex_buffer;
 	destination.offset = 0;
 	destination.size = vertex_bytes;
-	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, false);
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
 
 	source.offset = vertex_bytes;
 	destination.buffer = m->index_buffer;
 	destination.offset = 0;
 	destination.size = index_bytes;
-	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, false);
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
 
 	SDL_EndGPUCopyPass(copy_pass);
 	SDL_SubmitGPUCommandBuffer(cmd);
@@ -859,23 +897,4 @@ fsv_mesh_draw(FsvMesh *m)
 	    SDL_GPU_INDEXELEMENTSIZE_32BIT);
 
 	SDL_DrawGPUIndexedPrimitives(g_scene_pass, m->num_indices, 1, 0, 0, 0);
-}
-
-void
-fsv_mesh_draw_id(FsvMesh *m, unsigned int id)
-{
-	// Same encoding ogl_select_modern() decodes (src/ogl.c:498):
-	// red = id[7:0], green = id[15:8], blue = id[23:16].
-	const SceneFragUBO saved_frag = g_frag_ubo;
-	const std::int32_t saved_vert_lighting = g_vert_ubo.lightning_enabled;
-
-	gpu_set_lighting(0);
-	gpu_set_color((float)(id & 0xffu) / 255.0f,
-	    (float)((id >> 8) & 0xffu) / 255.0f,
-	    (float)((id >> 16) & 0xffu) / 255.0f, 1.0f);
-
-	fsv_mesh_draw(m);
-
-	g_frag_ubo = saved_frag;
-	g_vert_ubo.lightning_enabled = saved_vert_lighting;
 }

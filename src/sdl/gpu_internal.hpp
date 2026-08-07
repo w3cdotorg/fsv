@@ -23,6 +23,14 @@
 // gpu_shutdown().
 SDL_GPUDevice *gpu_device(void);
 
+// True only once gpu_init() has completed every step (device, window
+// claim, depth format, shaders, both pipelines). gpu_init() itself
+// returns void because gpu.h is the C contract geometry.c compiles
+// against; main.cpp checks this instead and exits with the single error
+// gpu_init() already logged, rather than running on with a half-built
+// renderer that re-logs the same failure every frame.
+bool gpu_ready(void);
+
 // Acquires this frame's command buffer and swapchain texture. Returns
 // the command buffer, or nullptr if one could not be acquired (in which
 // case the frame must be skipped entirely — do not call gpu_frame_end()).
