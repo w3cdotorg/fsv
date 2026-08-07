@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M0 done — M1 (headless core) in progress (Tasks 1.1, 1.2 done)**
+- Status: **M0 done — M1 (headless core) in progress (Tasks 1.1, 1.2, 1.3 done)**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -87,6 +87,100 @@ GUI.
   instead (block/unblock around every programmatic `set_scroll`, one
   `value_changed` handler per axis calling the same camera entry point
   the old `camera_scrollbar_move_cb( )` used).
+
+## Task 1.3 verification (libfsvcore + fsv-scan + fixture test)
+
+A `frontend` meson option (`gtk`/`sdl`, default `gtk`) now gates the
+GTK dependency lookups (`required: frontend == 'gtk'`) and the `fsv`
+executable target itself, which additionally only builds when
+`host_machine.system() != 'darwin'` — `ogl.c`'s `GL/glu.h` dependency
+doesn't exist on macOS (pre-existing, out of scope here; see Task 1.1).
+This means `meson setup` no longer hard-fails on a GTK-less host, and
+the macOS build simply skips `src/fsv` while still configuring and
+building everything else.
+
+`libfsvcore` (`src/meson.build`) is a static library built from
+`scanfs.c colexp.c color.c common.c animation.c camera.c` against only
+`glib-2.0`, `cglm`, `libm` — plus `libmisc_dep` (nvstore, used by
+`color.c`'s wildcard-pattern persistence) and `libdebug_dep` (the
+default meson `buildtype` is `debug`, which defines `-DDEBUG`, which
+makes `common.h` route `xmalloc`/`xfree`/etc. through `debug.c`'s
+allocator-tracking wrappers — those two are pulled in for exactly the
+same reason the existing `fsv` executable target already links them).
+Neither pulls in GTK: `libdebug`'s own `meson.build` lists `gtkdep` as
+a *compile-only* dependency of `debug.c` (which doesn't call any GTK
+function — likely dead cruft from an earlier version, left alone as
+out of scope for this task), and `declare_dependency()` doesn't
+propagate it to consumers.
+
+**Breaking the transitive-GTK trap in `window.h`:** `camera.c`/
+`color.c`/`scanfs.c` include `window.h` for GTK-free frontend
+notifications (`window_set_access`, `window_birdseye_view_off`,
+`window_set_color_mode`, `window_statusbar`), but `window.h`
+unconditionally did `#include <gtk/gtk.h>` and declared
+`window_init(GtkApplication *, gpointer)` unconditionally too. Fixed
+by following the exact convention `gui.h` already uses elsewhere in
+this codebase: drop the header's own `<gtk/gtk.h>` include, and gate
+`window_init()`'s declaration behind `#ifdef __GTK_H__` (true once a
+caller has included `<gtk/gtk.h>` itself first). `window.c` — the only
+place besides `fsv.c` that needs `window_init()` visible — had its
+`#include "window.h"` reordered to after `#include <gtk/gtk.h>`.
+Also removed a dead, unused `#include <gtk/gtk.h>` directly in
+`scanfs.c` (scanfs.c calls no GTK symbol itself; it was only there to
+paper over `window.h`'s forced include).
+
+**`fsv-scan` / `test_scanfs` link against libfsvcore's objects, not
+the library as a whole**, exactly as the task brief anticipated —
+but the missing piece the brief didn't call out is that `scanfs.c`,
+`colexp.c` and `camera.c` also call into `dirtree.c`, `filelist.c`,
+`geometry.c`, `gui.c`, `viewport.c` and `window.c` (all real GTK/GL
+frontend files, deliberately *not* part of libfsvcore). Those calls
+are all one-way "notify the frontend" hooks (redraw a widget, update a
+status bar, recompute cached 3D geometry) with no return value the
+core logic depends on. `tools/fsv-headless-stubs.c` provides headless
+no-op implementations of exactly those ~24 symbols
+(`gui_update`, `dirtree_*`, `filelist_*`, `geometry_*`,
+`viewport_pass_node_table`, `window_*`), shared by both `fsv-scan` and
+`test_scanfs` via a `headless_stubs_src` variable set in
+`tools/meson.build`. This file is *not* part of `libfsvcore` — real
+frontends keep providing their own real implementations.
+
+`tests/fixture/` is a tiny committed tree (`file1.txt`, `dir-a/`,
+`dir-a/file2.bin`, `dir-a/dir-b/`, `dir-a/dir-b/file3`) and
+`tests/test_scanfs.c` asserts `scanfs(FIXTURE_DIR)` produces a
+non-null `globals.fstree` with `g_node_n_nodes(..., G_TRAVERSE_ALL) >=
+6`. `FIXTURE_DIR` is injected via `c_args`.
+
+TDD evidence:
+- **RED:** before `tools/meson.build`/`tests/meson.build` existed,
+  `ninja -C builddir test_scanfs fsv-scan` → `ninja: error: unknown
+  target 'test_scanfs'`. After wiring the meson targets but before
+  fixing `window.h`, the build failed to *compile*
+  (`fatal error: 'gtk/gtk.h' file not found` in `color.c`/`camera.c`/
+  `scanfs.c`). After fixing `window.h`/`scanfs.c`, it failed to
+  *link* (`ld: symbol(s) not found` for the ~24 frontend-notification
+  symbols listed above).
+- **GREEN:** after adding `tools/fsv-headless-stubs.c` and linking it
+  into both targets, `ninja -C builddir` builds cleanly and
+  `meson test -C builddir scanfs` → `1/1 fsv:scanfs OK`.
+
+- **macOS (this machine, default `meson setup builddir`, buildtype
+  `debug`):** `ninja -C builddir` builds all 8 targets (`libfsvcore`,
+  `fsv-scan`, `test_scanfs`, plus `libmisc`/`libdebug`/po/gresource
+  helpers) with zero touch of GTK — no `src/fsv` target is even
+  generated. `meson test -C builddir scanfs` → `1/1 fsv:scanfs OK`.
+  `./builddir/tools/fsv-scan tests/fixture` → `nodes=7`, exit 0. Note:
+  this meson version (1.11.2) doesn't create bare `ninja` aliases
+  `test_scanfs`/`fsv-scan` as the brief's exact command assumed — use
+  `ninja -C builddir` (build everything) or the full target paths
+  `tools/fsv-scan` / `tests/test_scanfs`; `meson test` resolves the
+  test target internally regardless.
+- **Linux (Debian bookworm container via OrbStack/Docker, same package
+  set as Tasks 1.1/1.2):** `meson setup builddir && ninja -C builddir`
+  builds all 11 targets end to end, **including `src/fsv`** (the GTK
+  frontend keeps building identically — `frontend` defaults to `gtk`
+  and the host isn't macOS). `meson test -C builddir scanfs` → `1/1
+  scanfs OK`. `./builddir/tools/fsv-scan tests/fixture` → `nodes=7`.
 
 ## Why this architecture
 
