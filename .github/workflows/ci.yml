@@ -22,6 +22,11 @@
 #
 # Every job runs on push and pull_request; only `release` is gated to
 # tag pushes.
+#
+# Release tarballs deliberately do NOT include shaders/: since Task
+# 3.2, shaders are compiled offline and embedded in the binary
+# (tools/embed-shaders.py), so nothing under shaders/ is needed at
+# runtime. See docs/PORTING.md's Task 6.2 + 6.3 fix-round section.
 name: ci
 
 on: [push, pull_request]
@@ -88,6 +93,7 @@ jobs:
 
       - name: Install dependencies (apt)
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y meson ninja-build libglib2.0-dev \
             libcglm-dev libgtk-3-dev libepoxy-dev gettext file \
@@ -145,6 +151,7 @@ jobs:
       # needed to *run*) backends enabled.
       - name: Install build dependencies (apt)
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             git cmake ninja-build build-essential pkg-config meson \
@@ -162,17 +169,33 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/sdl3-install
-          key: sdl3-${{ runner.os }}-${{ env.SDL3_VERSION }}
+          key: sdl3-${{ runner.os }}-${{ env.SDL3_VERSION }}-static
 
-      - name: Build + install SDL3 from source
+      # -DSDL_SHARED=OFF -DSDL_STATIC=ON, not the shared default: this
+      # binary (and its artifact, potentially the one a release ships)
+      # would otherwise dynamically link libSDL3.so -- which, per the
+      # comment above, has NO Ubuntu package on any GitHub-hosted
+      # runner. A shared build would produce an artifact nobody
+      # downloading the release could actually run, with no user-side
+      # fix (unlike the GTK binary's system-GTK dependency, which is a
+      # normal `apt install`). Static SDL3 removes that dependency
+      # entirely: confirmed for this fix round by copying the resulting
+      # `fsv` into a bare `ubuntu:24.04` container with *no* packages
+      # installed at all -- `ldd` shows no libSDL3 reference, and
+      # `./fsv --help` runs successfully once only `libglib2.0-0` (an
+      # ordinary runtime package, present on most real systems already)
+      # is added -- the same tier of dependency as the GTK binary's
+      # system GTK, not SDL3's "no package exists" problem.
+      - name: Build + install SDL3 from source (static)
         if: steps.sdl3-cache.outputs.cache-hit != 'true'
         run: |
+          set -euo pipefail
           git clone --depth 1 --branch "release-${SDL3_VERSION}" \
             https://github.com/libsdl-org/SDL.git /tmp/sdl-src
           cmake -S /tmp/sdl-src -B /tmp/sdl-build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/sdl3-install" \
-            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF
+            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF
           cmake --build /tmp/sdl-build -j"$(nproc)"
           cmake --install /tmp/sdl-build
 
@@ -186,6 +209,21 @@ jobs:
 
       - name: Test (scanfs, nvstore, color_persistence)
         run: meson test -C builddir --print-errorlogs
+
+      # Regression guard for the static-linking fix above: if a future
+      # SDL3 version bump or CMake flag change quietly relinks fsv
+      # against a shared libSDL3, this catches it here instead of at
+      # someone's download-and-run.
+      - name: Verify no dynamic libSDL3 dependency
+        run: |
+          set -euo pipefail
+          if ldd builddir/src/sdl/fsv | grep -qi 'libsdl3'; then
+            echo "::error::fsv links libSDL3 dynamically, but no libSDL3 package exists on any target Ubuntu -- see the SDL3-on-Ubuntu comment above. Rebuild SDL3 with -DSDL_SHARED=OFF -DSDL_STATIC=ON."
+            ldd builddir/src/sdl/fsv
+            exit 1
+          fi
+          echo "OK -- no dynamic libSDL3 dependency:"
+          ldd builddir/src/sdl/fsv
 
       - name: Upload Linux (SDL) binary
         uses: actions/upload-artifact@v4
@@ -225,6 +263,13 @@ jobs:
       # linux-sdl is best-effort, so its artifact may not exist; pick it
       # when present, otherwise fall back to the GTK binary, per this
       # task's own instruction ("SDL binary if built, else GTK binary").
+      # (The SDL binary, when present, is statically linked against
+      # SDL3 -- see the linux-sdl job -- so it needs nothing beyond the
+      # GTK binary's own tier of ordinary runtime packages.)
+      #
+      # Neither tarball ships shaders/: shaders are compiled offline and
+      # embedded in the binary (Task 3.2, tools/embed-shaders.py), so
+      # nothing under shaders/ is needed at runtime.
       - name: Assemble release tarballs
         run: |
           set -euo pipefail
@@ -238,6 +283,20 @@ jobs:
           chmod +x "$macos_dir/fsv"
           cp packaging/macos/Info.plist packaging/macos/make-bundle.sh "$macos_dir/"
           cp README.md LICENSE.md "$macos_dir/"
+          cat > "$macos_dir/USAGE.txt" <<'EOF'
+          fsv (SDL/Metal frontend) -- release tarball contents:
+
+            fsv             the arm64 binary -- run directly: ./fsv [rootdir]
+            Info.plist,
+            make-bundle.sh  packaging helpers to build a proper fsv.app bundle:
+                              ./make-bundle.sh ./fsv fsv.app && open fsv.app
+            README.md,
+            LICENSE.md      project docs
+
+          Shaders are compiled offline and embedded in the binary (see
+          docs/PORTING.md, Task 3.2) -- nothing under shaders/ is needed at
+          runtime, so it is not included here.
+          EOF
           tar -czf "dist/${macos_dir}.tar.gz" "$macos_dir"
 
           # --- Linux (x86_64): SDL binary if the best-effort job built
@@ -253,6 +312,17 @@ jobs:
           fi
           chmod +x "$linux_dir/fsv"
           cp README.md LICENSE.md "$linux_dir/"
+          cat > "$linux_dir/USAGE.txt" <<'EOF'
+          fsv -- release tarball contents:
+
+            fsv             the x86_64 binary -- run directly: ./fsv [rootdir]
+            README.md,
+            LICENSE.md      project docs
+
+          Shaders are compiled offline and embedded in the binary (see
+          docs/PORTING.md, Task 3.2) -- nothing under shaders/ is needed at
+          runtime, so it is not included here.
+          EOF
           tar -czf "dist/${linux_dir}.tar.gz" "$linux_dir"
 
           ls -la dist/
