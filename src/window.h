@@ -14,7 +14,11 @@
 #endif
 #define FSV_WINDOW_H
 
-#include <gtk/gtk.h>
+/* No unconditional <gtk/gtk.h> here: window.h is included by the headless
+ * core (camera.c, color.c, scanfs.c) for the GTK-free frontend-notification
+ * functions below. GtkApplication-typed decls are gated behind __GTK_H__,
+ * same convention as gui.h — callers that need window_init() must include
+ * <gtk/gtk.h> themselves before this header. */
 
 typedef enum {
 	SB_LEFT,
@@ -22,7 +26,9 @@ typedef enum {
 } StatusBarID;
 
 
+#ifdef __GTK_H__
 void window_init(GtkApplication *app, gpointer user_data);
+#endif
 void window_set_access( boolean enabled );
 #ifdef FSV_COLOR_H
 void window_set_color_mode( ColorMode mode );

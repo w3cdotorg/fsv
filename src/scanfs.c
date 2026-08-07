@@ -16,7 +16,6 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <gtk/gtk.h>
 #include <errno.h>
 
 #include "dirtree.h"

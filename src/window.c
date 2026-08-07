@@ -11,9 +11,10 @@
 
 
 #include "common.h"
-#include "window.h"
 
 #include <gtk/gtk.h>
+
+#include "window.h"
 
 #include "about.h"
 #include "callbacks.h"
