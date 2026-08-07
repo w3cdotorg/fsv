@@ -440,8 +440,14 @@ color_read_config( void )
 
 	nvs_change_path( fsvrc, key_color );
 
-	/* Color mode */
-	x = nvs_read_int_token_default( fsvrc, "mode", tokens_color_mode, default_color_mode );
+	/* Color mode. Was reading back "mode" while color_write_config()
+	 * below writes key_color_mode ("colormode") -- a pre-existing typo
+	 * that nvstore.c's now-fixed (Task 5.3) all-stub implementation had
+	 * silently masked forever, since every *_default() read always just
+	 * returned its default regardless of key. Fixed to read back the
+	 * same key it's written under, so the color mode actually survives
+	 * a relaunch. */
+	x = nvs_read_int_token_default( fsvrc, key_color_mode, tokens_color_mode, default_color_mode );
 	color_mode = (ColorMode)x;
 
 	/* ColorByNodeType configuration */
