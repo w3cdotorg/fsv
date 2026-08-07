@@ -73,7 +73,21 @@ typedef enum {
  *
  * The caller keeps ownership of both arrays and may free or reuse them
  * the moment this returns; the renderer copies whatever it still needs.
- * Must be called between gpu_scene_begin( ) and gpu_scene_end( ).
+ *
+ * Framing is per-backend, because the two backends need different things
+ * from the caller:
+ *
+ *  - SDL_GPU (src/sdl/gpu.cpp): must be called between gpu_scene_begin( )
+ *    and gpu_scene_end( ). Draws are recorded and replayed at scene end,
+ *    since SDL_GPU forbids buffer uploads inside a render pass; a call
+ *    made outside that bracket is dropped.
+ *  - GTK/OpenGL (src/ogl-gpu-compat.c): neither implements nor requires
+ *    the bracket -- GL draws immediately into the bound framebuffer, and
+ *    viewport.c has already set that up. The two functions below are
+ *    declared unconditionally but that backend defines neither, which
+ *    links only because the caller is the frontend, never geometry.c:
+ *    viewport.c's draw callback is the GTK frame boundary, and only
+ *    src/sdl/main.cpp calls gpu_scene_begin/end.
  *
  * Note this rebuilds vertex data every frame, which is what the GL
  * frontend did too (one shared streaming VBO per call site, re-specified

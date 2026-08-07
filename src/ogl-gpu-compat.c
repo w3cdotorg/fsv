@@ -6,10 +6,20 @@
  * it draws through gpu.h, which src/sdl/gpu.cpp implements with SDL_GPU
  * (Metal/Vulkan) and this file implements with the exact GL calls that
  * were removed from geometry.c. Every function here is a transcription of
- * the block it replaces -- same buffer usage hints, same attribute setup,
- * same "re-specify the buffer as empty afterwards to avoid an implicit
- * sync" trick -- so the GTK frontend renders byte-for-byte what it did
+ * the block it replaces -- same GL_STREAM_DRAW hint on the vertex buffer,
+ * same attribute setup, same "re-specify the buffer as empty afterwards to
+ * avoid an implicit sync" trick -- so the GTK frontend renders what it did
  * before the port.
+ *
+ * One deliberate difference from the old code: the index data. geometry.c
+ * used to build each indexed draw's element buffer once, as GL_STATIC_DRAW,
+ * and keep it in a per-call-site static. gpu_draw() takes the indices as a
+ * plain argument the caller may free on return, so this file re-uploads
+ * them into one shared streaming EBO on every indexed draw instead. That is
+ * a few hundred bytes per draw on the four indexed call sites, which is far
+ * below the vertex traffic already going over the same path -- caching them
+ * back would mean keying a cache off caller identity, which is exactly the
+ * complexity the immediate-mode contract exists to avoid.
  *
  * Three notes on the shape of it:
  *
