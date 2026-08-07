@@ -2197,6 +2197,22 @@ a real store to write to.
 4. **Properties' "Contents" tab has no icon column** (text `[DIR]`
    prefix instead), matching `ui_panels.cpp`'s own file-list convention
    rather than `dialog.c`'s pixmap.
+5. **Wildcard patterns have no edit-in-place.** `dialog.c`'s
+   `csdialog_wpattern_edit_cb()` pops up a sub-dialog to edit an
+   *existing* pattern's text; `draw_color_setup_wpattern_tab()` only
+   offers Remove (delete the row) + Add (append a new one via the
+   `InputText`) — editing a pattern means removing it and retyping it.
+   Not implemented: no sub-dialog/modal-text-entry mechanism exists
+   yet in this frontend, and Remove+Add reaches the same end state.
+6. **Properties' Owner/Group drop the numeric uid/gid suffix.**
+   `dialog.c` shows `"<name> (uid <n>)"`/`"<name> (gid <n>)"`
+   (`dialog_node_properties()`'s own `sprintf()`); `draw_properties_
+   window()` shows only the resolved name (`g_props.owner`/`.group`,
+   from `get_node_info()`'s `user_name`/`group_name` fields — the raw
+   numeric IDs were never carried into the snapshot). A cosmetic
+   omission, not a data-availability one: `NODE_DESC(node)->user_id`/
+   `group_id` are available at snapshot time in
+   `ui_dialogs_open_properties()` if this is ever revisited.
 
 ### Verification
 
