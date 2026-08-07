@@ -1,0 +1,57 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct SceneFragUBO
+{
+    float4 color;
+    float ambient;
+    float diffuse;
+    float specular;
+    int lightning_enabled;
+};
+
+struct main0_out
+{
+    float4 outputColor [[color(0)]];
+};
+
+struct main0_in
+{
+    float3 fragPos [[user(locn0)]];
+    float3 fragNormal [[user(locn1)]];
+    float4 lightPos [[user(locn2)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]], constant SceneFragUBO& u [[buffer(0)]])
+{
+    main0_out out = {};
+    if (u.lightning_enabled == 0)
+    {
+        out.outputColor = u.color;
+        return out;
+    }
+    float3 light_color = float3(1.0);
+    float3 ambient_light = light_color * u.ambient;
+    float3 lightDir;
+    if (in.lightPos.w == 0.0)
+    {
+        lightDir = fast::normalize(in.lightPos.xyz);
+    }
+    else
+    {
+        lightDir = fast::normalize(in.lightPos.xyz - in.fragPos);
+    }
+    float3 fragNN = fast::normalize(in.fragNormal);
+    float diffuse_refl = fast::max(dot(fragNN, lightDir), 0.0);
+    float3 diffuse_light = light_color * (diffuse_refl * u.diffuse);
+    float3 viewPos = float3(0.0);
+    float3 viewDir = fast::normalize(viewPos - in.fragPos);
+    float3 reflectDir = reflect(-lightDir, fragNN);
+    float spec = powr(fast::max(dot(viewDir, reflectDir), 0.0), 2.0);
+    float3 spec_light = light_color * (u.specular * spec);
+    out.outputColor = float4(((ambient_light + diffuse_light) + spec_light) * u.color.xyz, u.color.w);
+    return out;
+}
+

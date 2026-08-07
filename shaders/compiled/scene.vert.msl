@@ -1,0 +1,43 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct SceneVertUBO
+{
+    float4x4 mvp;
+    float4x4 modelview;
+    float4x4 normal_matrix;
+    float4 light_pos;
+    int lightning_enabled;
+};
+
+struct main0_out
+{
+    float3 fragPos [[user(locn0)]];
+    float3 fragNormal [[user(locn1)]];
+    float4 lightPos [[user(locn2)]];
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 position [[attribute(0)]];
+    float3 normal [[attribute(1)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant SceneVertUBO& u [[buffer(0)]])
+{
+    main0_out out = {};
+    float4 pos = float4(in.position, 1.0);
+    out.gl_Position = u.mvp * pos;
+    if (u.lightning_enabled != 0)
+    {
+        out.lightPos = u.modelview * u.light_pos;
+        float4 fragTmp = u.modelview * pos;
+        out.fragPos = fragTmp.xyz / float3(fragTmp.w);
+        out.fragNormal = float3x3(u.normal_matrix[0].xyz, u.normal_matrix[1].xyz, u.normal_matrix[2].xyz) * in.normal;
+    }
+    return out;
+}
+

@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done through Task 2.2**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 in progress through Task 3.1**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -384,6 +384,115 @@ involvement and `ninja -C builddir-gtk-check` builds cleanly
 end-to-end (both scratch dirs deleted after verification, per the
 existing per-task convention).
 
+## Task 3.1 verification (shader port + offline compilation)
+
+Ported `src/fsv-vertex.glsl`, `src/fsv-fragment.glsl`,
+`src/fsv-text-vertex.glsl`, `src/fsv-text-fragment.glsl` (OpenGL 3.1 /
+GLSL 140) to Vulkan-flavored GLSL 4.50 at `shaders/src/scene.vert`,
+`scene.frag`, `text.vert`, `text.frag`. `src/*.glsl` are untouched (the
+GTK frontend still loads them via gresource); `src/fsv-about-*.glsl`
+were skipped per the brief (about splash dropped in this port).
+
+**Toolchain chosen: glslangValidator + spirv-cross, not
+`sdl3_shadercross`.** `brew search shadercross` only turns up the
+unrelated `shaderc` — no `sdl3_shadercross`/`shadercross` formula
+exists in Homebrew core as of this task. Installed `glslang` (GLSL450
+→ SPIR-V, `glslangValidator -V`) and `spirv-cross` (SPIR-V → MSL,
+`spirv-cross --msl`) instead — the brief's own second-choice path,
+confirmed to work end to end. `spirv-tools` (for `spirv-val`) was
+installed alongside for validation. `tools/compile-shaders.sh` encodes
+the full pipeline (`set -euo pipefail`, loop over
+`shaders/src/*.vert *.frag`, validates each `.spv` with `spirv-val` if
+present, emits `shaders/compiled/<name>.<stage>.{spv,msl}`).
+
+**Entry points (confirmed against
+`subprojects/imgui/backends/imgui_impl_sdlgpu3.cpp:475-492`, which
+hard-codes exactly this split for its own precompiled shaders):**
+SPIR-V shaders keep entry point `"main"`; MSL shaders compiled via
+SPIRV-Cross get renamed to `"main0"` (Metal reserves `main`). Task 3.2
+must pass the matching `entrypoint` string per `SDL_GPUShaderFormat`
+when calling `SDL_CreateGPUShader`.
+
+**Uniform inventory derived from `src/ogl.c` / `src/geometry.c` /
+`src/tmaptext.c` (reality), not the brief's sketch:**
+
+| Source | Uniform | GL call site | Frequency |
+|---|---|---|---|
+| scene vertex | `mvp`, `modelview`, `normal_matrix` | `ogl_upload_matrices()` (ogl.c:335-338) | once/frame |
+| scene vertex+frag | `light_pos` | `glUniform4fv` at light setup (ogl.c:197) | once at startup |
+| scene vertex+frag | `lightning_enabled` | `ogl_enable_lightning`/`disable_lightning` (ogl.c:349-359, geometry.c:101,114,142,181) | **per draw call**, many times/frame |
+| scene fragment | `color` | `glUniform4f`/`glUniform4fv` (geometry.c:117,141,180,2792,2803) | **per draw call** |
+| scene fragment | `ambient`, `diffuse`, `specular` | `glUniform1f` at light setup (ogl.c:194-196) | once at startup |
+| text vertex | `mvp` | `text_upload_mvp()` (tmaptext.c:511-514), called once/frame after `ogl_upload_matrices()` | once/frame |
+| text fragment | `color` | `glUniform3f` (tmaptext.c:504) | per label |
+| text fragment | `tex` | `glUniform1i(glt.texture_location, 0)` (tmaptext.c:329) | once at startup |
+
+**Deviation from the brief's sketch:** the brief's example vertex UBO
+only listed `mvp`, `modelview`, `normal_matrix` — it omitted
+`light_pos` and `lightning_enabled`, both of which the *original*
+`fsv-vertex.glsl` actually reads (`if (lightning_enabled) { lightPos =
+modelview * light_pos; ... }`). Both are included in
+`SceneVertUBO` in the ported shader; dropping them would have silently
+broken the lighting toggle at the vertex stage. `lightning_enabled` is
+necessarily duplicated into both the vertex UBO (set=1 binding=0) and
+the fragment UBO (set=3 binding=0): the original GLSL 140 shaders
+shared one uniform namespace per `glProgram` across both stages, but
+SDL_GPU's per-stage UBOs don't, so the same CPU-side value must be
+pushed twice.
+
+**std140 layout choice:** `normal_matrix` is declared as `mat4` (not
+`mat3`) in `SceneVertUBO`, per the brief's own instruction. std140
+packs a `mat3` as three vec4-aligned columns with undefined trailing
+padding that's easy to get wrong on the C++ side; declaring it `mat4`
+(upper-left 3×3 is the real data, last row/column are inert) and
+truncating with `mat3(u.normal_matrix)` in-shader removes the ambiguity
+— the C++ UBO struct in `gpu.h` (Task 3.2) must mirror the full `mat4`,
+not a `mat3`.
+
+**Semantic diff summary (every line of lighting/color math accounted
+for):**
+- `scene.vert`: identical control flow and math to `fsv-vertex.glsl`
+  line-for-line (`gl_Position`, the `lightning_enabled` guard,
+  `lightPos`, `fragPos = fragTmp.xyz/fragTmp.w`, `fragNormal =
+  normal_matrix * normal`) — only the uniform/attribute/varying syntax
+  changed (`uniform`→UBO member, `in`/`out`→`layout(location=N)`).
+- `scene.frag`: identical early-return, ambient/diffuse/specular/
+  Blinn-esque specular computation, and final
+  `outputColor` composition. The only line *not* carried over is the
+  original's commented-out debug visualization
+  (`//outputColor = 0.9999 * vec4(abs(fragNN), 1.0) + ...`) — it was
+  inert dead code in the original (never compiled) and is called out
+  explicitly in a comment in `scene.frag` rather than silently dropped.
+- `text.vert`: identical (`gl_Position = mvp * vec4(position, 1.0);
+  Texcoord = texcoord;`).
+- `text.frag`: identical (`texture(tex, Texcoord)`, `vec4(color,
+  alpha.r)`).
+
+**Verification:**
+- `tools/compile-shaders.sh` run twice in a row; `diff -rq` between the
+  two runs' `shaders/compiled/` output reported **no differences** —
+  SPIR-V carries no build timestamp and SPIRV-Cross's MSL text output
+  is a pure function of its input, so the pipeline is deterministic
+  with no extra flags needed.
+- `spirv-val` passed on all 4 `.spv` modules
+  (`scene.vert.spv`, `scene.frag.spv`, `text.vert.spv`,
+  `text.frag.spv`).
+- `xcrun -sdk macosx metal --version` fails on this machine
+  (`cannot execute tool 'metal' due to missing Metal Toolchain`) — no
+  full Metal Toolchain is installed here, and downloading one
+  (`xcodebuild -downloadComponent MetalToolchain`) is a large,
+  license-gated download out of scope for this task to trigger
+  unattended. Per the brief's own fallback, this is **noted rather
+  than worked around**: MSL correctness instead rests on (a) manual
+  inspection of the SPIRV-Cross output (recorded above — struct
+  layouts, buffer/texture/sampler indices, and control flow all match
+  the GLSL source line-for-line) and (b) Task 3.2's runtime
+  `SDL_CreateGPUShader` call, which will fail loudly if any `.msl` is
+  malformed.
+- Byte sizes: `scene.vert.msl` 1011 B, `scene.frag.msl` 1488 B,
+  `text.vert.msl` 531 B, `text.frag.msl` 541 B; `.spv` modules
+  1.0-3.2 KB. All 8 artifacts present under `shaders/compiled/`.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -405,3 +514,5 @@ code is kept.
 | 2026-08-06 | Core stays C11, new frontend files are C++20 | ImGui is C++; core headers get `extern "C"` guards |
 | 2026-08-06 | Work on `metal-port`, keep `master` pristine | painless upstream sync with jabl/fsv |
 | 2026-08-07 | Vendor ImGui `v1.92.9b-docking` by file-copy, not git submodule | latest docking tag at task time; a copy keeps `subprojects/imgui/` a normal, reviewable part of the tree with no upstream history/examples/docs bloat |
+| 2026-08-07 | glslangValidator + spirv-cross over `sdl3_shadercross` for offline shader compilation | no Homebrew formula for `shadercross`/`sdl3_shadercross` exists; the glslang/spirv-cross pair is the brief's own documented fallback and worked cleanly end to end |
+| 2026-08-07 | `normal_matrix` passed as `mat4` (not `mat3`) in the scene vertex UBO | std140 packs `mat3` as three ambiguously-padded vec4 columns; `mat4` removes the ambiguity between the GLSL and future C++ (`gpu.h`) struct layouts, at the cost of one wasted row/column |

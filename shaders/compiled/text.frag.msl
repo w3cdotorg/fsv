@@ -1,0 +1,28 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct TextFragUBO
+{
+    float3 color;
+};
+
+struct main0_out
+{
+    float4 outputColor [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 Texcoord [[user(locn0)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]], constant TextFragUBO& u [[buffer(0)]], texture2d<float> tex [[texture(0)]], sampler texSmplr [[sampler(0)]])
+{
+    main0_out out = {};
+    float4 alpha = tex.sample(texSmplr, in.Texcoord);
+    out.outputColor = float4(u.color, alpha.x);
+    return out;
+}
+
