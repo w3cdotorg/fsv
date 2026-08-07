@@ -2563,6 +2563,113 @@ step sequences, not just the workflow YAML):
   *first* real CI run, which is what to watch, not in anything this
   task could further de-risk locally.
 
+## Task 6.2 + 6.3 fix round (code review)
+
+A code review of the first pass above caught three real release-quality
+bugs and two minor cleanups, all in `.github/workflows/ci.yml` plus one
+supporting script:
+
+**1. The Linux SDL release binary would not have started for anyone
+downloading it.** `linux-sdl` built SDL3 as a *shared* library
+(`-DSDL_SHARED=ON`) into a CI-local install prefix; `builddir/src/sdl/
+fsv` therefore dynamically linked `libSDL3.so.0`, which the `release`
+job then happily packaged into the Linux tarball. But per the
+SDL3-on-Ubuntu investigation above, there is no `libSDL3` *runtime*
+package on any Ubuntu release GitHub hosts either — so a downloader
+extracting that tarball would hit `error while loading shared
+libraries: libSDL3.so.0: cannot open shared object file`, with no
+`apt install` available to fix it themselves (unlike the GTK binary's
+system-GTK dependency, or unlike this port's own macOS story, where
+`brew install sdl3` is a real, one-command self-service fix). Chosen
+fix, the option with the least added machinery: build SDL3 **static**
+(`-DSDL_SHARED=OFF -DSDL_STATIC=ON`) instead. No `meson.build` change
+was needed — `dependency('sdl3')`'s pkg-config lookup already picks up
+whichever of `libSDL3.a`/`libSDL3.so` is actually installed, and SDL3's
+own generated `sdl3.pc` folds its (few) required system libs straight
+into `Libs:` for a static build, with nothing extra to add. Verified
+for this fix round by copying the resulting `fsv` into a **genuinely
+bare** `ubuntu:24.04` container (`docker run --rm ubuntu:24.04`, no
+packages installed at all beyond the base image): `ldd` shows no
+`libsdl3` reference at all (only `libglib-2.0`, `libstdc++`, `libm`,
+`libgcc_s`, `libc`); with the base image completely untouched, running
+the binary fails on the missing `libglib-2.0.so.0` (glib is *not*
+present in Docker's stripped-down base image, unlike a real Ubuntu
+install), but installing only `libglib2.0-0` — an ordinary runtime
+package, present on virtually any real system already, the same tier
+as the GTK binary's system GTK — is enough for `./fsv --help` (which
+prints usage via `SDL_Log` and exits 1 before ever calling
+`SDL_Init`, so it needs no display) to run to completion. The
+workflow's `linux-sdl` job also gained a "Verify no dynamic libSDL3
+dependency" step (`ldd | grep -qi libsdl3`, fails loudly if it ever
+finds one again) as a standing regression guard, and the SDL3 build
+cache key gained a `-static` suffix so no stale shared-lib cache entry
+could ever be reused under the same key.
+
+**2. `make-bundle.sh`, bundled into the macOS tarball, could never
+succeed against that tarball's own layout.** The script only accepted
+a *meson builddir* (looking up `<dir>/src/sdl/fsv` inside it) or fell
+back to `<repo_root>/builddir`/`builddir-xcode` — none of which exist
+in an extracted release tarball, where the binary sits flat right next
+to the script. Fixed by teaching `packaging/macos/make-bundle.sh` to
+accept a direct path to an already-built binary as its first argument
+(if it names a regular file, it's used as-is; if it names a directory,
+the existing builddir lookup runs unchanged) — verified locally against
+both forms (`./make-bundle.sh ./fsv fsv.app` and the pre-existing
+`./make-bundle.sh <builddir> fsv.app`), both producing a valid
+ad-hoc-signed bundle. The macOS tarball also gained a small
+`USAGE.txt` spelling out this exact invocation, since neither the
+repo's general `README.md` (about building from source, not about a
+downloaded tarball) nor anything else in the tarball previously said
+so; the Linux tarball got a matching, simpler `USAGE.txt` for
+consistency.
+
+**3. Undisclosed deviation from the original brief, now stated
+explicitly.** Task 6.3's brief describes release tarballs containing
+"shaders/ and README". Neither tarball ships a `shaders/` directory —
+correctly so, since Task 3.2 made `tools/embed-shaders.py` embed
+compiled shaders directly into the binary at build time, so nothing
+under `shaders/` is needed at runtime on either platform. This was
+true but unstated in the first pass; now called out in both a
+workflow comment (top of `.github/workflows/ci.yml` and again right
+above the packaging step) and here.
+
+**4. (minor)** `debug/meson.build` kept a bare `'..'` include entry
+"just in case debug.c ever needs another repo-root header", alongside
+the `'../src'` entry the config.h fix actually needed. That hedge runs
+against the fix's own point (never put the repo root on an include
+path unless something actually resolves through it) and, checked
+against `debug.c`'s real `#include` list, nothing does. Removed;
+`debug.c` now gets only `'../src'`.
+
+**5. (minor)** Inconsistent `set -euo pipefail` usage across the
+workflow's `run:` blocks — two `release`-job steps had it, every other
+multi-line `run: |` block relied on GitHub Actions' own default
+(`bash -e {0}`, i.e. `errexit` only, no `pipefail`, no `nounset`).
+Aligned to one style: every multi-line `run: |` block now starts with
+`set -euo pipefail` explicitly, rather than leaning on the
+runner-shell default. (Genuinely single-line `run:` steps were left
+alone — there is nothing for the extra flags to buy on a single
+command with no pipe.)
+
+**Verification for this fix round:** `actionlint` + embedded
+`shellcheck` clean; `python3 -c "import yaml; yaml.safe_load(...)"`
+clean (including confirming the two new tarball-`USAGE.txt` heredocs —
+initially written with plain 0-indented body text — actually needed
+re-indenting to stay inside the YAML block scalar, caught by a first
+failed parse and fixed); the `linux-sdl` job's exact, updated step
+sequence (apt install, static SDL3 build, `meson setup
+-Dfrontend=sdl`, `ninja`, `meson test`, the new `ldd` verification
+step) reproduced end-to-end in a fresh `ubuntu:24.04` container — 3/3
+tests, and the verification step confirms zero `libsdl3` in `ldd`;
+`linux-gtk`'s sequence re-run unaffected (3/3); a fresh macOS
+`meson setup -Dfrontend=sdl && ninja && meson test` (3/3) confirms the
+`debug/meson.build` change (item 4) is a no-op there too — this whole
+fix round is Linux-CI-only and macOS's own build path was not
+otherwise touched; the release-packaging shell re-dry-run against fake
+artifact layouts for both the SDL-present and SDL-absent-fallback-to-
+GTK cases, now producing tarballs with the new `USAGE.txt` files with
+exactly the intended content (confirmed with `tar -xzO`).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2625,3 +2732,5 @@ code is kept.
 | 2026-08-08 | `config.h` generates into `<builddir>/src/config.h`, not the build root; `incdir`'s bare `'..'` entry removed | that bare `'..'` put the repo root on every C/C++ compile's include path so `config.h` (at the build root) was reachable; libstdc++'s `<bits/stl_algobase.h>` unconditionally `#include <debug/debug.h>`, and with the repo root ahead of the real system path, that silently resolved to this project's own `debug/debug.h` instead, breaking every C++ (SDL frontend) compile on Linux/GCC — never caught before Task 6.2 because no prior task had actually built `src/sdl/*.cpp` on Linux |
 | 2026-08-08 | Build SDL3 from source (CMake, cached by `actions/cache`) for the Linux CI job, rather than `apt install` or a non-LTS Ubuntu runner | `libsdl3-dev` doesn't exist for `jammy`/`noble` in Ubuntu's archive (only from `questing` 25.10 onward), and GitHub only hosts LTS-base Ubuntu runners (22.04/24.04) — there is no package to install on any GitHub-hosted Ubuntu image today |
 | 2026-08-08 | `linux-sdl` CI job is `continue-on-error: true`; `release` explicitly ignores its result (with `always()`) rather than gating on it | building SDL3 from source on Ubuntu is inherently more fragile than the apt-packaged GTK path and is a bonus, not the anti-regression job; releases must still ship a working Linux binary (falling back to GTK) even if this job fails |
+| 2026-08-08 | CI's `linux-sdl` job links SDL3 statically (`-DSDL_SHARED=OFF -DSDL_STATIC=ON`), not shared, and gained a standing `ldd`-based regression check for it | a shared build would dynamically link `libSDL3.so`, which no Ubuntu release ships a runtime package for either — the release binary would fail to start for every downloader with no user-side fix; static removes the dependency entirely, confirmed by running the binary in a bare `ubuntu:24.04` container |
+| 2026-08-08 | `make-bundle.sh` accepts a direct binary path as an alternative to a meson builddir | the script previously only understood a builddir layout, so it always failed when bundled into a release tarball, where the binary sits flat next to it instead |
