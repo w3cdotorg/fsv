@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: MIT
 
 project('fsv', 'c', version: '3.1alpha')
-gtkdep = [dependency('gtk+-3.0'),
-          dependency('gdk-pixbuf-2.0'), dependency('epoxy')]
+
+frontend = get_option('frontend')
+
+# GTK is only required for the (legacy) gtk frontend; don't hard-fail
+# configure when it's absent and frontend == 'sdl'.
+gtkdep = [dependency('gtk+-3.0', required: frontend == 'gtk'),
+          dependency('gdk-pixbuf-2.0', required: frontend == 'gtk'),
+          dependency('epoxy', required: frontend == 'gtk')]
 cglm_dep = dependency('cglm', fallback : ['cglm', 'cglm_dep'])
 compiler = meson.get_compiler('c')
 conf = configuration_data()
@@ -40,6 +46,8 @@ subdir('po')
 subdir('debug')
 subdir('lib')
 subdir('src')
+subdir('tools')
+subdir('tests')
 
 # This doesn't work with meson 0.61 and python 3.10
 #rpm = import('rpm')

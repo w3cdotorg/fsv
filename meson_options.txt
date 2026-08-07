@@ -1,0 +1,2 @@
+option('frontend', type: 'combo', choices: ['gtk', 'sdl'], value: 'gtk',
+       description: 'UI frontend: gtk (legacy OpenGL) or sdl (SDL3 GPU / Metal)')
