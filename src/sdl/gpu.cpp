@@ -357,11 +357,11 @@ setup_projection_matrix(void)
 	dx = camera->near_clip * tan(0.5 * RAD(camera->fov));
 	dy = dx / gpu_aspect_ratio();
 
-	mat4 frustum;
+	// ogl.c built the frustum into a temporary, reset gl.projection to
+	// identity and multiplied the two; with `full_reset` gone that is
+	// identity * frustum, so the frustum is written straight out.
 	glm_frustum_rh_zo(-dx, dx, -dy, dy, camera->near_clip,
-	    camera->far_clip, frustum);
-	glm_mat4_identity(gpu_mat.projection);
-	glm_mat4_mul(gpu_mat.projection, frustum, gpu_mat.projection);
+	    camera->far_clip, gpu_mat.projection);
 }
 
 // Port of setup_modelview_matrix() (src/ogl.c:273). Same operations in
