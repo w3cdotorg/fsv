@@ -44,3 +44,14 @@ imgui.ini
 
 # macOS Finder metadata
 .DS_Store
+
+# Xcode (packaging/xcode/fsv.xcodeproj is an External Build System
+# project -- it has no product of its own; these are local build
+# byproducts and per-user Xcode state, never build inputs)
+packaging/xcode/build/
+packaging/xcode/fsv.xcodeproj/xcuserdata/
+packaging/xcode/fsv.xcodeproj/project.xcworkspace/xcuserdata/
+packaging/xcode/fsv.xcodeproj/project.xcworkspace/xcshareddata/
+
+# fsv.app bundle produced by packaging/macos/make-bundle.sh
+/fsv.app
