@@ -28,7 +28,7 @@ layout(location = 2) in vec4 lightPos;
 
 layout(location = 0) out vec4 outputColor;
 
-layout(set = 3, binding = 0) uniform SceneFragUBO {
+layout(std140, set = 3, binding = 0) uniform SceneFragUBO {
     vec4  color;
     float ambient;
     float diffuse;

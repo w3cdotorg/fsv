@@ -45,7 +45,7 @@
 
 #version 450
 
-layout(set = 1, binding = 0) uniform SceneVertUBO {
+layout(std140, set = 1, binding = 0) uniform SceneVertUBO {
     mat4 mvp;
     mat4 modelview;
     mat4 normal_matrix; // upper-left 3x3 valid; see std140 note above

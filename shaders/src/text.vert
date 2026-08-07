@@ -14,7 +14,7 @@
 
 #version 450
 
-layout(set = 1, binding = 0) uniform TextVertUBO {
+layout(std140, set = 1, binding = 0) uniform TextVertUBO {
     mat4 mvp;
 } u;
 

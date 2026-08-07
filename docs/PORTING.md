@@ -440,8 +440,14 @@ shared one uniform namespace per `glProgram` across both stages, but
 SDL_GPU's per-stage UBOs don't, so the same CPU-side value must be
 pushed twice.
 
-**std140 layout choice:** `normal_matrix` is declared as `mat4` (not
-`mat3`) in `SceneVertUBO`, per the brief's own instruction. std140
+**std140 layout choice:** every uniform block uses an explicit
+`layout(std140, set=N, binding=N)` qualifier rather than relying on
+glslang's implicit default (confirmed to already resolve to std140 by
+recompiling before/after adding the qualifier and diffing the
+resulting `.spv`/`.msl` byte-for-byte — identical either way, but the
+explicit qualifier documents the contract instead of depending on a
+compiler default). `normal_matrix` is declared as `mat4` (not `mat3`)
+in `SceneVertUBO`, per the brief's own instruction. std140
 packs a `mat3` as three vec4-aligned columns with undefined trailing
 padding that's easy to get wrong on the C++ side; declaring it `mat4`
 (upper-left 3×3 is the real data, last row/column are inert) and
