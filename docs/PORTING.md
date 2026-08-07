@@ -585,6 +585,52 @@ retarget the still-OpenGL GTK frontend.
   `shaders/src/scene.{vert,frag}` is a compile error rather than
   silent garbage on screen. Same for `FsvVertex`'s 40-byte stride.
 
+### Task 3.3 handoff: what `FsvMesh` does *not* cover yet
+
+`fsv_mesh_draw()` issues exactly one kind of draw —
+`SDL_DrawGPUIndexedPrimitives()` on a `TRIANGLELIST` pipeline. That
+covers `geometry.c`'s four `glDrawElements(GL_TRIANGLES, ...)` call
+sites (lines 1009, 2037, 2183, 3051) and nothing else. Task 3.3 owns
+extending the API; this is the precise inventory it has to satisfy, so
+that nothing is discovered halfway through the port:
+
+| `geometry.c` | Topology | Draw kind |
+|---|---|---|
+| 404 (`drawVertex`) | `GL_TRIANGLE_FAN` | non-indexed |
+| 2116, 2280, 2306, 2372 (`drawVertex`) | `GL_TRIANGLE_STRIP` | non-indexed |
+| 1061 (`drawVertexPos`) | `GL_LINE_LOOP` | non-indexed |
+| 2245 (`drawVertexPos`), 2708 | `GL_LINE_STRIP` | non-indexed |
+| 1259, 2123 (`drawVertexPos`) | `GL_LINES` | non-indexed |
+| 1009, 2037, 2183, 3051 | `GL_TRIANGLES` | indexed — **covered today** |
+
+Three consequences for Task 3.3:
+
+1. **Non-indexed draws.** Everything routed through `drawVertex()` /
+   `drawVertexPos()` (`geometry.c:143`, `:184`) is `glDrawArrays`. That
+   needs `SDL_DrawGPUPrimitives()` and a mesh that can be uploaded
+   without an index buffer — `fsv_mesh_upload()` currently requires both
+   arrays and rejects the call otherwise.
+2. **Topologies are baked into the pipeline** in SDL_GPU
+   (`primitive_type` is a `SDL_GPUGraphicsPipelineCreateInfo` field, not
+   a draw argument), so each of `TRIANGLELIST` / `TRIANGLESTRIP` /
+   `LINELIST` / `LINESTRIP` needs its own pipeline object. Note there is
+   **no `TRIANGLEFAN` and no `LINELOOP`** in SDL_GPU: line 404's fan and
+   line 1061's loop have to be converted at mesh-build time (a fan
+   becomes an index list; a loop becomes a strip with the first vertex
+   repeated).
+3. **Index width.** `geometry.c` uses `GL_UNSIGNED_SHORT` (16-bit)
+   indices; `fsv_mesh_upload()` takes `const unsigned int *` per the
+   task brief's contract and binds `INDEXELEMENTSIZE_32BIT`. Task 3.3
+   converts on upload or widens the call sites.
+
+Also deferred to Task 3.3: **`glPolygonOffset(1.0, 1.0)`** (enabled in
+`ogl_init()`, not ported). SDL_GPU spells it `enable_depth_bias` +
+`depth_bias_constant_factor`/`depth_bias_slope_factor` on the rasterizer
+state. The right values are only observable once fills and their
+outlines are drawn together, which is exactly when the line topologies
+above arrive — if platform fills z-fight with their outlines, this is
+why.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
