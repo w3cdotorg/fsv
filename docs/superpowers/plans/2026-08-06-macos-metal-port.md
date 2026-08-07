@@ -816,9 +816,27 @@ jobs:
 
 - [ ] Commit — `git commit -m "ci: macOS Metal build + Linux GTK build"`.
 
-### Task 6.3: Documentation
+### Task 6.3: Release artifacts in CI (user request, 2026-08-07)
 
-- [ ] Rewrite `README.md`: what fsv is (fsn lineage), macOS install (brew + build, later a release bundle), controls table, screenshots. English.
+GitHub Actions is free for public repos; `ubuntu-latest` = Linux x86_64,
+`macos-14`+ = Apple Silicon (arm64). Extend the CI workflow:
+
+- [ ] macOS job uploads the built `fsv` binary (arm64) as an artifact on every push; Linux job builds the SDL frontend too (`-Dfrontend=sdl`, Vulkan available headless for build only) and uploads the x86_64 binary.
+- [ ] Add a `release` job triggered on tag push (`v*`): repackages both artifacts (tar.gz with shaders/ and README) and attaches them to a GitHub Release via `softprops/action-gh-release` (or `gh release upload`).
+- [ ] Commit — `git commit -m "ci: attach Linux x86_64 and macOS arm64 binaries to releases"`.
+
+### Task 6.4: Demo video (user request, 2026-08-07)
+
+A ≤20s demo video of navigating this repo's own source tree in fsv, embedded in the README.
+
+- [ ] Add a `--record <dir> <seconds> <out-prefix>` mode to the SDL frontend (or a small driver script): drive the camera programmatically (scripted look_at/dolly/revolve sequence over the project's `src/` tree), render frames offscreen via the existing readback path at ~30fps, dump numbered PNGs/BMPs. Screen capture is TCC-blocked in this environment — offscreen rendering is the sanctioned path.
+- [ ] Assemble with ffmpeg (brew): `demo.mp4` (H.264, ≤20s) AND `demo.gif` (optimized ≤10MB, palette pass) committed under `docs/media/`.
+- [ ] Embed `docs/media/demo.gif` in README.md near the top. Commit — `git commit -m "docs: add navigation demo video"`.
+- [ ] Remove the recording mode afterwards ONLY if it required invasive hooks; a clean `--record` flag may stay (useful for future docs).
+
+### Task 6.5: Documentation (amended per user request, 2026-08-07)
+
+- [ ] Rewrite `README.md`: what fsv is (fsn lineage), **revised Install section** (macOS: brew deps + meson build + Xcode project pointer; Linux: apt deps, both frontends; link CI release artifacts for prebuilt binaries), **replace the "TODO" section with a "What's been done" section** summarizing the metal-port work (SDL3 GPU/Metal renderer, ImGui UI, preserved GTK frontend, CI), controls table (the REAL gestures from input.cpp), demo GIF embed, screenshots. English.
 - [ ] Update `docs/PORTING.md` decision log; mark plan checkboxes done.
 - [ ] Commit — `git commit -m "docs: macOS-first README and porting retrospective"`.
 
