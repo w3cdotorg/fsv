@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done through Task 5.1**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.1 (Xcode project)**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -2307,6 +2307,106 @@ a real store to write to.
   Properties fields) plus the *scene* recolor, which the offscreen
   `gpu_screenshot()` path does capture (unaffected by ImGui compositing).
 
+## Task 6.1 verification (Xcode project — external build system, unsigned)
+
+`packaging/xcode/fsv.xcodeproj` wraps the Meson build, not replace it.
+Its single target, `fsv`, is a **`PBXLegacyTarget`** ("External Build
+System" in Xcode's UI) — no compile phases, no source list, no product
+Xcode itself signs or links. `buildToolPath` is `/bin/sh`;
+`buildArgumentsString` runs `meson setup $BUILDDIR $SRCDIR
+--buildtype=$BUILDTYPE` (only if `$BUILDDIR` doesn't already exist —
+`meson setup` errors on an existing directory, so idempotency is a
+`test -d` guard, not `2>/dev/null || true`) then `ninja -C $BUILDDIR`,
+with `$BUILDTYPE` switched on Xcode's `$CONFIGURATION` (`debugoptimized`
+for Debug, `release` for Release). `$SRCDIR`/`$BUILDDIR` are derived
+from `${PROJECT_DIR}` (an Xcode build setting the tool also exports
+into the shell's environment via `passBuildSettingsInEnvironment = 1`).
+`objectVersion = 56` (Xcode 14's format) — comfortably below the "46+"
+floor the task brief called safe, and this machine's Xcode 26.6 opens
+and upgrades it with no prompt.
+
+**No Signing & Capabilities tab exists for this target** — External
+Build System targets have no product for Xcode to sign, so "Sign to
+Run Locally" isn't a pbxproj setting here at all. The ad-hoc-signing
+equivalent lives in `packaging/macos/make-bundle.sh`
+(`codesign --force --deep --sign -`), invoked as an explicit,
+documented step rather than wired into the Xcode target's build — the
+simpler of the two options the brief offered, and it keeps
+`make-bundle.sh` useful to people who never open Xcode. `packaging/
+macos/Info.plist` sets `LSMinimumSystemVersion` to 14.0, matching the
+plan's stated macOS floor (Sonoma). No `fsv.icns` is checked in — the
+only icon asset in the tree is `src/xmaps/fsv-icon.xpm`, a legacy GTK
+XPM, not a viable `.icns` source without a hand-drawn PNG set; skipped
+per the task's own "optional" carve-out and documented in `packaging/
+xcode/README.md`. `make-bundle.sh` picks one up automatically if ever
+added.
+
+**Bug caught by the first real build attempt:** the initial
+`buildArgumentsString` called `meson setup $BUILDDIR` with no explicit
+source directory, relying on Xcode's external-tool CWD to be the repo
+root. It isn't (`buildWorkingDirectory = ""` does not default to
+`$SRCROOT`), so meson received a build directory it couldn't pair with
+a source directory it could also find, and failed with `"Neither
+source directory '…/builddir-xcode' nor build directory None contain a
+build file meson.build."` Fixed by passing `$SRCDIR` (`${PROJECT_DIR}/
+../..`) as `meson setup`'s explicit second positional argument, making
+the command CWD-independent — the same fix also makes `ninja -C
+$BUILDDIR` robust regardless of `buildWorkingDirectory`.
+
+**macOS (this machine, Xcode 26.6 — full IDE, not CLT-only, confirmed
+via `xcodebuild -version`):**
+- `xcodebuild -list -project packaging/xcode/fsv.xcodeproj` resolves
+  the project, lists target `fsv`, configurations `Debug`/`Release`,
+  and an auto-created scheme `fsv` (no shared `.xcscheme` was added —
+  YAGNI, matches the task's own "or -scheme if you add a shared
+  scheme" phrasing as optional).
+- Clean-state build: `rm -rf builddir-xcode &&
+  xcodebuild -project packaging/xcode/fsv.xcodeproj -target fsv
+  -configuration Release build` → **BUILD SUCCEEDED**, ninja runs all
+  41 targets, binary lands at `builddir-xcode/src/sdl/fsv`.
+- `meson test -C builddir-xcode` → **3/3** (`fsv:scanfs`,
+  `fsv:nvstore`, `fsv:color_persistence`) — the same three tests Task
+  5.3 added, now proven to also pass through the Xcode-driven build
+  directory, not just the hand-run one.
+- Idempotency: re-running the identical `xcodebuild … build` command
+  logs `ninja: no work to do` (meson setup skipped via the `test -d`
+  guard, ninja no-op) — confirms the wrapper doesn't force a
+  reconfigure/rebuild on every Xcode build. `-configuration Debug`
+  also builds clean (reuses the same `builddir-xcode`, since it
+  already exists — switching build type on an existing checkout
+  requires deleting `builddir-xcode` first, documented in the README).
+- `make-bundle.sh builddir-sdl /tmp/fsv-bundle-test.app` (using an
+  existing build's binary): produced a bundle with
+  `Contents/MacOS/fsv`, `Contents/Info.plist`, and a valid ad-hoc
+  signature (`codesign -dv` → `Signature=adhoc`,
+  `TeamIdentifier=not set`, `flags=0x2(adhoc)`). Confirms the default
+  `builddir`/`builddir-xcode` lookup logic and the explicit-path
+  override both work.
+- **Bundle launch check** (the verification bar's substitute for
+  `spctl`/Gatekeeper, which won't pass any unsigned bundle regardless
+  of ad-hoc signing): running
+  `/tmp/fsv-bundle-test.app/Contents/MacOS/fsv --help` printed the
+  usage line and exited 0; running it against `tests/fixture` with
+  `--screenshot` produced a full Metal-rendered 1280×800 frame
+  (`gpu: driver metal` → `gpu: scene pipelines created` → `fsv: wrote
+  …ppm (1280x800)`, exit 0) — the bundled binary is not just present
+  but fully functional (GPU init, shader load, scene render,
+  screenshot) from inside the `.app` layout, which is what "the app
+  launches locally" means without a real windowed/Gatekeeper check.
+- Both build arms unaffected: `git status --short` after this task
+  shows only new files under `packaging/` and the `.gitignore`
+  addition — no existing Meson file (`meson.build`,
+  `meson_options.txt`, any `src/**/meson.build`) was touched. GTK arm
+  (`builddir-gtk`, from earlier tasks) and the default SDL arm both
+  still present and unaffected by this task's changes.
+
+`.gitignore` gained `packaging/xcode/build/` (the local build-products
+directory `xcodebuild` writes next to the project when not using the
+global DerivedData location), Xcode's per-user
+`xcuserdata`/`xcworkspace` state, and `/fsv.app` (the bundle
+`make-bundle.sh` writes at the repo root by default) — none of these
+are build inputs.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2364,3 +2464,5 @@ code is kept.
 | 2026-08-07 | `io.IniFilename` set to an `SDL_GetPrefPath()`-derived absolute path rather than left at ImGui's cwd-relative default | `scanfs.c` permanently `chdir()`s into whatever directory was last scanned; a relative `imgui.ini` would follow it there instead of living anywhere stable, and would relocate itself on every Rescan/Change Root |
 | 2026-08-07 | Default dock layout seeded via `DockBuilder*` gated on the resulting node's `IsEmpty()`, not on whether `imgui.ini` exists on disk | `DockSpaceOverViewport()` already resolves/creates the node before the gate can run either way; checking the node's *own* structure (already restored from a prior `imgui.ini` load, if any, by the time this code runs) is what actually distinguishes "nothing to preserve" from "a user's layout exists", not a filesystem check that can't see what ImGui already loaded into memory |
 | 2026-08-07 | `ImGuiListClipper::IncludeItemByIndex()` before the first `Step()`, not a second, unclipped render pass | it is the one mechanism `imgui.h` documents for exactly this need (force a specific, possibly off-screen index to be processed at all) and composes with the clipper's own multi-pass `Step()` loop already in place, instead of bypassing clipping (and its perf benefit) entirely whenever any scroll-to is pending |
+| 2026-08-08 | Xcode target is a `PBXLegacyTarget` wrapping `meson`/`ninja`, not a native target compiling the sources itself | keeps Meson the single source of truth for the build graph; a native target would require mirroring every `meson.build` rule (subproject, embedded shaders, per-frontend gating) inside the pbxproj too, doubling the maintenance surface for zero benefit |
+| 2026-08-08 | Ad-hoc `codesign` lives in `packaging/macos/make-bundle.sh`, not an Xcode build phase | an External Build System target has no product/Signing tab for Xcode to drive itself; a Run Script phase bolted onto a phase-less legacy target would be exactly the "fake compile phase" the task's own constraints rule out, and the script is useful standalone (CLI-only users, CI) |
