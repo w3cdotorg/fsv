@@ -170,6 +170,16 @@ SDL_GPUCommandBuffer *g_cmd;
 SDL_GPUTexture *g_swapchain;
 Uint32 g_swapchain_width, g_swapchain_height;
 
+// --screenshot: when non-null, the scene renders into this offscreen
+// R8G8B8A8 texture instead of the swapchain (see gpu_screenshot_begin()).
+SDL_GPUTexture *g_capture_texture;
+Uint32 g_capture_width, g_capture_height;
+
+// Where the scene pass is currently drawing, and which of pipeline_for()'s
+// two color-target formats that is.
+SDL_GPUTexture *g_color_target;
+int g_target_index;
+
 // Shadow copies of the two uniform blocks: gpu_set_color() and friends
 // write here, and every gpu_draw() snapshots them into its DrawCmd.
 SceneVertUBO g_vert_ubo;
@@ -992,7 +1002,10 @@ gpu_frame_end(void)
 void
 gpu_scene_begin(void)
 {
-	if (g_cmd == nullptr || g_swapchain == nullptr || !g_ready)
+	g_color_target = g_capture_texture != nullptr ? g_capture_texture
+						      : g_swapchain;
+	g_target_index = g_capture_texture != nullptr ? 1 : 0;
+	if (g_cmd == nullptr || g_color_target == nullptr || !g_ready)
 		return;
 
 	// Same three calls the GTK frontend's render() made per frame
@@ -1034,7 +1047,7 @@ gpu_draw(FsvTopology topology, const FsvVertex *verts, int nverts,
 	SDL_GPUGraphicsPipeline *pipeline = pipeline_for(
 	    is_line ? SDL_GPU_PRIMITIVETYPE_LINELIST
 	            : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-	    g_depth_test, g_render_mode == FSV_RENDER_SELECT ? 1 : 0);
+	    g_depth_test, g_target_index);
 	if (pipeline == nullptr) {
 		g_indices.resize(first_index);
 		return;
@@ -1061,7 +1074,7 @@ gpu_scene_end(void)
 	    !g_draws.empty() && upload_frame_geometry();
 
 	SDL_GPUColorTargetInfo color_target = {};
-	color_target.texture = g_swapchain;
+	color_target.texture = g_color_target;
 	// src/ogl.c cleared to transparent black; the scene is opaque and
 	// ImGui draws on top of it, so the alpha only matters for the
 	// window background. Kept as Task 2.2's dark slate so an empty
@@ -1105,4 +1118,138 @@ gpu_pick(int x, int y)
 	(void)x;
 	(void)y;
 	return 0;
+}
+
+// ---- --screenshot ----------------------------------------------------
+//
+// Renders one scene into an offscreen R8G8B8A8 texture and writes it out
+// as a BMP, for CI smoke tests: "did the port actually draw anything?" is
+// exactly the regression a headless check can catch. The caller drives
+// the scene itself, so this is a pair of brackets rather than one call:
+//
+//   gpu_screenshot_begin(w, h);
+//   gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();
+//   gpu_screenshot_end(path);
+//
+// gpu_scene_begin()/gpu_scene_end() need no special case beyond noticing
+// g_capture_texture and switching color target + pipeline format.
+
+bool
+gpu_screenshot_begin(int width, int height)
+{
+	if (!g_ready || width <= 0 || height <= 0)
+		return false;
+
+	SDL_GPUTextureCreateInfo info = {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	info.width = (Uint32)width;
+	info.height = (Uint32)height;
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+	g_capture_texture = SDL_CreateGPUTexture(g_device, &info);
+	if (g_capture_texture == nullptr) {
+		SDL_Log("gpu: screenshot texture creation failed: %s",
+		    SDL_GetError());
+		return false;
+	}
+	g_capture_width = (Uint32)width;
+	g_capture_height = (Uint32)height;
+
+	if (!ensure_depth_texture(g_capture_width, g_capture_height)) {
+		SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+		g_capture_texture = nullptr;
+		return false;
+	}
+
+	g_cmd = SDL_AcquireGPUCommandBuffer(g_device);
+	if (g_cmd == nullptr) {
+		SDL_Log("gpu: screenshot command buffer failed: %s",
+		    SDL_GetError());
+		SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+		g_capture_texture = nullptr;
+		return false;
+	}
+	return true;
+}
+
+bool
+gpu_screenshot_end(const char *path)
+{
+	bool ok = false;
+
+	if (g_capture_texture == nullptr || g_cmd == nullptr)
+		return false;
+
+	const Uint32 bytes = g_capture_width * g_capture_height * 4;
+
+	SDL_GPUTransferBufferCreateInfo transfer_info = {};
+	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+	transfer_info.size = bytes;
+	SDL_GPUTransferBuffer *download =
+	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+	if (download == nullptr) {
+		SDL_Log("gpu: screenshot transfer buffer failed: %s",
+		    SDL_GetError());
+		SDL_SubmitGPUCommandBuffer(g_cmd);
+		g_cmd = nullptr;
+		goto out;
+	}
+
+	{
+		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
+		SDL_GPUTextureRegion source = {};
+		source.texture = g_capture_texture;
+		source.w = g_capture_width;
+		source.h = g_capture_height;
+		source.d = 1;
+		SDL_GPUTextureTransferInfo destination = {};
+		destination.transfer_buffer = download;
+		destination.offset = 0;
+		destination.pixels_per_row = g_capture_width;
+		destination.rows_per_layer = g_capture_height;
+		SDL_DownloadFromGPUTexture(copy_pass, &source, &destination);
+		SDL_EndGPUCopyPass(copy_pass);
+
+		SDL_GPUFence *fence =
+		    SDL_SubmitGPUCommandBufferAndAcquireFence(g_cmd);
+		g_cmd = nullptr;
+		if (fence != nullptr) {
+			SDL_WaitForGPUFences(g_device, true, &fence, 1);
+			SDL_ReleaseGPUFence(g_device, fence);
+		}
+
+		void *pixels = SDL_MapGPUTransferBuffer(g_device, download, false);
+		if (pixels == nullptr)
+			SDL_Log("gpu: screenshot map failed: %s", SDL_GetError());
+		else {
+			// R8G8B8A8_UNORM is R,G,B,A in memory order, which is
+			// what SDL_PIXELFORMAT_RGBA32 means on either endianness.
+			SDL_Surface *surface = SDL_CreateSurfaceFrom(
+			    (int)g_capture_width, (int)g_capture_height,
+			    SDL_PIXELFORMAT_RGBA32, pixels,
+			    (int)g_capture_width * 4);
+			if (surface == nullptr)
+				SDL_Log("gpu: SDL_CreateSurfaceFrom failed: %s",
+				    SDL_GetError());
+			else {
+				ok = SDL_SaveBMP(surface, path);
+				if (!ok)
+					SDL_Log("gpu: SDL_SaveBMP failed: %s",
+					    SDL_GetError());
+				SDL_DestroySurface(surface);
+			}
+			SDL_UnmapGPUTransferBuffer(g_device, download);
+		}
+		SDL_ReleaseGPUTransferBuffer(g_device, download);
+	}
+
+out:
+	SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+	g_capture_texture = nullptr;
+	g_capture_width = g_capture_height = 0;
+	return ok;
 }

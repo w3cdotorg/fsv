@@ -5,19 +5,17 @@
 # plus the renderer core — device, pipelines, mesh buffers, camera
 # matrices (gpu.cpp, Task 3.2). Scene geometry lands in Task 3.3.
 #
-# libfsvcore still calls into a handful of frontend-notification
-# symbols (gui_update, dirtree_*, filelist_*, geometry_*, window_*,
-# viewport_pass_node_table) that belong to the not-yet-ported GTK/GL
-# frontend files: fsv_animation_tick() touches the shared `globals`
-# struct (common.c), and common.o itself calls gui_update() — so those
-# symbols must resolve even though this task never calls into
-# scanfs/geometry. Real implementations land task by task (dirtree/
-# filelist panels in M5, geometry/viewport in M3); until then, reuse
-# the same headless no-op stubs tools/fsv-headless-stubs.c already
-# provides for fsv-scan and test_scanfs, as a temporary measure. This
-# is the smallest correct choice — they already link cleanly and exist
-# for exactly this purpose.
-headless_stubs_src = files('../../tools/fsv-headless-stubs.c')
+# The SDL frontend implements only part of the frontend surface the fsv
+# core notifies (see the header of src/sdl/stubs.c): the ImGui panels,
+# menus and the texture-mapped text engine land in later tasks, so their
+# entry points are no-ops for now. geometry.c, by contrast, is compiled
+# for real here -- which is why this target uses its own stub file rather
+# than tools/fsv-headless-stubs.c, whose geometry_* no-ops would collide.
+#
+# geometry.c is listed as a source rather than folded into libfsvcore: it
+# now calls gpu.h, which each frontend implements, and libfsvcore's other
+# consumers (fsv-scan, test_scanfs) have no renderer to link against.
+core_gl_src = files('stubs.c', '../geometry.c')
 
 # The compiled shader artifacts (Task 3.1) are baked into the binary as
 # byte arrays rather than loaded from disk — see the rationale at the top
@@ -35,7 +33,7 @@ shaders_embedded_h = custom_target('shaders_embedded.h',
   command: [python3, embed_shaders_py, '@OUTPUT@', '@INPUT@'])
 
 fsv_sdl = executable('fsv',
-  ['main.cpp', 'gpu.cpp', shaders_embedded_h, headless_stubs_src],
+  ['main.cpp', 'gpu.cpp', shaders_embedded_h, core_gl_src],
   link_with: libfsvcore,
   dependencies: [sdl3dep, imgui_dep, glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   # include_directories('.') resolves to *both* src/sdl and its build

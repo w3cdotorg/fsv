@@ -65,7 +65,13 @@ if has_file.found()
 endif
 
 if get_option('buildtype') == 'debug' or get_option('buildtype') == 'debugoptimized'
-    add_project_arguments('-DDEBUG', language: 'c')
+    # C++ too, not just C: common.h routes xmalloc/xfree and the GList
+    # helpers through debug.c's tracking allocator under -DDEBUG, and the
+    # SDL frontend's C++ files share those lists with the C core. With the
+    # flag on only one side, a list link prepended from main.cpp is
+    # untracked and camera.c's g_list_remove() of it trips debug.c's
+    # "Attempted to free unknown link".
+    add_project_arguments('-DDEBUG', language: ['c', 'cpp'])
 endif
 
 configure_file(output : 'config.h',

@@ -45,3 +45,16 @@ SDL_GPUTexture *gpu_frame_swapchain_texture(void);
 
 // Submits this frame's command buffer.
 void gpu_frame_end(void);
+
+// --screenshot: render one scene into an offscreen R8G8B8A8 texture
+// instead of the swapchain and write it out as a BMP. The caller drives
+// the scene between the two calls:
+//
+//   gpu_screenshot_begin(w, h);
+//   gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();
+//   gpu_screenshot_end("out.bmp");
+//
+// Both return false (having logged the reason) if the capture could not
+// be set up or written; gpu_screenshot_end() always releases the texture.
+bool gpu_screenshot_begin(int width, int height);
+bool gpu_screenshot_end(const char *path);
