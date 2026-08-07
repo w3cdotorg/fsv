@@ -587,6 +587,11 @@ retarget the still-OpenGL GTK frontend.
 
 ### Task 3.3 handoff: what `FsvMesh` does *not* cover yet
 
+> **Superseded by the Task 3.3 section below.** `FsvMesh` was removed
+> rather than extended; the inventory in this table is still accurate as
+> a description of what `geometry.c` draws, and is what Task 3.3's
+> topology expansion was derived from.
+
 `fsv_mesh_draw()` issues exactly one kind of draw —
 `SDL_DrawGPUIndexedPrimitives()` on a `TRIANGLELIST` pipeline. That
 covers `geometry.c`'s four `glDrawElements(GL_TRIANGLES, ...)` call
