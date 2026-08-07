@@ -590,8 +590,15 @@ append_indices(FsvTopology topology, int nverts, const unsigned int *indices,
 
 	switch (topology) {
 		case FSV_TRIANGLES:
-		for (Uint32 i = 0; i < n; i++)
+		// No caller today: geometry.c's GL_TRIANGLES draws are all
+		// indexed and took the branch above. Truncate rather than
+		// emit a partial triangle if one ever arrives non-indexed.
+		SDL_assert(n % 3 == 0);
+		for (Uint32 i = 0; i + 2 < n; i += 3) {
 			g_indices.push_back(i);
+			g_indices.push_back(i + 1);
+			g_indices.push_back(i + 2);
+		}
 		break;
 
 		case FSV_TRIANGLE_FAN:
