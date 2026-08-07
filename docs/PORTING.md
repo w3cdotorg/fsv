@@ -730,7 +730,11 @@ filled polygons, not lines, and the whole point is for the black folder
 outlines and the cursor bars — which sit exactly on a face's plane — to
 win the depth test. Verified visually: the folder outlines on the MapV
 directory faces and the TreeV folder leaves render solid, with no
-z-fighting.
+z-fighting — including at scale, where MapV on a 275,557-node tree
+(`/opt/homebrew/Cellar`) draws several hundred collapsed-directory folder
+outlines across the root slab, every one crisp and unbroken down to the
+~6-pixel ones at the far edge. A wrong bias value shows up first as
+stippled outlines in exactly that picture.
 
 ### Line width: 1 pixel, everywhere
 
