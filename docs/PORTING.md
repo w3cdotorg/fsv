@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 done through Task 4.1**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done through Task 5.1**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -1478,7 +1478,195 @@ after the fix — the branch connector is still visibly red — confirming
 the id-0 substitution is select-pass-only and never leaks into what the
 user sees.
 
-## Why this architecture
+## Task 5.1 verification (ui_main.cpp — ImGui menu bar and mode switching)
+
+`src/sdl/ui_main.h`/`ui_main.cpp` replace the GTK menu shell -- `src/gui.c`'s
+menu-widget helpers, wired up in `src/window.c`'s `window_init()`, with
+the actions themselves in `src/callbacks.c` -- with an ImGui main menu
+bar offering the same actions, adapted where GTK-specific (a native
+folder dialog instead of `GtkFileChooser`, an ImGui popup instead of a
+`GtkMenu`). `src/sdl/app.h` (implemented in `main.cpp`) is the seam
+`ui_main.cpp` calls through for mode switching and root-directory
+changes, so this task does not duplicate `main.cpp`'s
+`load_filesystem()`/`enter_mode()` (Task 2.2/3.3). No GTK file changed
+(`git diff --stat -- src/gui.c src/window.c src/callbacks.c src/fsv.c
+src/dirtree.c src/colexp.c src/color.c src/viewport.c` is empty).
+
+### Menu -> GTK original cross-reference
+
+| Menu item | GTK original | Notes |
+|---|---|---|
+| File -> Change Root... | `on_file_change_root_activate()` -> `dialog_change_root()` | `SDL_ShowOpenFolderDialog()` instead of `gtk_file_chooser_dialog_new()`; defaults to the current root, like `dialog_change_root()`'s own default |
+| File -> Rescan | *(none)* | Addition: GTK's menu has no separate "just rescan" action, only Change Root. Re-scans `app_root_dir()` in place |
+| File -> Quit | `on_file_exit_activate()` -> `exit(EXIT_SUCCESS)` | Pushes a real `SDL_EVENT_QUIT` instead of calling `exit()` directly, so `main.cpp`'s loop still runs its normal shutdown (`gpu_shutdown()`, `SDL_Quit()`) and its mid-scan-quit handling |
+| Vis -> DiscV/MapV/TreeV | `on_vis_*_activate()` -> `fsv_set_mode()` | `app_switch_mode()` is `fsv_set_mode()`'s non-`FSV_NONE` branch, ported into `main.cpp` next to `enter_mode()` (the `FSV_NONE` branch) so the two share `initial_camera_pan()` instead of duplicating it |
+| Colors -> By node type/timestamp/wildcards | `on_color_by_*_activate()` -> `color_set_mode()` | Direct call, unchanged core API |
+| Colors -> Setup... | `on_color_setup_activate()` -> `dialog_color_setup()` | Disabled placeholder, "(Task 5.3)" -- menu-level switching only, per the brief |
+| Help -> Controls | *(none)* | Addition: a window listing input.cpp's real, verified gesture table (docs/PORTING.md's own Task 4.1 section), not the brief's original guess at the gestures |
+| Help -> About fsv... | `on_help_about_fsv_activate()` -> `about(ABOUT_BEGIN)` | A plain ImGui window (version/lineage text) instead of the 3D splash presentation, which this frontend has never had (Task 3.3) |
+| Right-click on a node | `context_menu()` (GTK popup) | ImGui popup: node name, Look At (`camera_look_at()`), Properties (disabled, "Task 5.3"), Collapse/Expand (`colexp()`, directories only) -- see the seam below |
+
+### Mode switching: reusing, not duplicating, `enter_mode()`
+
+`fsv_set_mode()` (`src/fsv.c`) has two branches: `FSV_NONE` (the
+filesystem's first appearance -- `first_init = TRUE`, the slow 4-second
+fly-in) and everything else (a same-filesystem mode switch -- short pan
+from wherever the camera already is, TreeV getting an L-shaped one via
+`camera_treev_lpan_look_at()`). `main.cpp`'s `enter_mode()` (Task 2.2/3.3)
+was only ever the first branch. Rather than write a second, parallel
+`initial_camera_pan()` for `app_switch_mode()`, `initial_camera_pan()`
+itself was extended to switch on its `mesg` argument exactly as
+`fsv.c`'s original does (`"new_fs"` -> root fly-in; anything else ->
+TreeV lpan or the short `MORPH_INV_QUADRATIC` pan), and `app_switch_mode()`
+schedules it with `""` the same way `fsv_set_mode()`'s non-`FSV_NONE`
+branch does. `app_switch_mode()` itself is a direct port of that
+branch's `geometry_init()` + `camera_init(mode, FALSE)` +
+`schedule_event()` sequence, guarded the same way
+`on_vis_*_activate()` guards it (`if (globals.fsv_mode != mode)`), plus
+a `g_scanning` guard `fsv_set_mode()` never needed (GTK's menu is
+disabled during a scan via `window_set_access(FALSE)`; this frontend has
+no menu bar drawn at all during a scan -- see below).
+
+### Deferred Rescan/Change Root: avoiding an ImGui re-entrancy bug
+
+`app_show_change_root_dialog()`/`app_request_rescan()` do not call
+`scanfs()`. They only set a pending-request flag, consumed by a new
+`app_apply_pending_root_change()` that `main.cpp`'s loop calls right
+after `submit_frame()` -- i.e. once the frame that queued the request is
+fully closed out. This is necessary, not just tidy: `scanfs()` drives its
+own progress overlay through `gui_update()`, which (Task 3.3's
+finding 2) calls `imgui_new_frame()`/`ImGui::Render()`/`submit_frame()`
+itself, gated on `g_scanning`. `ui_main_draw()` runs *inside* the main
+loop's own `imgui_new_frame()`/`ImGui::Render()` pair -- calling
+`scanfs()` (and therefore `gui_update()`) synchronously from a menu-item
+click handler there would call `ImGui::NewFrame()` a second time before
+the first pair had closed, which ImGui does not support. Deferring the
+actual scan to after `submit_frame()` sidesteps this entirely: by the
+time `scanfs()` runs, there is no open frame to re-enter, exactly the
+condition the main loop's own top-level call already relies on. One
+side effect worth naming: while a deferred scan runs, `ui_main_draw()`
+is not called at all (it's not the current loop iteration) — the menu
+bar is not merely greyed out, it does not exist on screen for that
+window, which is a stronger version of GTK's `window_set_access(FALSE)`
+menu-disable and needs no separate implementation.
+
+### A real bug the first Rescan attempt found: `scanfs()`'s permanent `chdir()`
+
+`src/scanfs.c:320` `chdir()`s into the scanned directory and never
+`chdir()`s back. The GTK frontend never notices, because
+`dialog_change_root()` only ever hands `fsv_load()` an *absolute* path
+(`gtk_file_chooser_get_filename()`'s contract) and never re-scans the
+same string twice in a row. `load_filesystem()` here first stored the
+caller's `dir` argument verbatim as the tracked root; Rescan then handed
+that same (possibly relative, e.g. `"src"`) string back to `scanfs()`,
+which `chdir()`'d *again*, this time relative to the directory the first
+scan had already left the process in -- looking for `.../src/src` and
+fatally `g_error()`-ing (`g_error()` is fatal by default in glib; the
+whole process aborted mid-test). Fixed by storing `xgetcwd()`'s result
+(the resolved absolute path `scanfs()` itself computes right after its
+own `chdir()`), not the caller's string, as `g_root_dir`. Reproduced
+before the fix (killed the process) and confirmed absent after,
+end-to-end, via the harness described below. `SDL_ShowOpenFolderDialog()`
+was never affected (its result is always absolute already) -- this was
+strictly a Rescan-on-a-relative-root bug.
+
+### Context-menu seam
+
+`src/sdl/input.h`'s new `ContextMenuRequest` (`{ pending, node, x, y }`,
+`node` kept as `void *`) is written only by `input.cpp`'s existing
+right-click branch (`SDL_EVENT_MOUSE_BUTTON_DOWN`, `btn3 &&
+g_indicated_node != NULL` -- Task 4.1/4.2) and read/cleared only by
+`ui_main.cpp`'s `draw_context_menu()`, once per frame. Kept one-way (the
+same shape as `viewport_node_for_id()`, Task 4.1's own seam) so
+`input.cpp` never has to know ImGui exists beyond the
+`WantCaptureMouse` check it already made; `node` stays `void *` rather
+than `GNode *` so `input.h` stays glib-free, the same reasoning behind
+its SDL-only, `common.h`-free style since Task 4.1.
+
+### Window title
+
+`SDL_SetWindowTitle(g_window, "fsv - <root>")` on every successful
+`load_filesystem()` (startup, Rescan, Change Root) -- GTK's window is
+always titled a bare `"fsv"` (`src/window.c:175`); this is a deliberate
+addition over the original, not a port, per the brief.
+
+### Manual verification
+
+Both arms build clean from scratch:
+
+- `meson setup builddir-sdl -Dfrontend=sdl && ninja -C builddir-sdl` --
+  31/34 targets rebuilt after `rm -rf`, zero warnings from any file this
+  task touched (`main.cpp`, `input.cpp`, `input.h`, `ui_main.cpp`,
+  `ui_main.h`, `app.h`).
+- `meson setup builddir-gtk && ninja -C builddir-gtk` -- same
+  pre-existing Darwin gate on the GTK executable itself as every prior
+  task; `libfsvcore`/`fsv-scan`/`test_scanfs` build clean.
+- `meson test scanfs` -> `1/1 OK` on both arms.
+
+Headed verification used a temporary, `FSV_UI_TEST`-env-var-gated script
+in `main.cpp` (real `SDL_PushEvent()`-injected mouse motion/clicks routed
+through the actual `ImGui_ImplSDL3_ProcessEvent()` + `input_handle_event()`
+path, not direct ui-state calls -- the brief's preferred option, tried
+first and it worked) plus matching temporary rect-capture logging in
+`ui_main.cpp` (`ImGui::GetItemRectMin()/Max()` right after each
+`BeginMenu()`/`MenuItem()`, so the script could click the *actual* pixel
+each menu item rendered at, discovered live in the same run rather than
+hand-guessed). Both fully reverted before commit (`git status --short`
+lists only the real feature files; `grep -rn "TEMPORARY\|UITEST"
+src/sdl/*.cpp src/sdl/*.h` is empty).
+
+Full scripted run against `src` (this repo, 1280x800): raise window ->
+click File (rects `file=(26,10) vis=(66,10) colors=(114,10)
+help=(165,10)`) -> click Rescan -> click Vis -> click DiscV -> click
+Vis -> click TreeV -> click Vis -> click MapV -> click Colors -> click
+By timestamp -> click Colors -> click By node type -> click Help ->
+click Controls -> click Help -> click About fsv... -> right-click
+`(480, 445)` (Task 4.2's known `src/camera.c` pedestal) -> click Look At
+-> `app_request_change_root()` to `tests/fixture`'s absolute path (the
+brief's explicit allowance: the native dialog itself can't be driven in
+this sandbox, so this calls the exact code path its callback would) ->
+click File -> click Quit. Every step logged internal state via
+`SDL_Log()`:
+
+| Step | Logged evidence |
+|---|---|
+| Rescan | `root=/…/fsv/src` before and after, `fstree` pointer changed (fresh scan, not a no-op) -- and, pre-fix, this step is what surfaced the `chdir()` bug above |
+| Vis -> DiscV | `mode=0` (`FSV_DISCV`), `distance=1804.6` |
+| Vis -> TreeV | `mode=2` (`FSV_TREEV`), `distance=23500.5` (TreeV's much larger camera scale) |
+| Vis -> MapV | `mode=1` (`FSV_MAPV`), restored |
+| Colors -> By timestamp / By node type | both switch with no crash; scene screenshots (below) show a visibly different palette between them |
+| Right-click `(480,445)` | context menu's captured node name: `/…/fsv/src/camera.c` -- the exact node Task 4.2 verified sits at that pixel |
+| Look At | `distance` 1158.9, `theta`/`phi` changed from the pre-click values -- the camera moved |
+| Change Root | `root=/…/fsv/tests/fixture`, window title `"fsv - /…/fsv/tests/fixture"`, `fstree` pointer changed again |
+| Quit | process exited (0), no crash, no leaked child |
+
+**Scene-only screenshots** (via the existing `gpu_screenshot_begin/end`
+path, unaffected by ImGui) independently confirm the mode/color switches
+visually: DiscV renders the ringed-disc layout, TreeV the platform with
+its red branch stem and "src" label, MapV the pedestal landscape,
+By-timestamp recolors pedestals into a red/orange/yellow gradient
+distinct from By-node-type's uniform pale yellow, and both Change-Root
+screenshots show the same "tall thin tower" MapV shape Task 3.3's report
+documented for `tests/fixture` specifically (a 5-file tree against a
+fixed `mapv_dir_height`) -- independent confirmation the new root's
+geometry, not the old one, is what got drawn.
+
+**Idle CPU**: 0.8% (`ps`) on `src`, intro pan settled, no `FSV_UI_TEST`
+-- unchanged from prior tasks' baseline.
+
+**Verification gap, disclosed rather than glossed over**: this
+sandbox's `screencapture -x` (full-screen, no window targeting) returned
+a solid-black image in this session, for the *entire* screen, not just
+the fsv window -- a harder version of prior tasks' "window occluded"
+finding (see the decision log). This means the menu bar, the node
+context-menu popup and the About/Controls windows were verified to
+*exist and contain the right data* (the item-rect capture only succeeds
+if the corresponding widget was actually drawn that frame; the context
+menu's captured text was the real, correct node name; state changes
+tracked via `SDL_Log()` are unambiguous) but their **pixels** were not
+visually inspected -- only the 3D scene's pixels were (via the
+`gpu_screenshot_*()` path, which does not composite the ImGui pass and
+so was never affected by this gap in the first place).
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
 (scene building), `camera.c` (math), `colexp.c`, `color.c`, `common.c`
@@ -1521,3 +1709,8 @@ code is kept.
 | 2026-08-07 | `gpu_scene_end()`'s clear color branches on `g_render_mode == FSV_RENDER_SELECT` rather than giving picking its own render-pass function | the dark-slate clear (Task 2.2) decodes as a non-zero, bogus node id for any pixel the id pass draws nothing over (e.g. empty sky); one branch on already-shared state was simpler than a parallel copy of `gpu_scene_end()` |
 | 2026-08-07 | `gpu_pick()` acquires its own `SDL_GPUCommandBuffer` rather than piggybacking on the main loop's | `input_handle_event()` always runs before that iteration's `gpu_frame_begin()`, so `g_cmd` is provably null at call time; a dedicated command buffer keeps the pick's copy pass and fence wait from ever touching the frame the user is about to see |
 | 2026-08-07 | `draw_lit()`'s fixed-color path draws id 0 (black) in the select pass instead of skipping the draw | skipping would remove TreeV's branch/loop connectors from the pick pass's depth buffer, letting a click pass through to whatever node sits behind them — pick-pass occlusion has to match the visible scene; id 0 keeps the occlusion while correctly reporting "not a node" |
+| 2026-08-07 | Rescan/Change Root are *requested* synchronously from `ui_main.cpp` but *applied* (i.e. `scanfs()` actually runs) only after `main.cpp`'s loop closes out the current frame | `scanfs()`'s own progress overlay (`gui_update()`) drives its own `ImGui::NewFrame()`/`Render()` pair; running it from inside `ui_main_draw()` would re-enter `ImGui::NewFrame()` while the main loop's own pair (which is what called `ui_main_draw()`) is still open |
+| 2026-08-07 | `app_switch_mode()`/`app_root_dir()`'s int/`const char *` boundary keeps `FsvMode` as a plain `int` rather than including `common.h` a second time | `common.h` self-guards against a second `#include` in the same translation unit (`#ifdef FSV_COMMON_H #error`) and every caller already includes it; matches `input.h`'s existing `void *` treatment of `GNode *` for the same reason |
+| 2026-08-07 | `load_filesystem()` stores `xgetcwd()`'s result (post-`scanfs()`), not the caller's `dir` argument, as the tracked root | `scanfs()` `chdir()`s into `dir` and never `chdir()`s back (`src/scanfs.c:320`); storing the caller's string verbatim would hand Rescan a stale, possibly-relative path that resolves against the *new* working directory on the next call — confirmed by reproducing the resulting fatal `g_error()` (`"Failed to change dir to src"`) before this fix and its absence after |
+| 2026-08-07 | Context-menu seam (`input.cpp` writes, `ui_main.cpp` reads) mirrors `viewport_node_for_id()`'s one-way pattern rather than a callback | keeps `input.cpp` ignorant of ImGui beyond the `WantCaptureMouse` check it already made; `ui_main_draw()` polls once per frame instead of `input.cpp` needing a function pointer into a file that doesn't exist yet when `input.cpp`'s API was designed (Task 4.1) |
+| 2026-08-07 | Full-screen `screencapture` in this sandbox returns a solid-black image regardless of window state | unlike prior tasks' "window occluded" finding, this session's virtual display has no capturable compositor output at all (confirmed capturing the whole screen, not just the fsv window); ImGui-overlay pixels (menu bar, popups, About/Controls windows) could not be visually verified this way, only via internal-state tracing plus the (unaffected) offscreen scene-only `gpu_screenshot_*()` path |

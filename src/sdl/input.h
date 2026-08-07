@@ -24,3 +24,27 @@
 // loop while a button is held but the mouse is stationary. This function
 // is the complete port of that mechanism.
 void input_handle_event(const SDL_Event *ev);
+
+// ---- Context-menu seam (Task 5.1) --------------------------------------
+//
+// input.cpp is the one place that already knows "the user right-clicked a
+// node" -- it resolves the node under the cursor via gpu_pick(), the same
+// way the left-click/hover path does. ui_main.cpp is the one place that
+// knows how to draw an ImGui popup. This struct/accessor pair keeps that
+// dependency one-way (input.cpp writes it, ui_main.cpp reads it, never the
+// reverse), the same seam style viewport_node_for_id() used for Task 4.2.
+//
+// `node` is kept as `void *` (really a `GNode *`) so this header stays
+// glib-free, matching input.h's own SDL-only, common.h-free style.
+struct ContextMenuRequest {
+	bool pending;
+	void *node; // GNode*
+	int x, y;   // viewport pixel coordinates, for popup placement
+};
+
+// Returns the most recent right-click-on-a-node request and clears the
+// pending flag. Call once per frame from ui_main_draw(); at most one
+// request is ever pending (matches ImGui's own single-popup-at-a-time
+// model), so an unconsumed request is simply overwritten by the next
+// right-click rather than queued.
+ContextMenuRequest input_take_context_menu_request(void);

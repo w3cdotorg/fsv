@@ -17,9 +17,11 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
+#include "app.h"
 #include "gpu.h"
 #include "gpu_internal.hpp"
 #include "input.h"
+#include "ui_main.h"
 #include <cstring>
 extern "C" {
 #include "common.h"
@@ -52,6 +54,21 @@ static bool g_quit_requested = false;
 // there is no such outer frame, and the main loop is not running, which
 // is exactly when this frontend needs to drive one itself.
 static bool g_scanning = false;
+
+// Root directory last (successfully) handed to scanfs() -- app_root_dir(),
+// Rescan's implicit target, the window title, and the Change Root dialog's
+// default location. Owned here; xstrdup()'d/xfree()'d, never a borrowed
+// pointer (see load_filesystem() below).
+static char *g_root_dir = nullptr;
+
+// A Change Root/Rescan request queued by ui_main.cpp's menu bar (or the
+// async folder-dialog callback), applied by app_apply_pending_root_
+// change() once the main loop has closed out the frame that queued it --
+// see app.h's doc comment for why this can't run synchronously from
+// inside ui_main_draw(). g_pending_new_root == NULL means "Rescan" (reuse
+// g_root_dir); non-NULL means "Change Root" to that directory.
+static bool g_pending_root_change = false;
+static char *g_pending_new_root = nullptr;
 
 static void
 sdl_request_frame(void)
@@ -107,21 +124,34 @@ sdl_get_scroll(int axis)
 // gui_update(), camera_update_scrollbars(), filelist_init()) and the
 // two-second splash-screen sleep, which this frontend has no splash for.
 
-// Port of fsv.c's initial_camera_pan("new_fs"): the opening fly-in, run
-// one frame after the mode is set so that the first (slow) frame does not
-// turn into a camera jump.
+// Full port of fsv.c's initial_camera_pan(): run one frame after the mode
+// is set (schedule_event(..., 1) below) so that the first (slow) frame
+// does not turn into a camera jump. mesg == "new_fs" is the filesystem's
+// first appearance (load_filesystem()'s slow 4-second fly-in to root);
+// anything else is a same-filesystem mode switch (Task 5.1's Vis menu,
+// via app_switch_mode() below), which pans to wherever the camera already
+// was instead of jumping back to root.
 static void
 initial_camera_pan(void *mesg)
 {
-	(void)mesg;
 	// Keeps root_dnode from appearing twice in a row at the bottom of
 	// the node history stack.
 	G_LIST_PREPEND(globals.history, NULL);
-	camera_look_at_full(root_dnode, MORPH_SIGMOID, 4.0);
+
+	const char *m = (const char *)mesg;
+	if (m != NULL && strcmp(m, "new_fs") == 0) {
+		camera_look_at_full(root_dnode, MORPH_SIGMOID, 4.0);
+	} else if (globals.fsv_mode == FSV_TREEV) {
+		// Enter TreeV mode with an L-shaped pan.
+		camera_treev_lpan_look_at(globals.current_node, 1.0);
+	} else {
+		camera_look_at_full(globals.current_node, MORPH_INV_QUADRATIC, 1.0);
+	}
 }
 
 // Port of fsv.c's fsv_set_mode(), FSV_NONE case ("filesystem's first
-// appearance"). The switch-between-modes cases belong to Task 5.1's menu.
+// appearance"). app_switch_mode() below is the other case (switching
+// modes on an already-loaded filesystem).
 static void
 enter_mode(FsvMode mode)
 {
@@ -133,6 +163,30 @@ enter_mode(FsvMode mode)
 	// calls it back with one void * argument (its SchedEvent struct types
 	// the field as void (*)(void *)).
 	schedule_event((void (*)())initial_camera_pan, (char *)"new_fs", 1);
+}
+
+// app.h: Vis menu -> mode switch. Port of fsv.c's fsv_set_mode() for
+// every case *except* FSV_NONE (enter_mode() above is that one) --
+// callbacks.c's on_vis_*_activate() is the GTK analogue of this half:
+// same geometry_init()/camera_init()/schedule_event() sequence, with
+// camera_init()'s initial_view argument FALSE (this is not the
+// filesystem's first appearance) and the "" pan message instead of
+// "new_fs" (a short pan from wherever the camera already is, not the
+// slow root fly-in).
+void
+app_switch_mode(int mode_int)
+{
+	const FsvMode mode = (FsvMode)mode_int;
+
+	if (g_scanning || globals.fsv_mode == FSV_NONE)
+		return; // nothing loaded yet, or a scan owns the main thread
+	if (globals.fsv_mode == mode)
+		return; // matches callbacks.c's on_vis_*_activate guard
+
+	geometry_init(mode);
+	camera_init(mode, /* initial_view */ FALSE);
+	globals.fsv_mode = mode;
+	schedule_event((void (*)())initial_camera_pan, (char *)"", 1);
 }
 
 // Port of fsv.c's fsv_load(). Returns false if the scan produced nothing
@@ -159,8 +213,162 @@ load_filesystem(const char *dir, FsvMode mode)
 	globals.history = NULL;
 	globals.current_node = root_dnode;
 
+	// Track the root actually scanned (app_root_dir(), Rescan, the
+	// window title, the Change Root dialog's default location) and
+	// reflect it in the title -- the brief's addition over the GTK
+	// frontend, which titles its window a bare "fsv" always.
+	//
+	// Deliberately xgetcwd(), not dir: scanfs() just chdir()'d into dir
+	// and never chdir's back (src/scanfs.c:320), so the process's
+	// working directory *is* the new root from here on. Storing the
+	// resolved absolute path rather than the caller's (possibly
+	// relative) dir string is what makes Rescan safe to call twice --
+	// storing dir verbatim would have Rescan hand a now-stale relative
+	// path (e.g. "src") back to scanfs(), which chdir()s *again*,
+	// relative to the directory the first scan already left us in
+	// (".../src/src") and fatally g_error()s when that doesn't exist.
+	// xstrdup() before freeing the old value: g_root_dir itself has
+	// already been chdir()'d away from by the time we get here, so
+	// there is no aliasing hazard either way, but the order still costs
+	// nothing.
+	char *new_root_dir = xstrdup(xgetcwd());
+	if (g_root_dir != nullptr)
+		xfree(g_root_dir);
+	g_root_dir = new_root_dir;
+	if (g_window != nullptr) {
+		char title[1024];
+		SDL_snprintf(title, sizeof(title), "fsv - %s", g_root_dir);
+		SDL_SetWindowTitle(g_window, title);
+	}
+
 	enter_mode(mode);
 	return true;
+}
+
+// app.h: File -> Rescan / Change Root..., and the async folder-dialog
+// callback below. Never calls scanfs() itself -- see app_apply_pending_
+// root_change()'s doc comment in app.h for why that has to wait until
+// after the current ImGui frame is closed.
+void
+app_request_rescan(void)
+{
+	if (g_scanning)
+		return;
+	g_pending_root_change = true;
+	if (g_pending_new_root != nullptr)
+		xfree(g_pending_new_root);
+	g_pending_new_root = nullptr; // NULL = reuse g_root_dir
+}
+
+// File-local: only the folder-dialog callback below needs this (ui_main.cpp
+// reaches Change Root through app_show_change_root_dialog() instead, since
+// it never has a path in hand -- SDL_ShowOpenFolderDialog() is
+// asynchronous).
+static void
+app_request_change_root(const char *dir)
+{
+	if (g_scanning)
+		return;
+	g_pending_root_change = true;
+	char *copy = xstrdup(dir);
+	if (g_pending_new_root != nullptr)
+		xfree(g_pending_new_root);
+	g_pending_new_root = copy;
+}
+
+// app.h: called from main()'s loop right after submit_frame(), i.e. once
+// the frame that queued a request (if any) is fully closed out.
+void
+app_apply_pending_root_change(void)
+{
+	if (!g_pending_root_change)
+		return;
+	g_pending_root_change = false;
+
+	const char *dir = g_pending_new_root != nullptr ?
+	    g_pending_new_root : g_root_dir;
+	// globals.fsv_mode is never FSV_NONE here (a scan can't be running
+	// while this is reached -- g_scanning gates both request functions
+	// above), so this just carries the current mode across the rescan.
+	// The FSV_MAPV fallback is unreachable in practice; kept because
+	// load_filesystem() requires *some* mode and "unreachable" is not
+	// "impossible to make reachable by a future change here".
+	const FsvMode mode = globals.fsv_mode != FSV_NONE ?
+	    globals.fsv_mode : FSV_MAPV;
+
+	load_filesystem(dir, mode); // logs and no-ops on failure, as at startup
+
+	if (g_pending_new_root != nullptr)
+		xfree(g_pending_new_root);
+	g_pending_new_root = nullptr;
+}
+
+bool
+app_is_scanning(void)
+{
+	return g_scanning;
+}
+
+const char *
+app_root_dir(void)
+{
+	return g_root_dir != nullptr ? g_root_dir : "";
+}
+
+// app.h: File -> Change Root.... Opens SDL3's native folder picker
+// (dialog_change_root()'s GTK counterpart is gtk_file_chooser_dialog_new
+// with GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, i.e. gui_dir_choose()).
+//
+// SDL_ShowOpenFolderDialog()'s callback "may be invoked from a different
+// thread than the one the function was invoked on" (SDL_dialog.h) --
+// true in practice on at least one platform SDL supports (its Linux/XDG
+// portal path runs over DBus), so this cannot assume it is safe to touch
+// any of this file's statics (g_pending_root_change, g_pending_new_root)
+// directly from inside the callback. SDL_RunOnMainThread() is SDL3's own
+// answer to exactly this: "If this is called on the main thread, the
+// callback is executed immediately. If this is called on another
+// thread, this callback is queued for execution on the main thread
+// during event processing" (SDL_init.h) -- safe unconditionally,
+// regardless of which thread actually invokes the dialog callback on
+// this platform.
+static void
+apply_folder_choice_on_main_thread(void *userdata)
+{
+	char *path = static_cast<char *>(userdata);
+	app_request_change_root(path);
+	SDL_free(path);
+}
+
+static void
+folder_dialog_callback(void *userdata, const char *const *filelist, int filter)
+{
+	(void)userdata;
+	(void)filter;
+
+	if (filelist == nullptr) {
+		SDL_Log("fsv: Change Root dialog error: %s", SDL_GetError());
+		return;
+	}
+	if (filelist[0] == nullptr)
+		return; // user canceled, or chose nothing
+
+	// "The filelist argument should not be freed; it will automatically
+	// be freed when the callback returns" (SDL_dialog.h) -- so the
+	// string has to be copied now, before handing it to
+	// SDL_RunOnMainThread(), whose queued case (a different thread)
+	// only runs the copy above *after* this function has already
+	// returned and SDL has freed filelist.
+	char *path = SDL_strdup(filelist[0]);
+	SDL_RunOnMainThread(apply_folder_choice_on_main_thread, path, false);
+}
+
+void
+app_show_change_root_dialog(void)
+{
+	if (g_scanning)
+		return;
+	SDL_ShowOpenFolderDialog(folder_dialog_callback, nullptr, g_window,
+	    g_root_dir, false);
 }
 
 // ---- Frame -----------------------------------------------------------
@@ -516,13 +724,19 @@ main(int argc, char **argv)
 		g_frame_requested = false;
 
 		imgui_new_frame();
-		// No ImGui windows yet: the menu bar and the dirtree/filelist
-		// panels are Tasks 5.1/5.2. The backends stay wired up (and
-		// the pass inside submit_frame() stays in the frame) so that
-		// landing them is a matter of adding widgets here, not
-		// re-plumbing the frame.
+		// The dirtree/filelist panels are Task 5.2's; the menu bar,
+		// node context menu and Help windows are this task's.
+		ui_main_draw();
 		ImGui::Render();
 		submit_frame();
+
+		// Deliberately *after* submit_frame(), not inside
+		// ui_main_draw(): a queued Rescan/Change Root request runs
+		// scanfs() here, which drives its own gui_update() progress-
+		// overlay frames. Doing that from inside ui_main_draw() would
+		// re-enter ImGui::NewFrame() while this iteration's own
+		// NewFrame()/Render() pair (above) is still open. See app.h.
+		app_apply_pending_root_change();
 	}
 
 	// Shutdown order per the vendored example: platform backend, then

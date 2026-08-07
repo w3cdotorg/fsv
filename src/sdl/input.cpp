@@ -81,6 +81,11 @@ static double g_prev_y = 0.0;
 static bool g_mouse_captured = false;
 static Uint8 g_capture_button = 0;
 
+// Context-menu request seam (Task 5.1) -- see input.h. Written only from
+// the right-click branch below; read/cleared only by
+// input_take_context_menu_request().
+static ContextMenuRequest g_context_menu_request = { false, nullptr, 0, 0 };
+
 // ---- Helpers ------------------------------------------------------------
 
 // Window-coordinate -> pixel-coordinate scale factor, the SDL/HiDPI
@@ -216,13 +221,18 @@ input_handle_event(const SDL_Event *ev)
 
 			if (g_indicated_node != NULL && btn3) {
 				// Right-click: viewport.c brings up context_menu()
-				// (a GTK popup) here. Task 5.1 owns the ImGui
-				// equivalent; until then this is plumbed but inert.
-				// filelist_show_entry() is called for real: it is
-				// already a legitimate (if currently no-op) entry
-				// point in stubs.c, and calling it now needs no
-				// changes once Task 5.2 fills it in.
+				// (a GTK popup) here. filelist_show_entry() is called
+				// for real: it is already a legitimate (if currently
+				// no-op) entry point in stubs.c, and calling it now
+				// needs no changes once Task 5.2 fills it in. The ImGui
+				// equivalent of context_menu() itself is a one-way
+				// handoff to ui_main.cpp -- see input.h's
+				// ContextMenuRequest.
 				filelist_show_entry(g_indicated_node);
+				g_context_menu_request.pending = true;
+				g_context_menu_request.node = g_indicated_node;
+				g_context_menu_request.x = (int)x;
+				g_context_menu_request.y = (int)y;
 			}
 		}
 		// ctrl_key && btn1 falls through here with no node-selection
@@ -349,4 +359,12 @@ input_handle_event(const SDL_Event *ev)
 	default:
 		break;
 	}
+}
+
+ContextMenuRequest
+input_take_context_menu_request(void)
+{
+	ContextMenuRequest req = g_context_menu_request;
+	g_context_menu_request.pending = false;
+	return req;
 }
