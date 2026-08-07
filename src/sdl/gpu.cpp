@@ -1,7 +1,7 @@
 // src/sdl/gpu.cpp — SPDX-License-Identifier: MIT
 //
-// SDL_GPU renderer core for the fsv macOS/Metal port: device + pipeline
-// creation, the FsvMesh vertex/index buffer API, the camera matrices
+// SDL_GPU implementation of src/gpu.h for the fsv macOS/Metal port:
+// device + pipeline creation, geometry submission, the camera matrices
 // ported from src/ogl.c, and the per-frame scene render pass.
 //
 // --- Clip space -------------------------------------------------------
@@ -20,6 +20,30 @@
 // does not. ImGui authors its GLSL for Vulkan's Y-down NDC and un-flips
 // it for SDL_GPU's Y-up convention; our shaders are authored Y-up (they
 // are a port of desktop-GL shaders), so they need no flip at all.
+//
+// --- Recording and replay ---------------------------------------------
+// geometry.c draws the way the GL frontend let it: build a little vertex
+// array on the stack or the heap, hand it over, draw it, move on -- a few
+// thousand times per frame, with the modelview matrix and the fill color
+// changing in between. OpenGL swallows that because glBufferData and
+// glDrawArrays go into one ordered stream. SDL_GPU does not: buffer
+// copies are illegal inside a render pass, so the vertex data for a frame
+// has to be on the GPU *before* the pass that draws it opens.
+//
+// Hence: gpu_draw() records rather than draws. It appends the vertices
+// and (converted) indices to two CPU-side arenas and pushes a DrawCmd
+// carrying the byte offsets, the pipeline and a snapshot of both uniform
+// blocks. gpu_scene_end() then does the whole frame in one shot: one
+// copy pass uploading both arenas, then one render pass replaying every
+// DrawCmd. So a frame costs one transfer and one pass no matter how many
+// nodes are on screen, and the uniform snapshots preserve the exact
+// per-draw state the GL code expressed by ordering.
+//
+// (The alternative -- a persistent buffer per call site, uploaded on its
+// own command buffer -- reorders uploads ahead of draws that were
+// recorded between them, which silently paints every node with the last
+// node's geometry. Cycling papers over that only by allocating a fresh
+// internal buffer per draw per frame.)
 //
 // --- Render pass structure -------------------------------------------
 // Two passes per frame, both on the swapchain texture:
@@ -46,6 +70,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "gpu_internal.hpp"
 
@@ -101,10 +126,9 @@ static_assert(offsetof(SceneFragUBO, ambient) == 16, "std140 offset");
 static_assert(offsetof(SceneFragUBO, lightning_enabled) == 28, "std140 offset");
 
 // FsvVertex is the pipeline's vertex input state, so its layout is a
-// contract too (40-byte stride, attributes at 0/12/24).
-static_assert(sizeof(FsvVertex) == 40, "scene pipeline vertex stride");
+// contract too (24-byte stride, attributes at 0 and 12).
+static_assert(sizeof(FsvVertex) == 24, "scene pipeline vertex stride");
 static_assert(offsetof(FsvVertex, normal) == 12, "vertex attribute 1 offset");
-static_assert(offsetof(FsvVertex, color) == 24, "vertex attribute 2 offset");
 
 // ---- Module state ----------------------------------------------------
 
@@ -118,17 +142,24 @@ SDL_GPUDevice *g_device;
 // and logging the same error once per frame forever.
 bool g_ready;
 
-SDL_GPUGraphicsPipeline *g_scene_pipeline;
-// Same shaders and state as g_scene_pipeline, but targeting an offscreen
-// R8G8B8A8_UNORM texture instead of the swapchain: a pipeline's color
-// target format is fixed at creation, and Task 4.2 renders id-colors into
-// a readback texture of a format it controls (the swapchain's is the
-// driver's choice, and may be BGRA or sRGB). Picking needs no separate
-// *shader*: geometry.c's node_set_color() (src/geometry.c:88) already
-// computes the flat id color itself in RENDERMODE_SELECT and pushes it
-// through the ordinary color + lighting uniforms, which port to
-// gpu_set_color() + gpu_set_lighting(0).
-SDL_GPUGraphicsPipeline *g_id_pipeline;
+// Kept alive for the process lifetime rather than released after
+// gpu_init(): pipelines are created lazily (see pipeline_for()), so the
+// shader modules are still needed the first time an unusual
+// topology/depth-test combination shows up mid-frame.
+SDL_GPUShader *g_vert_shader;
+SDL_GPUShader *g_frag_shader;
+
+// Lazily built pipeline cache. SDL_GPU bakes primitive type, depth
+// comparison and color-target format into the pipeline object, and
+// geometry.c varies all three:
+//   - triangles vs lines            (every builder vs the outlines)
+//   - LESS / LEQUAL / GREATER       (everything vs the node cursor)
+//   - swapchain vs id-color target  (rendering vs picking, Task 4.2)
+// Only combinations actually drawn get created; a normal frame builds
+// two (triangles+LESS, lines+LESS) and adds the two cursor line variants
+// the first time a cursor is drawn.
+enum { NUM_PRIMS = 2, NUM_DEPTH_TESTS = 3, NUM_TARGETS = 2 };
+SDL_GPUGraphicsPipeline *g_pipelines[NUM_PRIMS][NUM_DEPTH_TESTS][NUM_TARGETS];
 
 SDL_GPUTexture *g_depth_texture;
 SDL_GPUTextureFormat g_depth_format;
@@ -138,20 +169,45 @@ Uint32 g_depth_width, g_depth_height;
 SDL_GPUCommandBuffer *g_cmd;
 SDL_GPUTexture *g_swapchain;
 Uint32 g_swapchain_width, g_swapchain_height;
-SDL_GPURenderPass *g_scene_pass;
 
-// Shadow copies of the two uniform blocks. Every draw call re-pushes both
-// (as the shader headers say it will): SDL_GPU uniform pushes go into a
-// per-command-buffer ring buffer, so this is cheaper than tracking
-// dirtiness, and it matches the GL frontend's habit of setting the color
-// uniform before nearly every glDrawElements.
+// Shadow copies of the two uniform blocks: gpu_set_color() and friends
+// write here, and every gpu_draw() snapshots them into its DrawCmd.
 SceneVertUBO g_vert_ubo;
 SceneFragUBO g_frag_ubo;
+
+FsvDepthTest g_depth_test;
+FsvRenderMode g_render_mode;
 
 // The base modelview matrix: right-handed, +z straight up, camera at the
 // origin looking down -x. Private, unlike gl.base_modelview in ogl.h --
 // nothing outside this file ever read it.
 mat4 g_base_modelview;
+
+// ---- Recorded geometry (see "Recording and replay" above) ------------
+
+struct DrawCmd {
+	SDL_GPUGraphicsPipeline *pipeline;
+	Uint32 first_index;
+	Uint32 num_indices;
+	Sint32 vertex_offset;
+	SceneVertUBO vert_ubo;
+	SceneFragUBO frag_ubo;
+};
+
+std::vector<FsvVertex> g_vertices;
+std::vector<Uint32> g_indices;
+std::vector<DrawCmd> g_draws;
+
+// True between gpu_scene_begin() and gpu_scene_end(), and only when the
+// frame can actually be drawn. gpu_draw() is a cheap no-op otherwise.
+bool g_recording;
+
+SDL_GPUBuffer *g_vertex_buffer;
+SDL_GPUBuffer *g_index_buffer;
+Uint32 g_vertex_capacity; // bytes
+Uint32 g_index_capacity;  // bytes
+SDL_GPUTransferBuffer *g_transfer;
+Uint32 g_transfer_capacity; // bytes
 
 // ---- Shaders and pipelines -------------------------------------------
 
@@ -214,18 +270,24 @@ create_shader(SDL_GPUShaderStage stage, const ShaderBlob *candidates,
 	return nullptr;
 }
 
-// The color/depth-independent half of both pipelines.
+// Returns the pipeline for one (primitive type, depth test, color target)
+// combination, building it on first use.
 SDL_GPUGraphicsPipeline *
-create_scene_pipeline(SDL_GPUShader *vert, SDL_GPUShader *frag,
-    SDL_GPUTextureFormat color_format)
+pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 {
+	const int prim_index = prim == SDL_GPU_PRIMITIVETYPE_LINELIST ? 1 : 0;
+	SDL_GPUGraphicsPipeline *&slot =
+	    g_pipelines[prim_index][depth_test][target];
+	if (slot != nullptr)
+		return slot;
+
 	SDL_GPUVertexBufferDescription vertex_buffer_desc = {};
 	vertex_buffer_desc.slot = 0;
 	vertex_buffer_desc.pitch = sizeof(FsvVertex);
 	vertex_buffer_desc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
 	vertex_buffer_desc.instance_step_rate = 0;
 
-	SDL_GPUVertexAttribute vertex_attributes[3] = {};
+	SDL_GPUVertexAttribute vertex_attributes[2] = {};
 	vertex_attributes[0].location = 0; // scene.vert: in vec3 position
 	vertex_attributes[0].buffer_slot = 0;
 	vertex_attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
@@ -234,16 +296,12 @@ create_scene_pipeline(SDL_GPUShader *vert, SDL_GPUShader *frag,
 	vertex_attributes[1].buffer_slot = 0;
 	vertex_attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
 	vertex_attributes[1].offset = offsetof(FsvVertex, normal);
-	vertex_attributes[2].location = 2; // reserved: per-vertex color
-	vertex_attributes[2].buffer_slot = 0;
-	vertex_attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-	vertex_attributes[2].offset = offsetof(FsvVertex, color);
 
 	SDL_GPUVertexInputState vertex_input_state = {};
 	vertex_input_state.vertex_buffer_descriptions = &vertex_buffer_desc;
 	vertex_input_state.num_vertex_buffers = 1;
 	vertex_input_state.vertex_attributes = vertex_attributes;
-	vertex_input_state.num_vertex_attributes = 3;
+	vertex_input_state.num_vertex_attributes = 2;
 
 	// ogl_init(): glEnable(GL_CULL_FACE) with GL's defaults, i.e. cull
 	// back faces, front faces wound counter-clockwise.
@@ -252,9 +310,34 @@ create_scene_pipeline(SDL_GPUShader *vert, SDL_GPUShader *frag,
 	rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
 	rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
 
-	// ogl_init(): glEnable(GL_DEPTH_TEST) with GL's default GL_LESS.
+	// ogl_init(): glEnable(GL_POLYGON_OFFSET_FILL) + glPolygonOffset(1,1),
+	// which in GL applies to filled polygons only -- so the line
+	// pipelines deliberately do not carry it. Same factor/units, same
+	// sign convention (positive pushes fills away from the viewer), so
+	// the black folder outlines and cursor bars that sit exactly on a
+	// face's plane win the depth test instead of z-fighting with it.
+	if (prim == SDL_GPU_PRIMITIVETYPE_TRIANGLELIST) {
+		rasterizer_state.enable_depth_bias = true;
+		rasterizer_state.depth_bias_constant_factor = 1.0f;
+		rasterizer_state.depth_bias_slope_factor = 1.0f;
+		rasterizer_state.depth_bias_clamp = 0.0f;
+	}
+
+	// ogl_init(): glEnable(GL_DEPTH_TEST) with GL's default GL_LESS;
+	// geometry.c's cursor switches to GL_GREATER/GL_LEQUAL around its
+	// two halves (cursor_hidden_part()/cursor_visible_part()).
 	SDL_GPUDepthStencilState depth_stencil_state = {};
-	depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+	switch (depth_test) {
+		case FSV_DEPTH_LEQUAL:
+		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+		break;
+		case FSV_DEPTH_GREATER:
+		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER;
+		break;
+		default:
+		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+		break;
+	}
 	depth_stencil_state.enable_depth_test = true;
 	depth_stencil_state.enable_depth_write = true;
 	depth_stencil_state.enable_stencil_test = false;
@@ -263,7 +346,9 @@ create_scene_pipeline(SDL_GPUShader *vert, SDL_GPUShader *frag,
 	// GL_BLEND for scene geometry (only the text overlay uses it, which
 	// is Task 3.4's pipeline).
 	SDL_GPUColorTargetDescription color_target_desc = {};
-	color_target_desc.format = color_format;
+	color_target_desc.format = target == 0
+	    ? SDL_GetGPUSwapchainTextureFormat(g_device, g_window)
+	    : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 	color_target_desc.blend_state.enable_blend = false;
 
 	SDL_GPUGraphicsPipelineTargetInfo target_info = {};
@@ -273,15 +358,20 @@ create_scene_pipeline(SDL_GPUShader *vert, SDL_GPUShader *frag,
 	target_info.has_depth_stencil_target = true;
 
 	SDL_GPUGraphicsPipelineCreateInfo info = {};
-	info.vertex_shader = vert;
-	info.fragment_shader = frag;
+	info.vertex_shader = g_vert_shader;
+	info.fragment_shader = g_frag_shader;
 	info.vertex_input_state = vertex_input_state;
-	info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+	info.primitive_type = prim;
 	info.rasterizer_state = rasterizer_state;
 	info.depth_stencil_state = depth_stencil_state;
 	info.target_info = target_info;
 
-	return SDL_CreateGPUGraphicsPipeline(g_device, &info);
+	slot = SDL_CreateGPUGraphicsPipeline(g_device, &info);
+	if (slot == nullptr)
+		SDL_Log("gpu: pipeline creation failed (prim %d, depth %d, "
+		    "target %d): %s", (int)prim, (int)depth_test, target,
+		    SDL_GetError());
+	return slot;
 }
 
 // Picks the first depth format the device supports as a depth target.
@@ -339,6 +429,32 @@ ensure_depth_texture(Uint32 width, Uint32 height)
 	}
 	g_depth_width = width;
 	g_depth_height = height;
+	return true;
+}
+
+// Grows `*buffer` to at least `size` bytes, reallocating only when it has
+// to. Returns false if the (re)allocation failed.
+bool
+ensure_buffer(SDL_GPUBuffer **buffer, Uint32 *capacity, Uint32 size,
+    SDL_GPUBufferUsageFlags usage)
+{
+	if (*buffer != nullptr && *capacity >= size)
+		return true;
+
+	if (*buffer != nullptr)
+		SDL_ReleaseGPUBuffer(g_device, *buffer);
+
+	SDL_GPUBufferCreateInfo info = {};
+	info.usage = usage;
+	info.size = size;
+
+	*buffer = SDL_CreateGPUBuffer(g_device, &info);
+	if (*buffer == nullptr) {
+		SDL_Log("gpu: SDL_CreateGPUBuffer failed: %s", SDL_GetError());
+		*capacity = 0;
+		return false;
+	}
+	*capacity = size;
 	return true;
 }
 
@@ -436,6 +552,189 @@ setup_modelview_matrix(void)
 	}
 }
 
+// ---- Topology conversion --------------------------------------------
+//
+// SDL_GPU offers TRIANGLELIST/TRIANGLESTRIP/LINELIST/LINESTRIP/POINTLIST
+// and no fans or loops, and bakes the choice into the pipeline. Rather
+// than carry four pipelines per depth-test just to spell the same
+// geometry four ways, everything is expanded into indices against two:
+// TRIANGLELIST and LINELIST. Index expansion is a handful of integer
+// appends over data that is being copied anyway, and it halves the
+// pipeline count (a strip pipeline could not be shared by the fan or the
+// loop in any case).
+
+void
+append_indices(FsvTopology topology, int nverts, const unsigned int *indices,
+    int nindices)
+{
+	const Uint32 n = (Uint32)nverts;
+
+	if (indices != nullptr) {
+		// Only geometry.c's already-indexed GL_TRIANGLES draws pass
+		// explicit indices; the strip/fan/loop expansions below own
+		// the index order for everything else.
+		SDL_assert(topology == FSV_TRIANGLES);
+		g_indices.insert(g_indices.end(), indices, indices + nindices);
+		return;
+	}
+
+	switch (topology) {
+		case FSV_TRIANGLES:
+		for (Uint32 i = 0; i < n; i++)
+			g_indices.push_back(i);
+		break;
+
+		case FSV_TRIANGLE_FAN:
+		// GL fan: (v0, vi, vi+1). Winding matches GL's exactly.
+		for (Uint32 i = 1; i + 1 < n; i++) {
+			g_indices.push_back(0);
+			g_indices.push_back(i);
+			g_indices.push_back(i + 1);
+		}
+		break;
+
+		case FSV_TRIANGLE_STRIP:
+		// GL strip: even triangles are (i, i+1, i+2), odd ones swap
+		// the first two so that every triangle keeps the same
+		// winding. Getting this backwards would cull exactly half of
+		// each strip.
+		for (Uint32 i = 0; i + 2 < n; i++) {
+			if ((i & 1) == 0) {
+				g_indices.push_back(i);
+				g_indices.push_back(i + 1);
+			} else {
+				g_indices.push_back(i + 1);
+				g_indices.push_back(i);
+			}
+			g_indices.push_back(i + 2);
+		}
+		break;
+
+		case FSV_LINES:
+		for (Uint32 i = 0; i + 1 < n; i += 2) {
+			g_indices.push_back(i);
+			g_indices.push_back(i + 1);
+		}
+		break;
+
+		case FSV_LINE_STRIP:
+		for (Uint32 i = 0; i + 1 < n; i++) {
+			g_indices.push_back(i);
+			g_indices.push_back(i + 1);
+		}
+		break;
+
+		case FSV_LINE_LOOP:
+		for (Uint32 i = 0; i + 1 < n; i++) {
+			g_indices.push_back(i);
+			g_indices.push_back(i + 1);
+		}
+		if (n > 2) {
+			g_indices.push_back(n - 1);
+			g_indices.push_back(0);
+		}
+		break;
+	}
+}
+
+// Uploads the frame's two arenas in a single copy pass on the frame's
+// command buffer. Returns false if nothing can be drawn.
+bool
+upload_frame_geometry(void)
+{
+	const Uint32 vertex_bytes =
+	    (Uint32)(g_vertices.size() * sizeof(FsvVertex));
+	const Uint32 index_bytes = (Uint32)(g_indices.size() * sizeof(Uint32));
+
+	if (!ensure_buffer(&g_vertex_buffer, &g_vertex_capacity, vertex_bytes,
+	        SDL_GPU_BUFFERUSAGE_VERTEX) ||
+	    !ensure_buffer(&g_index_buffer, &g_index_capacity, index_bytes,
+	        SDL_GPU_BUFFERUSAGE_INDEX))
+		return false;
+
+	const Uint32 total = vertex_bytes + index_bytes;
+	if (g_transfer == nullptr || g_transfer_capacity < total) {
+		if (g_transfer != nullptr)
+			SDL_ReleaseGPUTransferBuffer(g_device, g_transfer);
+		SDL_GPUTransferBufferCreateInfo transfer_info = {};
+		transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+		transfer_info.size = total;
+		g_transfer = SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+		if (g_transfer == nullptr) {
+			SDL_Log("gpu: SDL_CreateGPUTransferBuffer failed: %s",
+			    SDL_GetError());
+			g_transfer_capacity = 0;
+			return false;
+		}
+		g_transfer_capacity = total;
+	}
+
+	// cycle = true: the previous frame may still be reading this
+	// transfer buffer when the next one starts filling it.
+	void *mapped = SDL_MapGPUTransferBuffer(g_device, g_transfer, true);
+	if (mapped == nullptr) {
+		SDL_Log("gpu: SDL_MapGPUTransferBuffer failed: %s",
+		    SDL_GetError());
+		return false;
+	}
+	memcpy(mapped, g_vertices.data(), vertex_bytes);
+	memcpy((char *)mapped + vertex_bytes, g_indices.data(), index_bytes);
+	SDL_UnmapGPUTransferBuffer(g_device, g_transfer);
+
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
+
+	SDL_GPUTransferBufferLocation source = {};
+	SDL_GPUBufferRegion destination = {};
+
+	// cycle = true on both, for the same reason: an in-flight frame may
+	// still be reading last frame's contents out of these buffers. The
+	// render pass below is recorded *after* this copy pass, so its
+	// vertex/index bindings resolve to the freshly cycled allocation.
+	source.transfer_buffer = g_transfer;
+	source.offset = 0;
+	destination.buffer = g_vertex_buffer;
+	destination.offset = 0;
+	destination.size = vertex_bytes;
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
+
+	source.offset = vertex_bytes;
+	destination.buffer = g_index_buffer;
+	destination.offset = 0;
+	destination.size = index_bytes;
+	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
+
+	SDL_EndGPUCopyPass(copy_pass);
+	return true;
+}
+
+// Replays the frame's DrawCmd list into `pass`.
+void
+replay_draws(SDL_GPURenderPass *pass)
+{
+	SDL_GPUBufferBinding vertex_binding = {};
+	vertex_binding.buffer = g_vertex_buffer;
+	SDL_BindGPUVertexBuffers(pass, 0, &vertex_binding, 1);
+
+	SDL_GPUBufferBinding index_binding = {};
+	index_binding.buffer = g_index_buffer;
+	SDL_BindGPUIndexBuffer(pass, &index_binding,
+	    SDL_GPU_INDEXELEMENTSIZE_32BIT);
+
+	SDL_GPUGraphicsPipeline *bound = nullptr;
+	for (const DrawCmd &cmd : g_draws) {
+		if (cmd.pipeline != bound) {
+			SDL_BindGPUGraphicsPipeline(pass, cmd.pipeline);
+			bound = cmd.pipeline;
+		}
+		SDL_PushGPUVertexUniformData(g_cmd, 0, &cmd.vert_ubo,
+		    sizeof cmd.vert_ubo);
+		SDL_PushGPUFragmentUniformData(g_cmd, 0, &cmd.frag_ubo,
+		    sizeof cmd.frag_ubo);
+		SDL_DrawGPUIndexedPrimitives(pass, cmd.num_indices, 1,
+		    cmd.first_index, cmd.vertex_offset, 0);
+	}
+}
+
 } // namespace
 
 // ---- Public API ------------------------------------------------------
@@ -444,9 +743,8 @@ FsvGpuMatrices gpu_mat;
 
 // Port of ogl_upload_matrices() (src/ogl.c:318). The GL original ended in
 // glUniformMatrix4fv(); here the values land in the shadow UBO and are
-// pushed to the command buffer by the next draw call, which means this
-// stays callable outside a render pass (geometry.c calls it while walking
-// the tree, and picking calls it with no frame in flight at all).
+// snapshotted by the next gpu_draw(), which means this stays callable
+// outside a render pass (geometry.c calls it while walking the tree).
 void
 gpu_upload_matrices(void)
 {
@@ -483,6 +781,30 @@ gpu_set_lighting(int enabled)
 {
 	g_vert_ubo.lightning_enabled = enabled ? 1 : 0;
 	g_frag_ubo.lightning_enabled = enabled ? 1 : 0;
+}
+
+void
+gpu_set_depth_test(FsvDepthTest test)
+{
+	g_depth_test = test;
+}
+
+// No-op by design. SDL_GPU has no line-width control: every backend
+// rasterizes lines exactly one pixel wide (there is no field for it in
+// SDL_GPURasterizerState, and Metal has no equivalent of glLineWidth at
+// all). geometry.c's 2/3/5-pixel requests are therefore drawn 1 pixel
+// wide here; the GL shim still honors them, so the GTK frontend is
+// unchanged. See docs/PORTING.md.
+void
+gpu_set_line_width(float width)
+{
+	(void)width;
+}
+
+FsvRenderMode
+gpu_render_mode(void)
+{
+	return g_render_mode;
 }
 
 void
@@ -526,39 +848,25 @@ gpu_init(void *sdl_window)
 		  sizeof scene_frag_spv, "scene.frag.spv" },
 	};
 
-	SDL_GPUShader *vert = create_shader(SDL_GPU_SHADERSTAGE_VERTEX,
+	g_vert_shader = create_shader(SDL_GPU_SHADERSTAGE_VERTEX,
 	    vert_blobs, (int)SDL_arraysize(vert_blobs), /* uniform buffers */ 1);
-	SDL_GPUShader *frag = create_shader(SDL_GPU_SHADERSTAGE_FRAGMENT,
+	g_frag_shader = create_shader(SDL_GPU_SHADERSTAGE_FRAGMENT,
 	    frag_blobs, (int)SDL_arraysize(frag_blobs), /* uniform buffers */ 1);
-
-	if (vert != nullptr && frag != nullptr) {
-		g_scene_pipeline = create_scene_pipeline(vert, frag,
-		    SDL_GetGPUSwapchainTextureFormat(g_device, g_window));
-		if (g_scene_pipeline == nullptr)
-			SDL_Log("gpu: scene pipeline creation failed: %s",
-			    SDL_GetError());
-
-		g_id_pipeline = create_scene_pipeline(vert, frag,
-		    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-		if (g_id_pipeline == nullptr)
-			SDL_Log("gpu: id pipeline creation failed: %s",
-			    SDL_GetError());
-	} else {
+	if (g_vert_shader == nullptr || g_frag_shader == nullptr) {
 		SDL_Log("gpu: no usable scene shader");
+		return;
 	}
 
-	// The pipelines hold their own references to the shader modules, so
-	// both are released here whether or not the pipelines were built --
-	// releasing each independently, since one stage can load while the
-	// other fails.
-	if (vert != nullptr)
-		SDL_ReleaseGPUShader(g_device, vert);
-	if (frag != nullptr)
-		SDL_ReleaseGPUShader(g_device, frag);
-
-	if (g_scene_pipeline == nullptr || g_id_pipeline == nullptr)
+	// Build the two pipelines every frame uses up front, so a broken
+	// pipeline state is a startup failure rather than a mid-frame one.
+	// The rest (cursor depth tests, picking target) are created on
+	// first use by pipeline_for().
+	if (pipeline_for(SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, FSV_DEPTH_LESS, 0) ==
+	        nullptr ||
+	    pipeline_for(SDL_GPU_PRIMITIVETYPE_LINELIST, FSV_DEPTH_LESS, 0) ==
+	        nullptr)
 		return; // g_ready stays false; main.cpp exits
-	SDL_Log("gpu: scene + id pipelines created");
+	SDL_Log("gpu: scene pipelines created");
 
 	// Initial matrix state, from ogl_init() (src/ogl.c:182): a
 	// right-handed frame with +z straight up and the camera at the
@@ -598,15 +906,34 @@ gpu_shutdown(void)
 	if (g_device == nullptr)
 		return;
 
-	if (g_scene_pipeline != nullptr)
-		SDL_ReleaseGPUGraphicsPipeline(g_device, g_scene_pipeline);
-	if (g_id_pipeline != nullptr)
-		SDL_ReleaseGPUGraphicsPipeline(g_device, g_id_pipeline);
+	for (int p = 0; p < NUM_PRIMS; p++)
+		for (int d = 0; d < NUM_DEPTH_TESTS; d++)
+			for (int t = 0; t < NUM_TARGETS; t++) {
+				if (g_pipelines[p][d][t] == nullptr)
+					continue;
+				SDL_ReleaseGPUGraphicsPipeline(g_device,
+				    g_pipelines[p][d][t]);
+				g_pipelines[p][d][t] = nullptr;
+			}
+	if (g_vert_shader != nullptr)
+		SDL_ReleaseGPUShader(g_device, g_vert_shader);
+	if (g_frag_shader != nullptr)
+		SDL_ReleaseGPUShader(g_device, g_frag_shader);
 	if (g_depth_texture != nullptr)
 		SDL_ReleaseGPUTexture(g_device, g_depth_texture);
-	g_scene_pipeline = nullptr;
-	g_id_pipeline = nullptr;
+	if (g_vertex_buffer != nullptr)
+		SDL_ReleaseGPUBuffer(g_device, g_vertex_buffer);
+	if (g_index_buffer != nullptr)
+		SDL_ReleaseGPUBuffer(g_device, g_index_buffer);
+	if (g_transfer != nullptr)
+		SDL_ReleaseGPUTransferBuffer(g_device, g_transfer);
+	g_vert_shader = nullptr;
+	g_frag_shader = nullptr;
 	g_depth_texture = nullptr;
+	g_vertex_buffer = nullptr;
+	g_index_buffer = nullptr;
+	g_transfer = nullptr;
+	g_vertex_capacity = g_index_capacity = g_transfer_capacity = 0;
 	g_ready = false;
 
 	SDL_ReleaseWindowFromGPUDevice(g_device, g_window);
@@ -626,10 +953,7 @@ gpu_frame_begin(void)
 {
 	g_swapchain = nullptr;
 	g_swapchain_width = g_swapchain_height = 0;
-	// Defensive: a pass belongs to one command buffer, so a stale
-	// pointer surviving into the next frame would make fsv_mesh_draw()
-	// record into a dead encoder instead of tripping its assertion.
-	g_scene_pass = nullptr;
+	g_recording = false;
 
 	g_cmd = SDL_AcquireGPUCommandBuffer(g_device);
 	if (g_cmd == nullptr) {
@@ -668,8 +992,7 @@ gpu_frame_end(void)
 void
 gpu_scene_begin(void)
 {
-	if (g_cmd == nullptr || g_swapchain == nullptr ||
-	    g_scene_pipeline == nullptr)
+	if (g_cmd == nullptr || g_swapchain == nullptr || !g_ready)
 		return;
 
 	// Same three calls the GTK frontend's render() made per frame
@@ -678,11 +1001,72 @@ gpu_scene_begin(void)
 	setup_modelview_matrix();
 	gpu_upload_matrices();
 
+	// Reset per-frame draw state. The vectors keep their capacity, so
+	// steady-state frames do no allocation at all.
+	g_vertices.clear();
+	g_indices.clear();
+	g_draws.clear();
+	g_depth_test = FSV_DEPTH_LESS;
+	g_recording = true;
+}
+
+void
+gpu_draw(FsvTopology topology, const FsvVertex *verts, int nverts,
+    const unsigned int *indices, int nindices)
+{
+	if (!g_recording || verts == nullptr || nverts <= 0)
+		return;
+	if (indices != nullptr && nindices <= 0)
+		return;
+
+	const Sint32 vertex_offset = (Sint32)g_vertices.size();
+	const Uint32 first_index = (Uint32)g_indices.size();
+
+	append_indices(topology, nverts, indices, nindices);
+	const Uint32 num_indices = (Uint32)g_indices.size() - first_index;
+	if (num_indices == 0)
+		return; // degenerate batch (e.g. a 1-vertex "line")
+
+	g_vertices.insert(g_vertices.end(), verts, verts + nverts);
+
+	const bool is_line = topology == FSV_LINES ||
+	    topology == FSV_LINE_STRIP || topology == FSV_LINE_LOOP;
+	SDL_GPUGraphicsPipeline *pipeline = pipeline_for(
+	    is_line ? SDL_GPU_PRIMITIVETYPE_LINELIST
+	            : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+	    g_depth_test, g_render_mode == FSV_RENDER_SELECT ? 1 : 0);
+	if (pipeline == nullptr) {
+		g_indices.resize(first_index);
+		return;
+	}
+
+	DrawCmd cmd;
+	cmd.pipeline = pipeline;
+	cmd.first_index = first_index;
+	cmd.num_indices = num_indices;
+	cmd.vertex_offset = vertex_offset;
+	cmd.vert_ubo = g_vert_ubo;
+	cmd.frag_ubo = g_frag_ubo;
+	g_draws.push_back(cmd);
+}
+
+void
+gpu_scene_end(void)
+{
+	if (!g_recording)
+		return;
+	g_recording = false;
+
+	const bool have_geometry =
+	    !g_draws.empty() && upload_frame_geometry();
+
 	SDL_GPUColorTargetInfo color_target = {};
 	color_target.texture = g_swapchain;
-	// Unchanged from Task 2.2's clear color, so this task's visual
-	// result stays comparable. src/ogl.c cleared to transparent black;
-	// switching is Task 3.3's call, once there is geometry to see.
+	// src/ogl.c cleared to transparent black; the scene is opaque and
+	// ImGui draws on top of it, so the alpha only matters for the
+	// window background. Kept as Task 2.2's dark slate so an empty
+	// scene is still visibly "the app running" rather than a black
+	// screen indistinguishable from a hang.
 	color_target.clear_color = SDL_FColor{ 0.08f, 0.10f, 0.12f, 1.0f };
 	color_target.load_op = SDL_GPU_LOADOP_CLEAR;
 	color_target.store_op = SDL_GPU_STOREOP_STORE;
@@ -697,204 +1081,28 @@ gpu_scene_begin(void)
 	depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	depth_target.cycle = true;
 
-	g_scene_pass = SDL_BeginGPURenderPass(g_cmd, &color_target, 1,
-	    &depth_target);
-	if (g_scene_pass == nullptr) {
+	SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(g_cmd, &color_target,
+	    1, &depth_target);
+	if (pass == nullptr) {
 		SDL_Log("gpu: SDL_BeginGPURenderPass failed: %s",
 		    SDL_GetError());
 		return;
 	}
-	SDL_BindGPUGraphicsPipeline(g_scene_pass, g_scene_pipeline);
-}
-
-void
-gpu_scene_end(void)
-{
-	if (g_scene_pass == nullptr)
-		return;
-	SDL_EndGPURenderPass(g_scene_pass);
-	g_scene_pass = nullptr;
+	if (have_geometry)
+		replay_draws(pass);
+	SDL_EndGPURenderPass(pass);
 }
 
 unsigned int
 gpu_pick(int x, int y)
 {
-	/* Task 4.2: open a pass on an offscreen R8G8B8A8 texture with
-	 * g_id_pipeline bound, run geometry_draw() through it (geometry.c
-	 * paints its own id colors -- see node_set_color(), src/geometry.c:88),
-	 * then SDL_DownloadFromGPUTexture() one pixel and decode the id.
-	 * That pass machinery is 4.2's to build: gpu_scene_begin() only ever
-	 * targets the swapchain, so nothing here can reach g_id_pipeline yet. */
+	/* Task 4.2: set g_render_mode to FSV_RENDER_SELECT, run
+	 * gpu_scene_begin()/geometry_draw()/gpu_scene_end() against an
+	 * offscreen R8G8B8A8 texture (pipeline_for()'s target == 1 already
+	 * builds for that format), then SDL_DownloadFromGPUTexture() one
+	 * pixel and decode the id. geometry.c paints its own id colors --
+	 * see node_set_color(), src/geometry.c. */
 	(void)x;
 	(void)y;
 	return 0;
-}
-
-// ---- Meshes ----------------------------------------------------------
-
-struct FsvMesh {
-	SDL_GPUBuffer *vertex_buffer;
-	SDL_GPUBuffer *index_buffer;
-	Uint32 vertex_capacity; // bytes
-	Uint32 index_capacity;  // bytes
-	Uint32 num_indices;
-};
-
-namespace {
-
-// Grows `*buffer` to at least `size` bytes, reallocating only when it has
-// to. Returns false if the (re)allocation failed.
-bool
-ensure_buffer(SDL_GPUBuffer **buffer, Uint32 *capacity, Uint32 size,
-    SDL_GPUBufferUsageFlags usage)
-{
-	if (*buffer != nullptr && *capacity >= size)
-		return true;
-
-	if (*buffer != nullptr)
-		SDL_ReleaseGPUBuffer(g_device, *buffer);
-
-	SDL_GPUBufferCreateInfo info = {};
-	info.usage = usage;
-	info.size = size;
-
-	*buffer = SDL_CreateGPUBuffer(g_device, &info);
-	if (*buffer == nullptr) {
-		SDL_Log("gpu: SDL_CreateGPUBuffer failed: %s", SDL_GetError());
-		*capacity = 0;
-		return false;
-	}
-	*capacity = size;
-	return true;
-}
-
-} // namespace
-
-FsvMesh *
-fsv_mesh_new(void)
-{
-	return (FsvMesh *)SDL_calloc(1, sizeof(FsvMesh));
-}
-
-void
-fsv_mesh_free(FsvMesh *m)
-{
-	if (m == nullptr)
-		return;
-	if (m->vertex_buffer != nullptr)
-		SDL_ReleaseGPUBuffer(g_device, m->vertex_buffer);
-	if (m->index_buffer != nullptr)
-		SDL_ReleaseGPUBuffer(g_device, m->index_buffer);
-	SDL_free(m);
-}
-
-void
-fsv_mesh_upload(FsvMesh *m, const FsvVertex *verts, int nverts,
-    const unsigned int *indices, int nindices)
-{
-	if (m == nullptr || g_device == nullptr)
-		return;
-	if (verts == nullptr || indices == nullptr || nverts <= 0 ||
-	    nindices <= 0) {
-		m->num_indices = 0;
-		return;
-	}
-
-	const Uint32 vertex_bytes = (Uint32)nverts * sizeof(FsvVertex);
-	const Uint32 index_bytes = (Uint32)nindices * sizeof(unsigned int);
-
-	if (!ensure_buffer(&m->vertex_buffer, &m->vertex_capacity, vertex_bytes,
-	        SDL_GPU_BUFFERUSAGE_VERTEX) ||
-	    !ensure_buffer(&m->index_buffer, &m->index_capacity, index_bytes,
-	        SDL_GPU_BUFFERUSAGE_INDEX)) {
-		m->num_indices = 0;
-		return;
-	}
-
-	// One transfer buffer holds both halves back to back.
-	SDL_GPUTransferBufferCreateInfo transfer_info = {};
-	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-	transfer_info.size = vertex_bytes + index_bytes;
-
-	SDL_GPUTransferBuffer *transfer =
-	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
-	if (transfer == nullptr) {
-		SDL_Log("gpu: SDL_CreateGPUTransferBuffer failed: %s",
-		    SDL_GetError());
-		m->num_indices = 0;
-		return;
-	}
-
-	void *mapped = SDL_MapGPUTransferBuffer(g_device, transfer, false);
-	if (mapped == nullptr) {
-		SDL_Log("gpu: SDL_MapGPUTransferBuffer failed: %s",
-		    SDL_GetError());
-		SDL_ReleaseGPUTransferBuffer(g_device, transfer);
-		m->num_indices = 0;
-		return;
-	}
-	memcpy(mapped, verts, vertex_bytes);
-	memcpy((char *)mapped + vertex_bytes, indices, index_bytes);
-	SDL_UnmapGPUTransferBuffer(g_device, transfer);
-
-	// Uploads run on their own command buffer: meshes are rebuilt on
-	// rescan, not per frame, so this never has to join the frame's.
-	SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(g_device);
-	if (cmd == nullptr) {
-		SDL_Log("gpu: upload command buffer failed: %s", SDL_GetError());
-		SDL_ReleaseGPUTransferBuffer(g_device, transfer);
-		m->num_indices = 0;
-		return;
-	}
-	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(cmd);
-
-	SDL_GPUTransferBufferLocation source = {};
-	SDL_GPUBufferRegion destination = {};
-
-	// cycle = true on both: ensure_buffer() above keeps and reuses a
-	// buffer that is large enough, and a rescan re-uploads a mesh that
-	// a still-in-flight frame may be reading from. Without cycling,
-	// SDL_UploadToGPUBuffer "overwrites the data" in place
-	// (SDL_gpu.h:3919) -- a read/write hazard. Both uploads replace the
-	// whole region, which is exactly the case cycling is meant for.
-	source.transfer_buffer = transfer;
-	source.offset = 0;
-	destination.buffer = m->vertex_buffer;
-	destination.offset = 0;
-	destination.size = vertex_bytes;
-	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
-
-	source.offset = vertex_bytes;
-	destination.buffer = m->index_buffer;
-	destination.offset = 0;
-	destination.size = index_bytes;
-	SDL_UploadToGPUBuffer(copy_pass, &source, &destination, true);
-
-	SDL_EndGPUCopyPass(copy_pass);
-	SDL_SubmitGPUCommandBuffer(cmd);
-	SDL_ReleaseGPUTransferBuffer(g_device, transfer);
-
-	m->num_indices = (Uint32)nindices;
-}
-
-void
-fsv_mesh_draw(FsvMesh *m)
-{
-	SDL_assert(g_scene_pass != nullptr); // must be inside the scene pass
-	if (g_scene_pass == nullptr || m == nullptr || m->num_indices == 0)
-		return;
-
-	SDL_PushGPUVertexUniformData(g_cmd, 0, &g_vert_ubo, sizeof g_vert_ubo);
-	SDL_PushGPUFragmentUniformData(g_cmd, 0, &g_frag_ubo, sizeof g_frag_ubo);
-
-	SDL_GPUBufferBinding vertex_binding = {};
-	vertex_binding.buffer = m->vertex_buffer;
-	SDL_BindGPUVertexBuffers(g_scene_pass, 0, &vertex_binding, 1);
-
-	SDL_GPUBufferBinding index_binding = {};
-	index_binding.buffer = m->index_buffer;
-	SDL_BindGPUIndexBuffer(g_scene_pass, &index_binding,
-	    SDL_GPU_INDEXELEMENTSIZE_32BIT);
-
-	SDL_DrawGPUIndexedPrimitives(g_scene_pass, m->num_indices, 1, 0, 0, 0);
 }
