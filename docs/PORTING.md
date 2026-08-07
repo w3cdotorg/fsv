@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M0 done — M1 (headless core) in progress (Tasks 1.1, 1.2, 1.3 done)**
+- Status: **M1 (headless core) done — M2 (dependencies) in progress (Task 2.1 done)**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -191,6 +191,74 @@ TDD evidence:
   and the host isn't macOS). `meson test -C builddir scanfs` → `1/1
   scanfs OK`. `./builddir/tools/fsv-scan tests/fixture` → `nodes=7`.
 
+## Task 2.1 verification (SDL3 + vendored Dear ImGui subproject)
+
+**SDL3:** already present via Homebrew on this machine —
+`pkg-config --modversion sdl3` → `3.4.14` (≥ 3.2 required for the
+SDLGPU3 backend). `dependency('sdl3')` resolves via pkg-config with
+plain `/opt/homebrew/bin` on `PATH`; no extra `PKG_CONFIG_PATH` needed
+on this host (Homebrew's `pkg-config` already indexes
+`/opt/homebrew/lib/pkgconfig`). If a future host's `pkg-config` can't
+see it, point `PKG_CONFIG_PATH` at `$(brew --prefix sdl3)/lib/pkgconfig`.
+
+**Dear ImGui:** vendored (copied, not a submodule) into
+`subprojects/imgui/` from the **docking** branch at tag
+`v1.92.9b-docking` (commit `b48d1afbe8ee8b238e2961dc363a949dd7304e23`
+— the latest docking tag at the time of this task; well above the
+1.91.6 floor where the SDLGPU3 backend first shipped). Only the files
+needed to build with the SDL3 + SDLGPU3 backends were copied: the 5
+compiled `.cpp` core files (`imgui.cpp`, `imgui_draw.cpp`,
+`imgui_tables.cpp`, `imgui_widgets.cpp`, `imgui_demo.cpp` — the demo
+window is kept in because Task 2.2 calls `ImGui::ShowDemoWindow()`),
+headers (`imgui.h`, `imgui_internal.h`, `imconfig.h`, the three
+`imstb_*.h` single-header deps), `LICENSE.txt`, and the
+`backends/imgui_impl_sdl3.{h,cpp}` /
+`backends/imgui_impl_sdlgpu3.{h,cpp,_shaders.h}` pair. No
+`examples/`, `docs/`, `misc/` or `.github/` from upstream. See
+`subprojects/imgui/VERSION.txt` for the exact provenance and update
+instructions. `examples/example_sdl3_sdlgpu3/main.cpp` was copied
+alongside (renamed `example_sdl3_sdlgpu3_main.cpp.txt`, so it's never
+picked up by the build) purely as an API reference for Task 2.2.
+
+`subprojects/imgui/meson.build` declares its own `project('imgui',
+'cpp', default_options: ['cpp_std=c++20'])` — deliberately isolated
+from the root project's C11 toolchain — and builds a `static_library`
++ `declare_dependency()` named `imgui_dep` (also carrying the `sdl3`
+pkg-config dependency, so anything depending on `imgui_dep` gets
+SDL3's include path for free, since `imgui_impl_sdl3.h` needs
+`<SDL3/SDL.h>`).
+
+Root `meson.build` gates the subproject exactly like `gtkdep`/
+`gtkdep_found` gates the GTK frontend: `sdl3dep = dependency('sdl3',
+required: false)` (never hard-required at configure time — a host
+without SDL3 must still configure the headless core), and
+`subproject('imgui')` is only executed when `frontend == 'sdl' and
+sdl3dep.found()`. This is temporary wiring for this task only (proves
+the subproject builds); Task 2.2 is what actually consumes
+`imgui_dep`/`sdl3dep` from a real `src/sdl/` target.
+
+- **macOS (this machine):** `meson setup builddir-imgui-check
+  -Dfrontend=sdl` configures cleanly — log shows `Executing subproject
+  imgui`, `Subprojects: imgui: YES`. `meson compile -C
+  builddir-imgui-check` builds all 7 imgui object files
+  (`imgui.cpp.o`, `imgui_draw.cpp.o`, `imgui_tables.cpp.o`,
+  `imgui_widgets.cpp.o`, `imgui_demo.cpp.o`,
+  `backends_imgui_impl_sdl3.cpp.o`, `backends_imgui_impl_sdlgpu3.cpp.o`)
+  and links `subprojects/imgui/libimgui.a` with **zero errors** (a few
+  upstream `-Wall` warnings from clang are expected and were not
+  patched, per the task's own constraint) — with no target anywhere
+  depending on `imgui_dep` yet; a bare `subproject('imgui')` call is
+  enough because `static_library()`'s targets are `build_by_default`.
+  The headless core keeps building/testing in the same tree:
+  `meson test -C builddir-imgui-check scanfs` → `1/1 fsv:scanfs OK`.
+- **GTK path untouched:** `meson setup builddir-gtkcheck` (default,
+  `frontend=gtk`) configures 8 targets with no `Executing subproject`
+  line and no `builddir-gtkcheck/subprojects/` directory at all;
+  `meson test -C builddir-gtkcheck scanfs` → `1/1 fsv:scanfs OK`.
+- Both scratch build directories were deleted after verification (not
+  committed) — same convention as the `builddir` used in earlier
+  tasks.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -211,3 +279,4 @@ code is kept.
 | 2026-08-06 | Keep GLib, drop GTK | core relies on GNode/GList; GLib is headless-safe and available via Homebrew |
 | 2026-08-06 | Core stays C11, new frontend files are C++20 | ImGui is C++; core headers get `extern "C"` guards |
 | 2026-08-06 | Work on `metal-port`, keep `master` pristine | painless upstream sync with jabl/fsv |
+| 2026-08-07 | Vendor ImGui `v1.92.9b-docking` by file-copy, not git submodule | latest docking tag at task time; a copy keeps `subprojects/imgui/` a normal, reviewable part of the tree with no upstream history/examples/docs bloat |

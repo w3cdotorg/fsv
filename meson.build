@@ -22,6 +22,22 @@ cglm_dep = dependency('cglm', fallback : ['cglm', 'cglm_dep'])
 # gtkdep` (gtk+-3.0's pkg-config Requires chain includes glib-2.0) —
 # that broke as soon as gtkdep stopped being unconditionally required.
 glibdep = dependency('glib-2.0')
+
+# SDL3 (+ vendored Dear ImGui) is the sdl frontend's equivalent of
+# gtkdep above: never `required: true` at configure time, so a host
+# without SDL3 can still `meson setup` and build the headless core
+# regardless of `frontend`'s value. The imgui subproject (static lib +
+# `imgui_dep`, see subprojects/imgui/meson.build) is only pulled in
+# when frontend == 'sdl' *and* SDL3 was actually found — mirrors
+# gtkdep_found's pattern. Task 2.2 wires `imgui_dep`/`sdl3dep` into an
+# actual src/sdl/ target; for now this only proves the subproject
+# builds (see docs/PORTING.md, Task 2.1).
+sdl3dep = dependency('sdl3', required: false)
+if frontend == 'sdl' and sdl3dep.found()
+  imgui_subproject = subproject('imgui')
+  imgui_dep = imgui_subproject.get_variable('imgui_dep')
+endif
+
 compiler = meson.get_compiler('c')
 conf = configuration_data()
 conf.set_quoted('PACKAGE', meson.project_name())
