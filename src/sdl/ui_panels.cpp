@@ -67,6 +67,7 @@
 #include <imgui_internal.h>
 
 #include "app.h"
+#include "ui_dialogs.h"
 
 extern "C" {
 #include "common.h"
@@ -207,6 +208,16 @@ dirtree_clear(void)
 	g_filelist_selected = nullptr;
 	g_filelist_scroll_to = nullptr;
 	g_file_list.clear();
+
+	// Task 5.3: the Properties window (src/sdl/ui_dialogs.cpp) can hold
+	// a target-symlink GNode* across many frames -- unlike this file's
+	// own pointers above, which every draw call re-derives from
+	// g_shown_dir/scanfs.c's fresh tree, a Properties window can sit
+	// open, untouched, through an entire Change Root/Rescan. Force it
+	// closed here, at the exact point (scanfs.c's call to this
+	// function, before it tears down the old tree) the rest of this
+	// file already resets its own now-stale pointers for.
+	ui_dialogs_close_properties();
 }
 
 extern "C" void

@@ -38,7 +38,8 @@ shaders_embedded_h = custom_target('shaders_embedded.h',
   command: [python3, embed_shaders_py, '@OUTPUT@', '@INPUT@'])
 
 fsv_sdl = executable('fsv',
-  ['main.cpp', 'gpu.cpp', 'input.cpp', 'ui_main.cpp', 'ui_panels.cpp', shaders_embedded_h, core_gl_src],
+  ['main.cpp', 'gpu.cpp', 'input.cpp', 'ui_main.cpp', 'ui_panels.cpp',
+   'ui_dialogs.cpp', shaders_embedded_h, core_gl_src],
   link_with: libfsvcore,
   dependencies: [sdl3dep, imgui_dep, glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   # include_directories('.') resolves to *both* src/sdl and its build

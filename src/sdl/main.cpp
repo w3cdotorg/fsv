@@ -21,6 +21,7 @@
 #include "gpu.h"
 #include "gpu_internal.hpp"
 #include "input.h"
+#include "ui_dialogs.h"
 #include "ui_main.h"
 #include "ui_panels.h"
 #include <cstring>
@@ -791,6 +792,11 @@ main(int argc, char **argv)
 		ui_main_draw();
 		ui_dockspace_draw();
 		ui_panels_draw();
+		// Task 5.3: Color Setup + Properties. No ordering constraint with
+		// the three calls above -- neither of ui_dialogs.cpp's windows
+		// docks or reads the main-menu-bar-shrunk viewport rect the way
+		// ui_panels_draw()'s panel does.
+		ui_dialogs_draw();
 		ImGui::Render();
 		submit_frame();
 

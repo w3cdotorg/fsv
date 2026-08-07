@@ -1,2 +1,6 @@
-option('frontend', type: 'combo', choices: ['gtk', 'sdl'], value: 'gtk',
-       description: 'UI frontend: gtk (legacy OpenGL) or sdl (SDL3 GPU / Metal)')
+option('frontend', type: 'combo', choices: ['gtk', 'sdl'], value: 'sdl',
+       description: 'UI frontend: gtk (legacy OpenGL) or sdl (SDL3 GPU / Metal). ' +
+         'Default is sdl (macOS/Metal is now the primary target; meson ' +
+         'options cannot be conditioned on host_machine.system()). A Linux ' +
+         'build that wants the GTK frontend (Linux-only, see the darwin ' +
+         'gate in src/meson.build) must pass -Dfrontend=gtk explicitly.')

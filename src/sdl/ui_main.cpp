@@ -21,9 +21,13 @@
 //   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
 //                                 GTK's left pane has no show/hide toggle at all
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
-//          -> Setup...        == on_color_setup_activate() -> dialog_color_setup() (Task 5.3)
+//          -> Setup...        == on_color_setup_activate() -> dialog_color_setup()
+//                                 (Task 5.3, src/sdl/ui_dialogs.cpp)
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
 //          -> About fsv...    == on_help_about_fsv_activate() -> about(ABOUT_BEGIN)
+//
+// Context menu's "Properties..." == properties_cb() -> dialog_node_properties()
+//   (Task 5.3, src/sdl/ui_dialogs.cpp)
 #include "ui_main.h"
 
 #include <SDL3/SDL.h>
@@ -31,6 +35,7 @@
 
 #include "app.h"
 #include "input.h"
+#include "ui_dialogs.h"
 #include "ui_panels.h"
 
 extern "C" {
@@ -142,9 +147,8 @@ draw_context_menu(void)
 			if (ImGui::MenuItem("Look At"))
 				camera_look_at(node);
 
-			ImGui::BeginDisabled();
-			ImGui::MenuItem("Properties... (Task 5.3)");
-			ImGui::EndDisabled();
+			if (ImGui::MenuItem("Properties..."))
+				ui_dialogs_open_properties(node);
 
 			// Same single-level toggle src/dirtree.c's collapse/expand
 			// tree-view callbacks use (dirtree_collapse_cb() ->
@@ -249,9 +253,8 @@ ui_main_draw(void)
 			    cmode == COLOR_BY_WPATTERN))
 				color_set_mode(COLOR_BY_WPATTERN);
 			ImGui::Separator();
-			ImGui::BeginDisabled();
-			ImGui::MenuItem("Setup... (Task 5.3)");
-			ImGui::EndDisabled();
+			if (ImGui::MenuItem("Setup..."))
+				ui_dialogs_open_color_setup();
 			ImGui::EndMenu();
 		}
 
