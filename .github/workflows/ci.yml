@@ -1,0 +1,269 @@
+# SPDX-License-Identifier: MIT
+#
+# CI for the metal-port branch (Task 6.2) + release-artifact publication
+# (Task 6.3). Four jobs:
+#
+#   macos-metal  Build the SDL/Metal frontend on a real Apple Silicon
+#                runner, run the headless tests, best-effort a
+#                --screenshot smoke test (see the comment on that step
+#                for why it is best-effort), upload the binary.
+#   linux-gtk    Build the legacy GTK frontend + headless tests on
+#                Linux -- this is the anti-regression job: since Task
+#                5.3 the meson default frontend is `sdl`, so this job
+#                must pass -Dfrontend=gtk explicitly or it would
+#                silently stop building the GTK path at all.
+#   linux-sdl    Best-effort: build the SDL frontend on Linux too. See
+#                the "SDL3 on ubuntu" comment below for why this is
+#                continue-on-error and why SDL3 is compiled from
+#                source rather than apt-installed.
+#   release      Only on `v*` tag pushes: repackage the macOS and Linux
+#                binaries as tar.gz and attach them to a GitHub
+#                Release via the `gh` CLI.
+#
+# Every job runs on push and pull_request; only `release` is gated to
+# tag pushes.
+name: ci
+
+on: [push, pull_request]
+
+env:
+  # Pinned to match the version already vendored/verified in
+  # docs/PORTING.md (Task 2.1: `pkg-config --modversion sdl3` -> 3.4.14
+  # on the maintainer's Homebrew install) and >= the 3.2 floor the SDLGPU3
+  # backend requires. Bump this one line -- and the linux-sdl cache key
+  # below, which embeds it -- to pick up a newer SDL3 release.
+  SDL3_VERSION: "3.4.14"
+
+jobs:
+  macos-metal:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Homebrew)
+        run: brew install glib cglm meson ninja pkgconf sdl3
+
+      - name: Configure (SDL/Metal frontend)
+        run: meson setup builddir -Dfrontend=sdl
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test (scanfs, nvstore, color_persistence)
+        run: meson test -C builddir --print-errorlogs
+
+      # GitHub's macOS runners are real Apple Silicon VMs with a
+      # paravirtualized Metal GPU -- unlike Linux CI, there is a real
+      # chance SDL_GPU's Metal backend initializes headless here. This
+      # is genuinely unverified from this sandbox (no way to run a
+      # GitHub-hosted runner from here), so it stays continue-on-error
+      # and the outcome is meant to be read from the first real run:
+      # green + a downloadable BMP means Metal does init headless on
+      # these runners; a failure (or a silent hang the job timeout
+      # catches) means it does not, and this step should be trimmed
+      # back to "documented as untested" rather than relied on.
+      - name: Screenshot smoke test (best-effort, GPU may not init headless)
+        id: screenshot
+        continue-on-error: true
+        run: ./builddir/src/sdl/fsv --screenshot fsv-screenshot.bmp tests/fixture
+
+      - name: Upload screenshot (only if the smoke test above succeeded)
+        if: steps.screenshot.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsv-macos-screenshot
+          path: fsv-screenshot.bmp
+          if-no-files-found: ignore
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsv-macos-arm64
+          path: builddir/src/sdl/fsv
+
+  linux-gtk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build libglib2.0-dev \
+            libcglm-dev libgtk-3-dev libepoxy-dev gettext file \
+            libglu1-mesa-dev
+
+      # Explicit -Dfrontend=gtk: the meson default became `sdl` in Task
+      # 5.3, so leaving this off would quietly build the SDL frontend
+      # (and skip the GTK executable target entirely -- see the darwin
+      # gate in src/meson.build, though that gate doesn't even apply
+      # here) instead of exercising the anti-regression path this job
+      # exists for.
+      - name: Configure (GTK frontend)
+        run: meson setup builddir -Dfrontend=gtk
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test (scanfs, nvstore, color_persistence)
+        run: meson test -C builddir --print-errorlogs
+
+      - name: Upload Linux (GTK) binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsv-linux-x86_64-gtk
+          path: builddir/src/fsv
+
+  linux-sdl:
+    runs-on: ubuntu-24.04
+    # Best-effort, per the SDL3-on-ubuntu investigation below: this
+    # job building is a bonus, not a requirement, so one broken Ubuntu
+    # package or a slow source build must never fail the whole
+    # workflow. GTK is still the load-bearing Linux anti-regression job.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- SDL3 on Ubuntu 24.04 (noble): investigated for Task 6.2 ---
+      #
+      # `apt search libsdl3-dev` / packages.ubuntu.com turn up nothing
+      # for jammy (22.04) or noble (24.04) -- SDL3 only entered Ubuntu's
+      # archive in `questing` (25.10), which is an interim release
+      # GitHub does not offer as a hosted runner image (only LTS bases
+      # -- 22.04/24.04 -- are available; ubuntu-latest is 24.04 as of
+      # this task). So there is no apt package to install here at all,
+      # on any GitHub-hosted Ubuntu runner, today.
+      #
+      # Chosen fix: build SDL3 $SDL3_VERSION from source (CMake, its
+      # own supported build system) and cache the *installed* result
+      # keyed on that version + runner OS, so this only pays the ~1
+      # minute compile cost once per version bump, not once per CI run.
+      # Confirmed end-to-end in an ubuntu:24.04 container for this task
+      # (see task-6.2-6.3-report.md): the dependency list below is the
+      # exact set that got a clean `cmake --build` with the video,
+      # audio, and Vulkan-render-driver (build-only; no Vulkan loader
+      # needed to *run*) backends enabled.
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git cmake ninja-build build-essential pkg-config meson \
+            libglib2.0-dev libcglm-dev gettext file libglu1-mesa-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libxtst-dev libwayland-dev wayland-protocols \
+            libxkbcommon-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libdrm-dev libgbm-dev libasound2-dev libpulse-dev \
+            libudev-dev libdbus-1-dev libibus-1.0-dev \
+            libsamplerate0-dev
+
+      - name: Cache SDL3 build
+        id: sdl3-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/sdl3-install
+          key: sdl3-${{ runner.os }}-${{ env.SDL3_VERSION }}
+
+      - name: Build + install SDL3 from source
+        if: steps.sdl3-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "release-${SDL3_VERSION}" \
+            https://github.com/libsdl-org/SDL.git /tmp/sdl-src
+          cmake -S /tmp/sdl-src -B /tmp/sdl-build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/sdl3-install" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF
+          cmake --build /tmp/sdl-build -j"$(nproc)"
+          cmake --install /tmp/sdl-build
+
+      - name: Configure (SDL frontend)
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/sdl3-install/lib/pkgconfig
+        run: meson setup builddir -Dfrontend=sdl
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test (scanfs, nvstore, color_persistence)
+        run: meson test -C builddir --print-errorlogs
+
+      - name: Upload Linux (SDL) binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsv-linux-x86_64-sdl
+          path: builddir/src/sdl/fsv
+
+  release:
+    # linux-sdl is best-effort (continue-on-error above already keeps
+    # the workflow green regardless), so its result is deliberately
+    # NOT checked in `if:` below -- only the two load-bearing builds
+    # are. It is still listed in `needs:` so its artifact (if any) is
+    # available to download.
+    needs: [macos-metal, linux-gtk, linux-sdl]
+    # `always()` is required here, not just decorative: without it,
+    # GitHub's *implicit* gating on `needs:` (skip unless every needed
+    # job's result is literally "success") still applies underneath
+    # any custom `if:`, which would skip this job whenever the
+    # best-effort linux-sdl job fails -- exactly what continue-on-error
+    # on that job is meant to prevent.
+    if: |
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.macos-metal.result == 'success' &&
+      needs.linux-gtk.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # linux-sdl is best-effort, so its artifact may not exist; pick it
+      # when present, otherwise fall back to the GTK binary, per this
+      # task's own instruction ("SDL binary if built, else GTK binary").
+      - name: Assemble release tarballs
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p dist
+
+          # --- macOS (arm64): binary + Xcode-bundle packaging + docs ---
+          macos_dir="fsv-${tag}-macos-arm64"
+          mkdir -p "$macos_dir"
+          cp artifacts/fsv-macos-arm64/fsv "$macos_dir/"
+          chmod +x "$macos_dir/fsv"
+          cp packaging/macos/Info.plist packaging/macos/make-bundle.sh "$macos_dir/"
+          cp README.md LICENSE.md "$macos_dir/"
+          tar -czf "dist/${macos_dir}.tar.gz" "$macos_dir"
+
+          # --- Linux (x86_64): SDL binary if the best-effort job built
+          # one, else the GTK binary ---
+          linux_dir="fsv-${tag}-linux-x86_64"
+          mkdir -p "$linux_dir"
+          if [ -f artifacts/fsv-linux-x86_64-sdl/fsv ]; then
+            echo "Packaging Linux SDL binary"
+            cp artifacts/fsv-linux-x86_64-sdl/fsv "$linux_dir/"
+          else
+            echo "linux-sdl produced no binary (best-effort job) -- packaging the GTK binary instead"
+            cp artifacts/fsv-linux-x86_64-gtk/fsv "$linux_dir/"
+          fi
+          chmod +x "$linux_dir/fsv"
+          cp README.md LICENSE.md "$linux_dir/"
+          tar -czf "dist/${linux_dir}.tar.gz" "$linux_dir"
+
+          ls -la dist/
+
+      - name: Create/update GitHub Release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/*.tar.gz --clobber
