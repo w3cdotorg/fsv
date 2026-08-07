@@ -2109,6 +2109,188 @@ to show). Noted here rather than repeated in the original section.
 alongside the other three rather than only in this fix-round note,
 per the review's own ask.
 
+## Task 5.3 (ui_dialogs.cpp — Color Setup, Properties; SDL default on macOS)
+
+Ports the last two `src/dialog.c` windows — `dialog_color_setup()` and
+`dialog_node_properties()` — as ImGui windows in the new
+`src/sdl/ui_dialogs.cpp`/`.h`, wires them into the Task 5.1 menu bar and
+context menu (removing both `(Task 5.3)`-disabled stubs), and flips
+`meson_options.txt`'s `frontend` default from `gtk` to `sdl`. This
+completes UI parity (Milestone 5) — every menu item and context-menu
+entry Tasks 5.1/5.2/5.3 promised is now real.
+
+### GTK → ImGui cross-reference
+
+| `src/dialog.c` | `src/sdl/ui_dialogs.cpp` | Notes |
+|---|---|---|
+| `dialog_color_setup()` | `ui_dialogs_open_color_setup()` + `draw_color_setup_window()` | Non-modal (every other window this frontend has added is), reused across opens rather than re-created per call |
+| `csdialog.color_config` (scratch copy) | `g_cs.scratch` | Same `color_get_config()`/`color_config_destroy()` contract — a real, if minimal, memory-management port, not a shortcut |
+| "By node type" notebook page | `draw_color_setup_nodetype_tab()` | One `ColorEdit3` per `NodeType`, bound directly to `RGBcolor::r` (its 3 floats are contiguous, matching `ColorEdit3`'s `float[3]` expectation) |
+| "By date/time" page + `gui_spectrum_fill()` | `draw_color_setup_timestamp_tab()` + `draw_spectrum_preview()` | Two `SliderFloat`s ("days ago") replace `GtkDateEdit`, clamped to keep old < new; the spectrum preview is a 32-stop `ImDrawList::AddRectFilledMultiColor` strip sampling the same `color_spectrum_color()` the shipped 1024-stop table uses |
+| "By wildcards" page + `csdialog_wpattern_*()` | `draw_color_setup_wpattern_tab()` | Add/remove pattern rows and color groups via ordinary buttons + `InputText`, not a `GtkCList` row model — logic ported (duplicate-pattern check, "only an empty group can be deleted"), not the exact widget shape |
+| `csdialog_ok_button_cb()` | The "Apply" button | Commits `color_set_config()` to whichever tab is active, **and calls `color_write_config()`** — see the nvstore finding below |
+| `dialog_node_properties()` | `ui_dialogs_open_properties()` + `draw_properties_window()` | Single reusable window (`ImGui::Begin("Properties: <name>###properties_window")` — the `###` pins the window's identity so reopening on a different node doesn't create a second window); fetches `get_node_info()` **once**, at open time, into an owned `std::string` snapshot |
+| `look_at_target_node_cb()` | The "Look at target node" button | Same TreeV-collapsed-ancestor eligibility check ported verbatim |
+| `dir_contents_list()` (`src/filelist.c`) | The "Contents" tab's table | `filelist.c` is GTK-only and not part of `libfsvcore`; this walks the live `GNode` children directly, the same reason `src/sdl/ui_panels.cpp`'s file list does |
+
+### A real, pre-existing bug this task made observable: `lib/nvstore.c` was a complete stub
+
+Pre-reading `src/color.c` for "where does it persist settings" (the
+brief's own instruction) surfaced that `lib/nvstore.c` — the *only*
+consumer of which is `color.c`, on *both* frontends — was never
+implemented: `nvs_open()` unconditionally returned `NULL`, and every
+read/write function was a no-op (`/**** NOTE: ALL THIS HAS YET TO BE
+IMPLEMENTED! ****/`). `color_write_config()` therefore wrote nothing,
+ever, on either frontend, and `color_read_config()` always fell back to
+its hardcoded defaults — this is not an SDL-only gap. This blocks Task
+5.3's persistence requirement outright ("relaunch → setting survived"
+is impossible if nothing is ever written), which is exactly the
+`NEEDS_CONTEXT` trigger the task brief names ("dialog.c's persistence
+path can't be reused headless"). Rather than stop, this was scoped and
+fixed: `lib/nvstore.c` now implements the full `nvstore.h` contract for
+real — an in-memory tree of named nodes (repeated child names are what
+a "vector" iterates), serialized to a tab-indented, one-node-per-line
+text file at `~/.fsvrc` — with zero new dependencies (plain
+malloc/strdup, no glib, matching the file's pre-existing zero-dependency
+style) and no change to `nvstore.h`, `color.c`, or `dialog.c`'s call
+sites. Verified standalone (a throwaway harness exercising exactly
+`color.c`'s nested-group/two-level-vector shape: write, dump, read back,
+missing-file defaults, and backslash/tab/newline escaping — all pass)
+before ever touching the SDL build. This also benefits the **GTK**
+frontend equally — `dialog.c`/`callbacks.c` are untouched, but their own
+(dead-code, `#if 0`'d) config path would work too if ever un-commented.
+
+**A second, real pre-existing bug this surfaced**: `color_read_config()`
+read the color-mode key back as the literal string `"mode"`, while
+`color_write_config()` writes it as `key_color_mode` (`"colormode"`) —
+a typo that nvstore's all-stub implementation had silently masked
+forever (every `*_default()` read always just returned its default,
+key or no key). Fixed in `src/color.c` to read back the same key it
+writes, as its own one-line comment there explains — otherwise the
+color *mode* specifically would never have survived a relaunch even
+with nvstore now real, contradicting this task's own verification bar.
+
+### The "Apply" button calls `color_write_config()` — dialog.c's own OK handler never did
+
+`dialog_color_setup()`'s real `csdialog_ok_button_cb()` only ever calls
+`color_set_config()`/`window_set_color_mode()` — nvstore persistence in
+the GTK build is dead code, gated behind `callbacks.c`'s `#if 0`'d
+"File → Save settings" ("Configuration file not yet implemented").
+Task 5.3's brief explicitly requires persistence to survive a relaunch,
+so the Apply button here also calls `color_write_config()` — the write
+`dialog.c`'s own OK handler always should have made, now that there is
+a real store to write to.
+
+### Deliberate deviations
+
+1. **Non-modal**, unlike `dialog.c`'s `gui_window_modalize()`-blocked
+   GTK windows — matches every other window this frontend has added
+   since Task 5.1 (About, Controls, the dirtree/filelist panel), not a
+   GTK-specific idiom this port needs to reproduce.
+2. **Color Setup is reused across opens**, not re-created per call like
+   `dialog_color_setup()` — `ui_dialogs_open_color_setup()` explicitly
+   destroys and refreshes the scratch config on each call instead.
+3. **"New color group" always appends** at the end of the group list;
+   `dialog.c`'s equivalent can also insert immediately before an
+   already-selected group. Dropped: this tab has no
+   single-selected-row concept to anchor that on (YAGNI, per the brief).
+4. **Properties' "Contents" tab has no icon column** (text `[DIR]`
+   prefix instead), matching `ui_panels.cpp`'s own file-list convention
+   rather than `dialog.c`'s pixmap.
+
+### Verification
+
+- **Both arms build clean from scratch** (`meson setup` + `ninja`, zero
+  warnings from any touched file beyond the pre-existing unrelated
+  `G_LOG_DOMAIN` redefinition warning in `fsv-scan.c`/`test_scanfs.c`).
+  `meson test scanfs` → `1/1 OK` on both (macOS SDL and the Linux GTK
+  container, explicit `-Dfrontend=gtk`).
+- **Bare `meson setup` on macOS** configures the `sdl` frontend by
+  default (`meson introspect --targets` lists `src/sdl/fsv`, no GTK
+  executable) — confirms the `meson_options.txt` default flip.
+- **Headed, real-`SDL_PushEvent` verification** (temporary
+  `FSV_DIALOGS_TEST`-gated harness in `main.cpp` + matching `test_note()`
+  instrumentation in `ui_dialogs.cpp`, fully reverted —
+  `grep -rn "FSV_DIALOGS_TEST|TEMPORARY" src/sdl/*.cpp` is empty),
+  against a fixture directory (`red.c`, `blue.c`, `note.txt`,
+  `sub/inner.txt`):
+  - Colors → Setup (equivalent call) → real click switches to the "By
+    wildcards" tab → real click on "New color group" (creates a group
+    with the coded default blue) → real click focuses the pattern
+    `InputText`, real `SDL_EVENT_TEXT_INPUT` types `*.c` → real click
+    "Add pattern" → real click "Apply": `color_get_mode()` becomes
+    `COLOR_BY_WPATTERN`, an offscreen `gpu_screenshot()` before/after
+    pair differs (a new color `(0,0,38)` — the shaded rendering of the
+    group's `#0000BF` — appears in 448 pixels only in the "after" shot),
+    and `~/.fsvrc` (redirected via `$HOME`) shows
+    `wpattern.group.color=#0000BF`, `wpattern.group.wp=*.c`.
+  - Real click switches to "By date/time", real click "Apply" (using
+    the tab's default Rainbow spectrum — see the disclosed gap below):
+    `color_get_mode()` becomes `COLOR_BY_TIMESTAMP`, a second
+    screenshot differs again (a red tint `(51,0,0)`, consistent with
+    the fixture's just-created files landing at the spectrum's "new"
+    end), and `~/.fsvrc` shows `colormode=time`.
+  - **Persistence, both by file content and by reload**: `cat
+    ~/.fsvrc` after the run shows the full nested tree (`colormode`,
+    `nodetype.*`, `timestamp.*`, `wpattern.group.*`). A *separate,
+    fresh, non-test* process (`--screenshot`, same `$HOME`) re-launched
+    against the same fixture reproduces the red-tinted coloring (color
+    histogram: `(51,0,0)` at 5026 px, `(253/254,0,0)` at hundreds more)
+    — confirms `color_init()` → `color_read_config()` → (via
+    `geometry_init()`'s `color_assign_recursive()` call, `geometry.c:
+    2682`) actually re-applies the persisted mode at startup, not just
+    that the file was written.
+  - **Properties**, called directly on `red.c` and on `sub/` (the same
+    function the context-menu item calls): logged field values —
+    `name=red.c type=Regular file owner=willow group=wheel size=22
+    alloc=4,096 mtime=Fri Aug 7 23:11:55 2026` for the file and
+    `name=sub type=Directory ... subtree=7` for the directory —
+    cross-checked exactly against `stat -f "%z %Sm %u %g"` on the real
+    fixture files (`red.c`: size 22, same mtime; `sub`: correctly shows
+    *subtree* size 7 — the size of `inner.txt` inside it — not the
+    directory inode's own raw size, matching `dialog.c`'s own semantics).
+  - Four screenshots (before, after-wildcard, after-timestamp, reload)
+    sent to the user for visual review; all four have distinct MD5s.
+- **A real bug this harness's construction found and fixed (test
+  methodology, not shipped code)**: the very first frame a newly
+  selected ImGui `TabItem`/`Button` is drawn, `GetItemRectMin()`/`Max()`
+  can read `(0,0)` for one frame before layout settles — a synthetic
+  click issued the instant a widget's rect first becomes "found" landed
+  at the wrong point. Fixed with a small settle delay (a handful of
+  frames, re-reading the rect each time) before trusting it, on top of
+  Task 5.2's already-established "separately-timed motion, then
+  press, then release" requirement.
+
+### Concerns / disclosed gaps
+
+- **The Gradient spectrum type + its `ColorEdit3`-bound old/new colors
+  were not driven through the "By date/time" tab's `Combo` dropdown in
+  the automated harness.** An *open* `ImGui::Combo()` popup intercepts
+  the very next click as click-away-to-dismiss, which silently ate an
+  Apply click in an earlier run of this harness (the mode stayed
+  `COLOR_BY_WPATTERN` instead of switching to `COLOR_BY_TIMESTAMP`).
+  Selecting a specific dropdown item programmatically would need either
+  keyboard nav (this app never enables
+  `ImGuiConfigFlags_NavEnableKeyboard`) or per-item rects (the simple
+  `Combo()` helper doesn't expose them without rewriting it as
+  `BeginCombo`/`Selectable()`, which would mean changing shipped widget
+  code just to make it testable). The Apply path itself, the mode
+  switch, the nvstore write, and the scene recolor are all still
+  verified end-to-end above — just using the timestamp tab's *default*
+  spectrum (Rainbow) rather than a freshly-dragged Gradient. The
+  `ColorEdit3` widgets themselves (`Older color`/`Newer color`) are
+  ordinary, directly-memory-bound Dear ImGui usage, identical in kind to
+  every other `ColorEdit3` call in this file that *was* exercised (the
+  node-type tab's per-`NodeType` swatches) — not re-verified at the
+  picker-popup level, which would be testing Dear ImGui's own widget,
+  not this port's logic.
+- Same sandbox limitation as Tasks 5.1/5.2: no compositor screen
+  capture is available here, so ImGui-overlay pixels (the dialogs
+  themselves) are not visually confirmable by screenshot — only via
+  internal-state tracing (`color_get_mode()`, the nvstore file, logged
+  Properties fields) plus the *scene* recolor, which the offscreen
+  `gpu_screenshot()` path does capture (unaffected by ImGui compositing).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
