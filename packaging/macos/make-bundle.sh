@@ -8,19 +8,29 @@
 # workflow). It does not compile anything itself.
 #
 # Usage:
-#   packaging/macos/make-bundle.sh [builddir] [output.app]
+#   packaging/macos/make-bundle.sh [builddir-or-binary] [output.app]
 #
-#   builddir    Path to a meson build directory that has already been
-#               built (meson setup <builddir> && ninja -C <builddir>).
-#               Defaults to "builddir" at the repo root; if that does
-#               not contain a built binary, also tries "builddir-xcode"
-#               (the directory the Xcode external-build target uses).
+#   builddir-or-binary  Either a meson build directory that has already
+#               been built (meson setup <builddir> && ninja -C <builddir>),
+#               or a direct path to an already-built fsv binary -- the
+#               latter is what a release tarball ships (the binary sits
+#               flat next to this script, not inside a meson builddir).
+#               If it names a regular file, it's used as-is; if it
+#               names a directory, "<dir>/src/sdl/fsv" is looked up
+#               inside it. Defaults to "builddir" at the repo root; if
+#               that does not contain a built binary, also tries
+#               "builddir-xcode" (the directory the Xcode
+#               external-build target uses).
 #   output.app  Where to write the bundle. Defaults to "fsv.app" at the
 #               repo root.
 #
-# Example:
+# Examples:
 #   meson setup builddir && ninja -C builddir
 #   packaging/macos/make-bundle.sh
+#   open fsv.app
+#
+#   # From an extracted release tarball (binary flat next to this script):
+#   ./make-bundle.sh ./fsv fsv.app
 #   open fsv.app
 
 set -eu
@@ -28,7 +38,7 @@ set -eu
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 
-builddir_arg="${1:-}"
+binary_arg="${1:-}"
 app_path="${2:-$repo_root/fsv.app}"
 
 find_binary() {
@@ -40,10 +50,18 @@ find_binary() {
 	return 1
 }
 
-if [ -n "$builddir_arg" ]; then
-	binary=$(find_binary "$builddir_arg") || {
-		echo "error: no built binary at $builddir_arg/src/sdl/fsv" >&2
-		echo "       run: meson setup $builddir_arg && ninja -C $builddir_arg" >&2
+if [ -n "$binary_arg" ] && [ -f "$binary_arg" ]; then
+	# A direct, already-built binary path (release-tarball layout) --
+	# used as-is, no meson builddir to look inside.
+	if [ ! -x "$binary_arg" ]; then
+		echo "error: $binary_arg exists but is not executable" >&2
+		exit 1
+	fi
+	binary="$binary_arg"
+elif [ -n "$binary_arg" ]; then
+	binary=$(find_binary "$binary_arg") || {
+		echo "error: no built binary at $binary_arg/src/sdl/fsv" >&2
+		echo "       run: meson setup $binary_arg && ninja -C $binary_arg" >&2
 		exit 1
 	}
 else
