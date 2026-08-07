@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.1 (Xcode project)**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.2 + 6.3 (Xcode project, CI, release artifacts)**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -2407,6 +2407,162 @@ global DerivedData location), Xcode's per-user
 `make-bundle.sh` writes at the repo root by default) — none of these
 are build inputs.
 
+## Task 6.2 + 6.3 verification (GitHub Actions CI + release artifacts)
+
+`.github/workflows/ci.yml` — four jobs: `macos-metal`, `linux-gtk`
+(anti-regression for the legacy frontend), `linux-sdl` (best-effort),
+`release` (tag pushes only). See the comments in the workflow file
+itself for the full rationale behind each job; the two decisions worth
+calling out here are the ones that changed what gets built, not just
+how CI is wired.
+
+**A real, load-bearing build bug found and fixed, not just a CI
+config exercise.** Standing up `linux-sdl` locally (an `ubuntu:24.04`
+container, mirroring the workflow's exact steps, since GitHub-hosted
+runners can't be driven from this sandbox) failed to compile
+`src/sdl/gpu.cpp` — first with nonsensical libstdc++ errors deep in
+`<vector>` (`'__glibcxx_requires_can_increment_range' was not
+declared`), then, once traced further, a `g_list_alloc` macro-arity
+clash between `glib.h`'s own declaration and `debug/debug.h`'s macro
+of the same name. Root cause, confirmed by preprocessing `gpu.cpp` with
+`-E` and reading the resulting include trace: `src/meson.build`'s
+`incdir = include_directories('..', '../lib', '.')` had a bare `'..'`
+entry. Meson always emits an `-I` flag pair for a relative
+`include_directories()` entry — one resolved against the source tree,
+one against the build tree — so this single entry meant "expose the
+*repo root* on the include path" as a side effect of the *build root*
+half (needed to reach `config.h`, generated there by the root
+`meson.build`). That's silently harmless for every plain-C compile in
+this tree, but libstdc++'s `<bits/stl_algobase.h>` unconditionally
+does `#include <debug/debug.h>` (angle brackets) to pull in its own
+internal assertion macros — and with the repo root sitting ahead of
+`/usr/include/c++/.../debug/debug.h` on the search path (user `-I`
+directories always precede a compiler's built-in system dirs, `-isystem`
+included), that angle-bracket include silently resolved to *this
+project's* `debug/debug.h` instead. This never showed up on
+macOS/Clang+libc++ (no colliding header, and/or a different search
+order) and never affected the GTK frontend (pure C, never pulls in
+libstdc++), which is exactly why four prior tasks' worth of macOS and
+Linux(GTK) builds never tripped it — `src/sdl/*.cpp` is the first C++
+code in this tree to actually get built on Linux/GCC.
+
+Fix: `config.h` now generates into `<builddir>/src/config.h` (moved the
+`configure_file()` call from the root `meson.build` into
+`src/meson.build`, keeping the `conf` object itself assembled in the
+root file, which subdir-included files can still read) instead of the
+build root, reached via the already-present, harmless `-Isrc`/
+`-I../src` pair (`src/` has no `debug/` subdirectory of its own to
+collide with anything). `incdir`'s bare `'..'` entry is gone.
+`debug/meson.build`'s own `static_library()` — which also does
+`#include "config.h"` from `debug.c` — picks up the new location via
+an explicit `'../src'` added to its own `include_directories:` (kept
+its original `'..'` too; harmless for a plain-C compile). Verified with
+both an ubuntu:24.04 container (before the fix: `gpu.cpp` fails to
+compile as described above; after: `linux-sdl`'s full sequence —
+apt install, SDL3-from-source build, `meson setup -Dfrontend=sdl`,
+`ninja`, `meson test` — passes end to end, 3/3 tests) and a fresh
+`meson setup builddir -Dfrontend=sdl && ninja -C builddir` on this
+machine (macOS, unaffected either way, confirming no regression) plus
+a `--screenshot` re-run (still a real Metal-rendered BMP).
+
+**SDL3 on Ubuntu, investigated rather than assumed.** `libsdl3-dev`
+does not exist in `jammy` (22.04) or `noble` (24.04) — checked via
+`packages.ubuntu.com`'s package search across every `noble`/`jammy`
+suite variant (base, `-updates`, `-backports`). It first appears in
+`questing` (25.10), an interim release GitHub does not offer as a
+hosted runner image (only the LTS bases — 22.04/24.04 — are available;
+`ubuntu-latest` is 24.04 as of this task). So there is no `apt`
+package to install on any GitHub-hosted Ubuntu runner today, on any
+release channel. Chosen fix, per the task's own option (a): build SDL3
+`3.4.14` (pinned to match the version already verified elsewhere in
+this document, Task 2.1's `pkg-config --modversion sdl3` on this
+machine) from source via its own supported CMake build, and cache the
+*installed* result with `actions/cache`, keyed on
+`sdl3-${{ runner.os }}-${{ env.SDL3_VERSION }}` — a version bump is a
+one-line `env:` change in the workflow. The exact dependency list in
+the `linux-sdl` job's "Install build dependencies" step (X11/Wayland/
+EGL/ALSA/PulseAudio/udev/dbus dev headers) is the precise set that
+produced a clean `cmake --build` in an `ubuntu:24.04` container for
+this task — confirmed with the SDL3 build itself reporting `Video
+drivers: dummy kmsdrm(dynamic) offscreen wayland(dynamic) x11(dynamic)`
+and `GPU drivers: vulkan` enabled (build-only; no Vulkan *loader* is
+needed to run, only to build against the headers). Because this whole
+path (an unofficial, from-source SDL3 on Ubuntu) is inherently more
+fragile than the apt-packaged GTK path, `linux-sdl` is
+`continue-on-error: true` at the job level — it is a bonus build, not
+the anti-regression job (`linux-gtk` is). The `release` job's `if:`
+condition deliberately does not check `needs.linux-sdl.result`
+(and uses `always()` so the *implicit* all-`needs`-must-succeed gate
+that GitHub applies underneath any custom `if:` doesn't skip it
+whenever the best-effort job fails) — releases still ship the Linux
+GTK binary if the SDL one didn't build.
+
+**Screenshot smoke test: real, but honestly unverified from here.**
+The `macos-metal` job runs
+`./builddir/src/sdl/fsv --screenshot fsv-screenshot.bmp tests/fixture`
+as a `continue-on-error: true` step and uploads the resulting BMP only
+if it succeeds. This machine's own runs (Task 6.1, this task) confirm
+the binary itself does render a real Metal frame headlessly and write
+a valid BMP when *this specific piece of Apple Silicon hardware* is
+available — but whether a GitHub-hosted `macos-15` runner's
+paravirtualized Metal GPU initializes `SDL_GPU`'s Metal backend
+headlessly is something this sandbox cannot test (no way to drive a
+GitHub-hosted runner from here). The step is written to fail soft
+either way; the honest thing to watch on the first real CI run is
+whether this step goes green (GPU does init headless on these runners)
+or red (it doesn't) — not to assume either outcome from local evidence
+alone.
+
+**Runner images:** `macos-15` (Sequoia) rather than `macos-14`
+(Sonoma) — checked `actions/runner-images`' own announcements: macOS
+14's runner image began deprecating July 6, 2026 and is fully
+unsupported November 2, 2026 (i.e., *during* this branch's likely
+CI lifetime), while macOS 15 carries no such notice. `ubuntu-24.04`
+(noble) for all three Linux-adjacent jobs — the current LTS base,
+confirmed still fully supported (22.04's deprecation was announced
+separately, unrelated to this choice since 24.04 was already the
+target either way).
+
+**Local verification performed for this task** (both jobs' exact
+step sequences, not just the workflow YAML):
+- `actionlint .github/workflows/ci.yml` (installed via Homebrew): zero
+  findings, including its embedded `shellcheck` pass over every `run:`
+  block.
+- `python3 -c "import yaml; yaml.safe_load(...)"`: parses cleanly.
+- **Linux, `linux-gtk`'s exact sequence**, in a fresh `ubuntu:24.04`
+  container: `apt-get install` the job's exact package list,
+  `meson setup builddir -Dfrontend=gtk`, `ninja -C builddir` (45
+  targets, `src/fsv` links), `meson test -C builddir --print-errorlogs`
+  → 3/3 OK.
+- **Linux, `linux-sdl`'s exact sequence**, same container: the job's
+  full dependency list, SDL3 `3.4.14` built from source via the exact
+  `cmake`/`ninja` invocations the workflow uses, installed to a
+  prefix, `PKG_CONFIG_PATH` pointed at it, `meson setup
+  builddir -Dfrontend=sdl`, `ninja -C builddir` (41 targets, `src/sdl/fsv`
+  links) `meson test -C builddir --print-errorlogs` → 3/3 OK. This is
+  what caught the `debug/debug.h` bug above — it could not have been
+  found without actually attempting this exact build.
+- **macOS (this machine), fresh builds in scratch directories**
+  (`builddir-verify-sdl`, deleted after): `meson setup
+  builddir-verify-sdl -Dfrontend=sdl && ninja -C builddir-verify-sdl`
+  clean, `meson test` 3/3 OK, and
+  `./builddir-verify-sdl/src/sdl/fsv --screenshot ... tests/fixture`
+  still writes a real BMP — confirms the `config.h`-relocation fix
+  above is a no-op on the platform this port actually targets.
+- The `release` job's packaging shell (tarball assembly, including the
+  "no SDL artifact → fall back to the GTK binary" branch) was dry-run
+  locally against fake artifact directories standing in for
+  `actions/download-artifact`'s output layout, for both the
+  SDL-present and SDL-absent cases; both produced the expected tarball
+  contents.
+- Not verified (cannot be, from this sandbox): the actual
+  GitHub-hosted runners themselves — the macOS Metal screenshot step's
+  real-world outcome, and `gh release create`/`upload`'s live
+  behavior. Both are ordinary, well-documented GitHub Actions/`gh` CLI
+  operations exercised nowhere unusual; the risk is entirely in the
+  *first* real CI run, which is what to watch, not in anything this
+  task could further de-risk locally.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2466,3 +2622,6 @@ code is kept.
 | 2026-08-07 | `ImGuiListClipper::IncludeItemByIndex()` before the first `Step()`, not a second, unclipped render pass | it is the one mechanism `imgui.h` documents for exactly this need (force a specific, possibly off-screen index to be processed at all) and composes with the clipper's own multi-pass `Step()` loop already in place, instead of bypassing clipping (and its perf benefit) entirely whenever any scroll-to is pending |
 | 2026-08-08 | Xcode target is a `PBXLegacyTarget` wrapping `meson`/`ninja`, not a native target compiling the sources itself | keeps Meson the single source of truth for the build graph; a native target would require mirroring every `meson.build` rule (subproject, embedded shaders, per-frontend gating) inside the pbxproj too, doubling the maintenance surface for zero benefit |
 | 2026-08-08 | Ad-hoc `codesign` lives in `packaging/macos/make-bundle.sh`, not an Xcode build phase | an External Build System target has no product/Signing tab for Xcode to drive itself; a Run Script phase bolted onto a phase-less legacy target would be exactly the "fake compile phase" the task's own constraints rule out, and the script is useful standalone (CLI-only users, CI) |
+| 2026-08-08 | `config.h` generates into `<builddir>/src/config.h`, not the build root; `incdir`'s bare `'..'` entry removed | that bare `'..'` put the repo root on every C/C++ compile's include path so `config.h` (at the build root) was reachable; libstdc++'s `<bits/stl_algobase.h>` unconditionally `#include <debug/debug.h>`, and with the repo root ahead of the real system path, that silently resolved to this project's own `debug/debug.h` instead, breaking every C++ (SDL frontend) compile on Linux/GCC — never caught before Task 6.2 because no prior task had actually built `src/sdl/*.cpp` on Linux |
+| 2026-08-08 | Build SDL3 from source (CMake, cached by `actions/cache`) for the Linux CI job, rather than `apt install` or a non-LTS Ubuntu runner | `libsdl3-dev` doesn't exist for `jammy`/`noble` in Ubuntu's archive (only from `questing` 25.10 onward), and GitHub only hosts LTS-base Ubuntu runners (22.04/24.04) — there is no package to install on any GitHub-hosted Ubuntu image today |
+| 2026-08-08 | `linux-sdl` CI job is `continue-on-error: true`; `release` explicitly ignores its result (with `always()`) rather than gating on it | building SDL3 from source on Ubuntu is inherently more fragile than the apt-packaged GTK path and is a bonus, not the anti-regression job; releases must still ship a working Linux binary (falling back to GTK) even if this job fails |
