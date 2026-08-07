@@ -90,14 +90,23 @@ GUI.
 
 ## Task 1.3 verification (libfsvcore + fsv-scan + fixture test)
 
-A `frontend` meson option (`gtk`/`sdl`, default `gtk`) now gates the
-GTK dependency lookups (`required: frontend == 'gtk'`) and the `fsv`
-executable target itself, which additionally only builds when
-`host_machine.system() != 'darwin'` — `ogl.c`'s `GL/glu.h` dependency
-doesn't exist on macOS (pre-existing, out of scope here; see Task 1.1).
-This means `meson setup` no longer hard-fails on a GTK-less host, and
-the macOS build simply skips `src/fsv` while still configuring and
-building everything else.
+A `frontend` meson option (`gtk`/`sdl`, default `gtk`) was added, but
+the three GTK dependency lookups (`gtk+-3.0`, `gdk-pixbuf-2.0`,
+`epoxy`) are `required: false` unconditionally — not tied to
+`frontend`'s value at all. (An earlier version of this made
+`required:` track `frontend == 'gtk'`, which still hard-fails
+`meson setup` on a genuinely GTK-less host whenever `frontend` is left
+at its `gtk` default — i.e. the common case. Fixed per code review.)
+The `fsv` executable target itself only builds when
+`frontend == 'gtk'` **and** `gtkdep_found` (all three deps actually
+present) **and** `host_machine.system() != 'darwin'` — the last gate
+because `ogl.c`'s `GL/glu.h` dependency doesn't exist on macOS
+(pre-existing, out of scope here; see Task 1.1). This means
+`meson setup` never hard-fails on GTK's absence, on any host, with any
+`frontend` value; the headless core (`libfsvcore`, `fsv-scan`,
+`test_scanfs`) always configures and builds, and `src/fsv` is silently
+skipped whenever GTK isn't there to build it (verified below by
+simulating a GTK-less `PKG_CONFIG_PATH`).
 
 `libfsvcore` (`src/meson.build`) is a static library built from
 `scanfs.c colexp.c color.c common.c animation.c camera.c` against only
@@ -138,7 +147,7 @@ frontend files, deliberately *not* part of libfsvcore). Those calls
 are all one-way "notify the frontend" hooks (redraw a widget, update a
 status bar, recompute cached 3D geometry) with no return value the
 core logic depends on. `tools/fsv-headless-stubs.c` provides headless
-no-op implementations of exactly those ~24 symbols
+no-op implementations of exactly those 30 symbols
 (`gui_update`, `dirtree_*`, `filelist_*`, `geometry_*`,
 `viewport_pass_node_table`, `window_*`), shared by both `fsv-scan` and
 `test_scanfs` via a `headless_stubs_src` variable set in
@@ -158,7 +167,7 @@ TDD evidence:
   fixing `window.h`, the build failed to *compile*
   (`fatal error: 'gtk/gtk.h' file not found` in `color.c`/`camera.c`/
   `scanfs.c`). After fixing `window.h`/`scanfs.c`, it failed to
-  *link* (`ld: symbol(s) not found` for the ~24 frontend-notification
+  *link* (`ld: symbol(s) not found` for the 30 frontend-notification
   symbols listed above).
 - **GREEN:** after adding `tools/fsv-headless-stubs.c` and linking it
   into both targets, `ninja -C builddir` builds cleanly and

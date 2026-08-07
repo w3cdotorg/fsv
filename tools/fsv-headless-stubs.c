@@ -102,6 +102,10 @@ filelist_show_entry(GNode *node)
 void
 viewport_pass_node_table(GNode **new_node_table, size_t nz)
 {
+	/* The real implementation (viewport.c) takes ownership of
+	 * new_node_table and frees it on the next call/at shutdown. This
+	 * stub intentionally drops it instead — a deliberate one-shot leak,
+	 * acceptable for fsv-scan/test_scanfs's short-lived process lifetime. */
 	(void)new_node_table;
 	(void)nz;
 }

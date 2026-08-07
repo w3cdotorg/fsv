@@ -4,12 +4,24 @@ project('fsv', 'c', version: '3.1alpha')
 
 frontend = get_option('frontend')
 
-# GTK is only required for the (legacy) gtk frontend; don't hard-fail
-# configure when it's absent and frontend == 'sdl'.
-gtkdep = [dependency('gtk+-3.0', required: frontend == 'gtk'),
-          dependency('gdk-pixbuf-2.0', required: frontend == 'gtk'),
-          dependency('epoxy', required: frontend == 'gtk')]
+# GTK is only required for the (legacy) gtk frontend, and even then only
+# on a host that actually builds it (see the darwin gate in
+# src/meson.build). Never `required: true` here: a genuinely GTK-less
+# host must still be able to `meson setup` and build the headless core
+# (libfsvcore, fsv-scan, test_scanfs) regardless of `frontend`'s value.
+# The `fsv` executable target itself is gated on gtkdep_found below.
+gtkdep = [dependency('gtk+-3.0', required: false),
+          dependency('gdk-pixbuf-2.0', required: false),
+          dependency('epoxy', required: false)]
+gtkdep_found = gtkdep[0].found() and gtkdep[1].found() and gtkdep[2].found()
 cglm_dep = dependency('cglm', fallback : ['cglm', 'cglm_dep'])
+# debug.c (debug/) only needs <glib.h>, not GTK; declared here (rather
+# than in src/meson.build, where it's used again) because debug/ is
+# subdir'd first and needs it too. Previously debug/meson.build got
+# glib's cflags for free as an accidental side effect of `dependencies:
+# gtkdep` (gtk+-3.0's pkg-config Requires chain includes glib-2.0) —
+# that broke as soon as gtkdep stopped being unconditionally required.
+glibdep = dependency('glib-2.0')
 compiler = meson.get_compiler('c')
 conf = configuration_data()
 conf.set_quoted('PACKAGE', meson.project_name())
