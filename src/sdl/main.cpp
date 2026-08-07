@@ -1,14 +1,12 @@
 // src/sdl/main.cpp — SPDX-License-Identifier: MIT
 //
-// SDL3 + SDL_GPU (Metal on macOS) application skeleton for the fsv port.
-// Owns the window, the GPU device, the main loop and the ImGui backends.
-// No scene rendering yet (that's Milestone 3): this task only proves the
-// window/device/ImGui/animation-tick wiring is correct end to end.
+// SDL3 + SDL_GPU (Metal on macOS) application shell for the fsv port.
+// Owns the window, the main loop, the ImGui backends and the animation
+// tick. The GPU device, pipelines and render passes belong to
+// src/sdl/gpu.cpp (Task 3.2); this file only sequences the frame:
 //
-// gpu_init()/gpu_begin_frame()/gpu_end_frame() referenced in the task
-// brief are intentionally NOT introduced here as a separate header: the
-// real gpu.h/gpu.cpp module lands in Task 3.2. Until then the handful of
-// GPU calls a real frontend needs live inline in main(), matching YAGNI.
+//   gpu_frame_begin() -> ImGui PrepareDrawData -> scene pass ->
+//   ImGui pass -> gpu_frame_end()
 //
 // Identifiers below are cross-checked against the vendored ImGui example
 // (subprojects/imgui/example_sdl3_sdlgpu3_main.cpp.txt, v1.92.9b-docking)
@@ -18,6 +16,8 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
+#include "gpu.h"
+#include "gpu_internal.hpp"
 extern "C" {
 #include "fsv-platform.h"
 }
@@ -41,8 +41,13 @@ sdl_request_frame(void)
 static void
 sdl_render_frame(void)
 {
-	// Scene render lands here in M3 (src/sdl/gpu.cpp). Nothing to draw
-	// yet: main()'s loop below still clears + presents every frame.
+	// Called from inside fsv_animation_tick(), i.e. before this
+	// iteration's command buffer exists -- so, like the GTK frontend's
+	// ogl_draw() (gtk_gl_area_queue_render()), this only *schedules* a
+	// redraw. The loop below does the drawing. It cannot spin: the core
+	// only calls this while globals.need_redraw is set, which the tick
+	// clears once the animation reaches steady state.
+	g_frame_requested = true;
 }
 
 static void
@@ -83,15 +88,6 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	SDL_GPUDevice *device = SDL_CreateGPUDevice(
-	    SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_SPIRV,
-	    /* debug */ true, nullptr);
-	if (device == nullptr) {
-		SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
-		return 1;
-	}
-	SDL_Log("GPU driver: %s", SDL_GetGPUDeviceDriver(device));
-
 	g_window = SDL_CreateWindow("fsv", 1280, 800,
 	    SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
 	if (g_window == nullptr) {
@@ -99,10 +95,13 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	if (!SDL_ClaimWindowForGPUDevice(device, g_window)) {
-		SDL_Log("SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
+	// Creates the GPU device, claims the window, builds the scene
+	// pipelines. Everything below needs the device, so bail if it
+	// failed rather than crawling on with a NULL one.
+	gpu_init(g_window);
+	SDL_GPUDevice *device = gpu_device();
+	if (device == nullptr)
 		return 1;
-	}
 
 	// Install all five hooks the core requires before any libfsvcore
 	// call that might touch fsv_platform (fsv_animation_tick(), below).
@@ -175,29 +174,43 @@ main(int argc, char **argv)
 		const bool empty_draw = draw_data->DisplaySize.x <= 0.0f ||
 		    draw_data->DisplaySize.y <= 0.0f;
 
-		SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
-		SDL_GPUTexture *swapchain = nullptr;
-		SDL_WaitAndAcquireGPUSwapchainTexture(cmd, g_window, &swapchain,
-		    nullptr, nullptr);
+		SDL_GPUCommandBuffer *cmd = gpu_frame_begin();
+		if (cmd == nullptr)
+			continue;
+		SDL_GPUTexture *swapchain = gpu_frame_swapchain_texture();
 
-		if (swapchain != nullptr && !empty_draw) {
-			// Mandatory before the render pass: uploads vertex/index
-			// buffers for this frame's draw data.
-			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
+		if (swapchain != nullptr) {
+			// Mandatory before any render pass: uploads ImGui's
+			// vertex/index buffers for this frame (a copy pass,
+			// which cannot be nested inside a render pass).
+			if (!empty_draw)
+				ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
 
-			SDL_GPUColorTargetInfo target = {};
-			target.texture = swapchain;
-			target.clear_color = SDL_FColor{ 0.08f, 0.10f, 0.12f, 1.0f };
-			target.load_op = SDL_GPU_LOADOP_CLEAR;
-			target.store_op = SDL_GPU_STOREOP_STORE;
+			// Pass 1: the 3-D scene. Clears color + depth. No
+			// geometry to draw until Task 3.3 ports geometry.c,
+			// so for now this is exactly the clear that Task 2.2
+			// did -- but through the real pipeline and depth
+			// attachment.
+			gpu_scene_begin();
+			gpu_scene_end();
 
-			SDL_GPURenderPass *pass =
-			    SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
-			ImGui_ImplSDLGPU3_RenderDrawData(draw_data, cmd, pass);
-			SDL_EndGPURenderPass(pass);
+			// Pass 2: ImGui on top of the same swapchain texture,
+			// LOADOP_LOAD so the scene survives, and with no depth
+			// target so the UI is never depth-tested.
+			if (!empty_draw) {
+				SDL_GPUColorTargetInfo target = {};
+				target.texture = swapchain;
+				target.load_op = SDL_GPU_LOADOP_LOAD;
+				target.store_op = SDL_GPU_STOREOP_STORE;
+
+				SDL_GPURenderPass *pass =
+				    SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
+				ImGui_ImplSDLGPU3_RenderDrawData(draw_data, cmd, pass);
+				SDL_EndGPURenderPass(pass);
+			}
 		}
 
-		SDL_SubmitGPUCommandBuffer(cmd);
+		gpu_frame_end();
 	}
 
 	// Shutdown order per the vendored example: platform backend, then
@@ -207,8 +220,7 @@ main(int argc, char **argv)
 	ImGui_ImplSDLGPU3_Shutdown();
 	ImGui::DestroyContext();
 
-	SDL_ReleaseWindowFromGPUDevice(device, g_window);
-	SDL_DestroyGPUDevice(device);
+	gpu_shutdown();
 	SDL_DestroyWindow(g_window);
 	SDL_Quit();
 

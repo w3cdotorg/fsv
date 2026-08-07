@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 #
-# SDL3 + Metal (SDL_GPU) frontend skeleton (Task 2.2): window, GPU
-# device, main loop, ImGui (SDL3 + SDLGPU3 backends), and the core
-# animation tick. No scene rendering yet — that's Milestone 3
-# (src/sdl/gpu.h/gpu.cpp, Task 3.2).
+# SDL3 + Metal (SDL_GPU) frontend: window, main loop, ImGui (SDL3 +
+# SDLGPU3 backends) and the core animation tick (main.cpp, Task 2.2),
+# plus the renderer core — device, pipelines, mesh buffers, camera
+# matrices (gpu.cpp, Task 3.2). Scene geometry lands in Task 3.3.
 #
 # libfsvcore still calls into a handful of frontend-notification
 # symbols (gui_update, dirtree_*, filelist_*, geometry_*, window_*,
@@ -19,9 +19,27 @@
 # for exactly this purpose.
 headless_stubs_src = files('../../tools/fsv-headless-stubs.c')
 
-fsv_sdl = executable('fsv', ['main.cpp', headless_stubs_src],
+# The compiled shader artifacts (Task 3.1) are baked into the binary as
+# byte arrays rather than loaded from disk — see the rationale at the top
+# of tools/embed-shaders.py. Only the scene shaders are needed here; the
+# text ones join the list in Task 3.4.
+python3 = find_program('python3')
+embed_shaders_py = files('../../tools/embed-shaders.py')
+shaders_embedded_h = custom_target('shaders_embedded.h',
+  input: files(
+    '../../shaders/compiled/scene.vert.msl',
+    '../../shaders/compiled/scene.vert.spv',
+    '../../shaders/compiled/scene.frag.msl',
+    '../../shaders/compiled/scene.frag.spv'),
+  output: 'shaders_embedded.h',
+  command: [python3, embed_shaders_py, '@OUTPUT@', '@INPUT@'])
+
+fsv_sdl = executable('fsv',
+  ['main.cpp', 'gpu.cpp', shaders_embedded_h, headless_stubs_src],
   link_with: libfsvcore,
   dependencies: [sdl3dep, imgui_dep, glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
-  include_directories: incdir,
+  # include_directories('.') resolves to *both* src/sdl and its build
+  # directory, which is where shaders_embedded.h is generated.
+  include_directories: [incdir, include_directories('.')],
   override_options: ['cpp_std=c++20'],
   install: true)

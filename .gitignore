@@ -38,3 +38,6 @@ src/fsv
 builddir
 builddir-*
 subprojects/.wraplock
+
+# Dear ImGui writes its window layout next to the binary at runtime
+imgui.ini
