@@ -11,7 +11,7 @@
  *
  *   text_ ...            -> Task 3.4 (tmaptext.c -> text3d.cpp)
  *   dirtree_ / filelist_ -> Task 5.2 (ImGui panels)
- *   window_ / gui_update -> Task 5.1/5.3 (ImGui menu bar, dialogs)
+ *   window_ ...          -> Task 5.1/5.3 (ImGui menu bar, dialogs)
  *   about ...            -> no About/splash presentation in this frontend
  *   viewport_ ...        -> Task 4.2 (picking owns the node table)
  *
@@ -38,11 +38,11 @@
 #include "viewport.h"
 #include "window.h"
 
-/* gui.h */
-void
-gui_update(void)
-{
-}
+/* gui.h's gui_update() and window.h's window_statusbar() are NOT here:
+ * src/sdl/main.cpp implements both for real. scanfs() blocks the only
+ * thread for the whole scan and calls gui_update() per directory entry to
+ * keep the frontend alive, so it has to pump SDL events and render -- and
+ * the scan's progress text arrives through window_statusbar(). */
 
 /* dirtree.h */
 void
@@ -109,14 +109,24 @@ filelist_show_entry(GNode *node)
 	(void)node;
 }
 
-/* viewport.h */
+/* viewport.h
+ *
+ * Not a no-op: scanfs.c (scanfs.c:361) hands over a NEW_ARRAY that the
+ * callee owns, so dropping the pointer would leak the whole table on every
+ * rescan. This mirrors what GTK's viewport.c:43-49 does -- free the
+ * previous table, store the new one -- and keeps it stored rather than
+ * freeing it immediately because picking (Task 4.2) is what reads it: the
+ * table maps a color id back to a GNode *. */
+static GNode **node_table = NULL;
+static size_t node_table_size = 0;
+
 void
 viewport_pass_node_table(GNode **new_node_table, size_t nz)
 {
-	/* The GTK implementation (viewport.c) takes ownership and frees the
-	 * previous table; picking (Task 4.2) is what will need it here. */
-	(void)new_node_table;
-	(void)nz;
+	if (node_table != NULL)
+		xfree(node_table);
+	node_table = new_node_table;
+	node_table_size = nz;
 }
 
 /* window.h */
@@ -135,13 +145,6 @@ window_set_color_mode(ColorMode mode)
 void
 window_birdseye_view_off(void)
 {
-}
-
-void
-window_statusbar(StatusBarID sb_id, const char *message)
-{
-	(void)sb_id;
-	(void)message;
 }
 
 /* tmaptext.h — the texture-mapped text engine is Task 3.4 */
