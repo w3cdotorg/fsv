@@ -1668,6 +1668,100 @@ visually inspected -- only the 3D scene's pixels were (via the
 `gpu_screenshot_*()` path, which does not composite the ImGui pass and
 so was never affected by this gap in the first place).
 
+### Fix round (post-review): Retina/HiDPI context-menu misposition
+
+Code review approved menu parity, the `chdir()` fix and the dialog
+thread-safety marshaling, and required one Critical and one Minor fix
+before sign-off.
+
+**Critical -- pixel-space coordinates reached an ImGui API.**
+`input.cpp` filled `ContextMenuRequest.x/y` with the same
+`pixel_scale()`-multiplied coordinates it uses for `gpu_pick()`, but
+`ui_main.cpp` fed that value straight into
+`ImGui::SetNextWindowPos()`, which wants **logical** window
+coordinates -- `imgui_impl_sdl3.cpp` sizes `io.DisplaySize` from
+`SDL_GetWindowSize()`, not `SDL_GetWindowSizeInPixels()`, and never
+density-scales incoming mouse events. On a 2x Retina display (this
+port's primary target) a right-click at logical `(400, 300)` would have
+opened the popup at `(800, 600)` -- detached from the cursor or off the
+window entirely. Invisible in this sandbox's 1x virtual display, which
+is exactly why it needed a reviewer with the actual failure mode in
+mind, not just a headed run, to catch.
+
+Fixed by carrying **logical** coordinates in the seam instead of pixel
+ones (`input.h`'s `ContextMenuRequest.win_x/win_y`, `float`, filled from
+`ev->button.x/y` directly -- not the scaled `x, y` locals `input.cpp`
+had already spent on the pick). No pixel-space field was added back in:
+the pick itself has already happened by the time the struct is filled,
+so nothing downstream needs that space again. Both `input.h` (the
+struct's own doc comment) and `input.cpp`'s `pixel_scale()` (which
+originates the first half of the trap) now cross-reference each other
+and spell out which space each value in the file belongs to and why --
+per review's own framing, "the second pixel-vs-point trap in this
+codebase," so the comment is written to save the third person from
+finding it the hard way.
+
+**Sweep for other crossings**: grepped every `ImGui::SetNextWindowPos/
+SetNextWindowSize/SetCursorScreenPos` call and every
+`pixel_scale()`/`SDL_GetWindowSizeInPixels()`/`SDL_GetWindowSize()`
+call across `src/sdl/*.cpp`. The scan-progress overlay's
+`SetNextWindowPos()` (`main.cpp`) positions off `ImGui::GetMainViewport()
+->WorkPos`, ImGui's own logical-space viewport rect -- never touches
+`pixel_scale()`, so it was never at risk. Every `SDL_GetWindowSizeInPixels()`
+call feeds either GPU texture sizing (`gpu.cpp`) or `camera.c`'s aspect
+ratio via `sdl_viewport_size()` (`main.cpp`) -- both legitimately pixel-
+space consumers, no ImGui involved. The context-menu seam was the only
+crossing.
+
+**Minor -- undocumented divergence from `fsv_set_mode()`.**
+`app_switch_mode()` never had a call matching `fsv_set_mode()`'s
+`about(ABOUT_END)` ("ensure the About presentation is not up"). Not a
+functional gap -- this frontend's `about()` (`stubs.c`) is an
+unconditional `FALSE` no-op, so the call would be permanently dead code
+-- but it went unremarked. A one-line comment now names the omission at
+the call site.
+
+**Covering verification**: both arms rebuilt clean from scratch
+(`ninja -C builddir-sdl`, `ninja -C builddir-gtk`), zero warnings;
+`meson test scanfs` -> `1/1 OK` on both.
+
+Re-ran the synthetic right-click test, extended per review's own ask --
+proving the fix in a density-independent way, not just re-confirming
+1x behavior. A temporary, reverted `FSV_TEST_DENSITY` env-var override
+in `pixel_scale()` simulated a Retina-class density this sandbox's real
+display doesn't have, letting the fix be *disproven if wrong* rather
+than merely re-observed at a density where the bug is numerically
+invisible:
+
+| Run | Measured/forced density | `input.cpp` fill (logical / pixel) | `ui_main.cpp` consume (`win_x/win_y`) | Actual popup position |
+|---|---|---|---|---|
+| Real sandbox display | **1.0** (`SDL_GetWindowPixelDensity()`, unforced) | `(480.0,445.0)` / `(480.0,445.0)` -- identical at 1x | `(480.0,445.0)` | `(480.0,445.0)` |
+| `FSV_TEST_DENSITY=2.0` | **2.0** (forced) | `(240.0,222.5)` / `(480.0,445.0)` -- diverge exactly 2x | `(240.0,222.5)` | `(240.0,222.0)` (ImGui's own float->pixel-grid snap) |
+
+At forced 2x, the pick still resolved to the correct node -- the
+injected click's logical coordinate was `480/density, 445/density` so
+its *pixel* coordinate lands on the exact spot Task 4.2 verified is
+`src/camera.c`, keeping the test meaningful rather than just clicking
+into empty space at a different density. The popup opened at the
+**logical** pair in both rows, never the pixel one -- at 1x the two
+happen to coincide (which is precisely why this bug was invisible in
+this sandbox before review caught it by reading the code, not by
+looking at a screenshot), and at 2x they provably diverge by exactly
+the density factor while the popup still tracks the logical value.
+This is the density-independent proof review asked for: the assertion
+that matters is "`ui_main.cpp` received the *logical* pair" — true at
+both densities — not "the two numbers happened to match," which is
+only true at 1x and would have been true even with the bug still
+present in a 1x sandbox.
+
+All temporary harness code (the `FSV_TEST_DENSITY` override, the
+right-click injection script, and the `FSV_UI_TEST`-gated logging in
+`input.cpp`/`ui_main.cpp`) was fully reverted before commit --
+`grep -rn "TEMPORARY\|UITEST\|FSV_UI_TEST\|FSV_TEST_DENSITY"
+src/sdl/*.cpp src/sdl/*.h` is empty.
+
+## Why this architecture
+
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
 (scene building), `camera.c` (math), `colexp.c`, `color.c`, `common.c`
 and `animation.c` contain zero GTK widget code. All OpenGL calls live
@@ -1714,3 +1808,5 @@ code is kept.
 | 2026-08-07 | `load_filesystem()` stores `xgetcwd()`'s result (post-`scanfs()`), not the caller's `dir` argument, as the tracked root | `scanfs()` `chdir()`s into `dir` and never `chdir()`s back (`src/scanfs.c:320`); storing the caller's string verbatim would hand Rescan a stale, possibly-relative path that resolves against the *new* working directory on the next call — confirmed by reproducing the resulting fatal `g_error()` (`"Failed to change dir to src"`) before this fix and its absence after |
 | 2026-08-07 | Context-menu seam (`input.cpp` writes, `ui_main.cpp` reads) mirrors `viewport_node_for_id()`'s one-way pattern rather than a callback | keeps `input.cpp` ignorant of ImGui beyond the `WantCaptureMouse` check it already made; `ui_main_draw()` polls once per frame instead of `input.cpp` needing a function pointer into a file that doesn't exist yet when `input.cpp`'s API was designed (Task 4.1) |
 | 2026-08-07 | Full-screen `screencapture` in this sandbox returns a solid-black image regardless of window state | unlike prior tasks' "window occluded" finding, this session's virtual display has no capturable compositor output at all (confirmed capturing the whole screen, not just the fsv window); ImGui-overlay pixels (menu bar, popups, About/Controls windows) could not be visually verified this way, only via internal-state tracing plus the (unaffected) offscreen scene-only `gpu_screenshot_*()` path |
+| 2026-08-07 | `ContextMenuRequest` carries only logical coordinates (`win_x/win_y`), not a second pixel-space field alongside them | the pick has already happened (`input.cpp` resolved `node` via its own pixel-space locals) by the time the struct is filled, so nothing downstream ever needs pixel space again; a second field would be dead weight inviting the next person to reach for the wrong one |
+| 2026-08-07 | Verified the Retina/HiDPI coordinate fix with a temporary, reverted `FSV_TEST_DENSITY` env-var override in `pixel_scale()` rather than trusting the sandbox's real (1.0) display density | at 1x, logical and pixel coordinates coincide numerically, so a same-density-only re-test could not have told the pre-fix and post-fix code apart; forcing 2.0 made the two spaces provably diverge and confirmed the popup tracks the logical pair, not the pixel one, in both cases |

@@ -36,10 +36,36 @@ void input_handle_event(const SDL_Event *ev);
 //
 // `node` is kept as `void *` (really a `GNode *`) so this header stays
 // glib-free, matching input.h's own SDL-only, common.h-free style.
+//
+// Two coordinate spaces cross paths in this file, and mixing them up is
+// an easy, silent mistake (this is the *second* pixel-vs-point trap in
+// this codebase -- pixel_scale() below is the first):
+//
+//   - "Pixel" space: SDL mouse coordinates multiplied by pixel_scale()
+//     (the window's pixel density). This is what gpu_pick() and the
+//     swapchain/framebuffer want -- sdl_viewport_size() in main.cpp
+//     reports pixels via SDL_GetWindowSizeInPixels(). node_at_cursor()'s
+//     `x, y` locals below are in this space.
+//   - "Logical"/window space: plain SDL mouse coordinates, never
+//     multiplied by density. This is what ImGui wants throughout its
+//     API (ImGui::SetNextWindowPos(), io.MousePos, ...) --
+//     imgui_impl_sdl3.cpp feeds it raw SDL event x/y and sizes
+//     io.DisplaySize from SDL_GetWindowSize() (logical), never
+//     SDL_GetWindowSizeInPixels(). On a 2x Retina display the two spaces
+//     differ by exactly the density factor; a value from one silently
+//     misplaces a widget or misses a pick if fed into the other's API.
+//
+// `win_x`/`win_y` below are deliberately **logical**, i.e. the raw event
+// coordinates node_at_cursor()'s caller had *before* pixel_scale() was
+// applied -- because their only consumer is ui_main.cpp's
+// ImGui::SetNextWindowPos(). There is no pixel-space field here: the
+// pick itself already happened (input.cpp resolved `node` via the
+// pixel-space `x, y` locals) by the time this struct is filled, so
+// nothing downstream needs that space again.
 struct ContextMenuRequest {
 	bool pending;
-	void *node; // GNode*
-	int x, y;   // viewport pixel coordinates, for popup placement
+	void *node;         // GNode*
+	float win_x, win_y; // LOGICAL window coords -- see above. Not pixels.
 };
 
 // Returns the most recent right-click-on-a-node request and clears the

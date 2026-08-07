@@ -83,8 +83,10 @@ static Uint8 g_capture_button = 0;
 
 // Context-menu request seam (Task 5.1) -- see input.h. Written only from
 // the right-click branch below; read/cleared only by
-// input_take_context_menu_request().
-static ContextMenuRequest g_context_menu_request = { false, nullptr, 0, 0 };
+// input_take_context_menu_request(). win_x/win_y are LOGICAL window
+// coordinates (input.h's doc comment), never the pixel_scale()-scaled
+// ones this file uses for picking -- see the fill site below.
+static ContextMenuRequest g_context_menu_request = { false, nullptr, 0.0f, 0.0f };
 
 // ---- Helpers ------------------------------------------------------------
 
@@ -96,6 +98,12 @@ static ContextMenuRequest g_context_menu_request = { false, nullptr, 0, 0 };
 // space, which needs the same scaling to land on the pixel grid gpu_pick()
 // and the swapchain both use (sdl_viewport_size() in main.cpp reports
 // pixels, via SDL_GetWindowSizeInPixels()).
+//
+// This is the first of two pixel-vs-logical traps in this file: every
+// value this function's result touches is pixel space and must never
+// reach an ImGui API (which wants logical/window space throughout). The
+// second is input.h's ContextMenuRequest -- read its doc comment before
+// adding a new field or a new consumer of `x, y` below.
 static float
 pixel_scale(SDL_WindowID window_id)
 {
@@ -231,8 +239,14 @@ input_handle_event(const SDL_Event *ev)
 				filelist_show_entry(g_indicated_node);
 				g_context_menu_request.pending = true;
 				g_context_menu_request.node = g_indicated_node;
-				g_context_menu_request.x = (int)x;
-				g_context_menu_request.y = (int)y;
+				// Deliberately ev->button.x/y (logical), NOT the local
+				// `x, y` a few lines up (pixel_scale()-scaled, already
+				// spent on node_at_cursor()'s pick above) -- see
+				// input.h's ContextMenuRequest doc comment. Feeding the
+				// pixel-space pair here would open the popup at up to
+				// 2x its intended position on a Retina display.
+				g_context_menu_request.win_x = ev->button.x;
+				g_context_menu_request.win_y = ev->button.y;
 			}
 		}
 		// ctrl_key && btn1 falls through here with no node-selection

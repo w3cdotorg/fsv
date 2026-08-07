@@ -117,7 +117,15 @@ draw_context_menu(void)
 	ContextMenuRequest req = input_take_context_menu_request();
 	if (req.pending) {
 		g_context_menu_node = req.node;
-		ImGui::SetNextWindowPos(ImVec2((float)req.x, (float)req.y));
+		// req.win_x/win_y are logical window coordinates (input.h's doc
+		// comment) -- exactly the space ImGui::SetNextWindowPos() wants.
+		// Do not substitute a pixel_scale()-scaled value here: ImGui's
+		// own SDL3 backend never density-scales (imgui_impl_sdl3.cpp
+		// sizes io.DisplaySize from SDL_GetWindowSize(), not
+		// SDL_GetWindowSizeInPixels()), so a pixel-space coordinate
+		// would open this popup at up to 2x its intended position on a
+		// Retina display.
+		ImGui::SetNextWindowPos(ImVec2(req.win_x, req.win_y));
 		ImGui::OpenPopup("node_context_menu");
 	}
 

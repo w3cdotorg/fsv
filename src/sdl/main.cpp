@@ -186,6 +186,11 @@ app_switch_mode(int mode_int)
 	geometry_init(mode);
 	camera_init(mode, /* initial_view */ FALSE);
 	globals.fsv_mode = mode;
+	// fsv_set_mode()'s `about(ABOUT_END)` ("ensure that About presentation
+	// is not up") is deliberately not ported here: this frontend has no
+	// About/splash 3D presentation to dismiss in the first place (Task
+	// 3.3's about.c deviation) -- stubs.c's about() is an unconditional
+	// FALSE no-op, so the call would be permanently inert.
 	schedule_event((void (*)())initial_camera_pan, (char *)"", 1);
 }
 
