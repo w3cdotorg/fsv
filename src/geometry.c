@@ -89,7 +89,12 @@ node_set_color(GNode *node)
 static const RGBcolor color_black = {0, 0, 0};
 
 /* Draws an unlit batch in a flat color: the black folder outlines and
- * leaf "X" marks. (Was drawVertexPos( ), which built its own VBO.) */
+ * leaf "X" marks. (Was drawVertexPos( ), which built its own VBO.) Every
+ * current caller passes &color_black, so unlike draw_lit()'s color!=NULL
+ * path this needs no render-mode check: it already paints id 0 in the
+ * select pass (gpu_pick(), Task 4.2) exactly as it paints visible black
+ * in the normal pass -- same reasoning as the fix there, just already
+ * satisfied by the color this function has always drawn. */
 static void
 draw_unlit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
 	   const RGBcolor *color)
@@ -109,8 +114,27 @@ draw_lit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
 {
 	if (color != NULL) {
 		g_assert(node == NULL);
-		gpu_set_color(color->r, color->g, color->b, 1.0f);
-		gpu_set_lighting(1);
+		if (gpu_render_mode() == FSV_RENDER_NORMAL) {
+			gpu_set_color(color->r, color->g, color->b, 1.0f);
+			gpu_set_lighting(1);
+		} else {
+			/* Select pass (gpu_pick(), Task 4.2): this batch has
+			 * no backing GNode -- currently only TreeV's branch/
+			 * loop connectors (treev_gldraw_loop/_inbranch/
+			 * _outbranch) call draw_lit() with a fixed color --
+			 * so there is no node id to paint. Draw it as id 0
+			 * (black, unlit) rather than skipping the draw
+			 * entirely: skipping would drop it from the pick
+			 * pass's depth buffer, letting a click on a branch
+			 * connector pass *through* it to whatever node
+			 * happens to sit behind it -- occlusion in the pick
+			 * pass has to match what is actually on screen. Id 0
+			 * decodes to "nothing here", which is the correct
+			 * pick result for a connector: it isn't a node, and
+			 * this way it still occludes whatever is behind it. */
+			gpu_set_color(0.0f, 0.0f, 0.0f, 1.0f);
+			gpu_set_lighting(0);
+		}
 	}
 	else {
 		g_assert(node != NULL);

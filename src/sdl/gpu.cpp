@@ -1765,10 +1765,21 @@ gpu_pick(int x, int y)
 		SDL_GPUFence *fence =
 		    SDL_SubmitGPUCommandBufferAndAcquireFence(g_cmd);
 		g_cmd = nullptr;
-		if (fence != nullptr) {
-			SDL_WaitForGPUFences(g_device, true, &fence, 1);
-			SDL_ReleaseGPUFence(g_device, fence);
+		if (fence == nullptr) {
+			// Without a fence there is no way to know the copy
+			// has landed -- mapping the transfer buffer now could
+			// read stale or undefined bytes and hand back a
+			// plausible-looking but bogus id. Fail the pick
+			// instead of guessing, like every other failure path
+			// in this function.
+			SDL_Log("gpu: pick fence acquire failed: %s",
+			    SDL_GetError());
+			SDL_ReleaseGPUTransferBuffer(g_device, download);
+			SDL_ReleaseGPUTexture(g_device, pick_texture);
+			return 0;
 		}
+		SDL_WaitForGPUFences(g_device, true, &fence, 1);
+		SDL_ReleaseGPUFence(g_device, fence);
 
 		const Uint8 *pixel = (const Uint8 *)
 		    SDL_MapGPUTransferBuffer(g_device, download, false);

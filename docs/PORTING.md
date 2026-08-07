@@ -1397,6 +1397,87 @@ hover/click/fly-to path, not just `gpu_pick()` itself:
   the `target == 1` combination; all three are far under the 50 ms
   click-frequency budget.
 
+### Fix round (post-review)
+
+Code review on the original submission approved the byte order, Y-flip,
+command-buffer isolation, and clear-color fix, but found one Important
+issue and one Minor one:
+
+1. **TreeV branch/loop connectors leaked a bogus id into the pick
+   pass.** `treev_gldraw_loop()`/`_inbranch()`/`_outbranch()`
+   (`src/geometry.c`) draw the branch geometry connecting platforms via
+   `draw_lit(FSV_TRIANGLE_STRIP, vert, vert_cnt, &branch_color, NULL)` —
+   the `color != NULL` path, used for fixed-color batches that have no
+   backing `GNode`. That path called `gpu_set_color()` directly with no
+   render-mode check at all, so during the select pass it painted
+   `branch_color` (`{0.5, 0.0, 0.0}`) — a color that decodes to a
+   non-zero node id (confirmed empirically at 126, close to the
+   predicted 128 for `0.5 * 255`) rather than "nothing here". Clicking
+   a branch connector in TreeV therefore silently selected whatever
+   node happened to occupy that id's slot in the node table — wrong,
+   and non-obviously wrong, since it never crashed.
+
+   Fixed in `draw_lit()` itself (the one place this branch exists),
+   using the same `gpu_render_mode()` check `node_set_color()` already
+   uses: in the select pass, draw fixed-color geometry as id 0 (black,
+   unlit) instead of skipping it. Skipping was considered and rejected
+   — it would drop the connector from the pick pass's depth buffer,
+   letting a click *through* a branch to whatever node sits behind it,
+   which would make pick-pass occlusion diverge from what is actually
+   on screen. Id 0 keeps the occlusion (the connector still blocks the
+   depth test) while correctly reporting "not a node" for a batch that
+   never was one. `draw_unlit()` needed no equivalent change: every
+   current caller already passes `&color_black`, so it was already
+   painting id 0 in the select pass by construction — documented in
+   its own comment now rather than left as an unstated fact.
+
+   Verified the fix actually closes the reported bug, not just an
+   incidental zero: reverted the `draw_lit()` change, rebuilt, and
+   re-clicked the same branch-connector pixel — got id 126 (bogus)
+   again — then restored the fix and confirmed id 0.
+
+2. **Re-verified every other `draw_lit`/`draw_unlit` call site with a
+   fixed (non-node) color** for the same class of bug (`grep -n
+   "draw_lit(\|draw_unlit(" src/geometry.c`): MapV's folder outline
+   (`mapv_gldraw_folder`) and TreeV's leaf "X" mark both pass
+   `&color_black` to `draw_unlit()` — benign, per the point above.
+   DiscV's folder draw (`discv_gldraw_folder`) is an empty stub ("To be
+   written...") — draws nothing, so nothing to guard. The node cursor
+   (`mapv_draw_cursor`/`treev_draw_cursor`, drawn via raw `gpu_draw()`
+   calls with colors from `cursor_hidden_part()`/`cursor_visible_part()`
+   — gray and white, not black) is gated behind `if (high_detail)` in
+   all three of `discv_draw()`/`mapv_draw()`/`treev_draw()`, and
+   `gpu_pick()` always calls `geometry_draw(FALSE)` — so the cursor
+   never draws during a pick regardless of its color, confirmed by
+   reading all three `*_draw()` functions, not just assumed. No fix
+   needed there today; if a future task lets the cursor draw during a
+   select pass, it would need the same treatment as the branch
+   connectors, not the treatment `draw_unlit()` already has for free.
+
+3. **Minor: a failed fence acquire in `gpu_pick()` fell through to a
+   read anyway.** If `SDL_SubmitGPUCommandBufferAndAcquireFence()`
+   returned `nullptr`, the old code skipped the wait (nothing to wait
+   on) and went straight to `SDL_MapGPUTransferBuffer()`, which could
+   return stale or undefined bytes from a copy that was never known to
+   have landed — decoding into a plausible-looking but bogus id
+   instead of a signaled failure. Now logs and returns 0, releasing the
+   transfer buffer and pick texture first, matching every other failure
+   path in the function.
+
+Re-verified after both fixes: both arms rebuild clean
+(`ninja -C builddir`, `ninja -C builddir-sdl`), zero warnings;
+`meson test scanfs` → `1/1 OK` on both. Headed TreeV test on `src`
+(1280×800, `--treev`): clicking the red branch stem at `(645, 650)` →
+id 0, no selection; clicking leaf tiles at `(392, 445)` and `(566,
+178)` → `src/TODO` and `src/gpu.h` respectively, both correct; empty
+sky at `(100, 100)` → id 0. Re-ran the MapV `camera.c` pick at `(480,
+445)` from the original verification → still id 9 → `src/camera.c`,
+confirming no regression. The visible TreeV render (a normal,
+non-`--screenshot`-mode-agnostic frame) is pixel-identical before and
+after the fix — the branch connector is still visibly red — confirming
+the id-0 substitution is select-pass-only and never leaks into what the
+user sees.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -1439,3 +1520,4 @@ code is kept.
 | 2026-08-07 | `gpu_pick()` reuses `gpu_screenshot_*()`'s `g_capture_texture` redirect instead of a second offscreen-target mechanism | `gpu_scene_begin()` already keys `g_color_target`/`g_target_index` off `g_capture_texture`; a second mechanism would duplicate that branch for no benefit — the two callers (screenshot, pick) never run concurrently |
 | 2026-08-07 | `gpu_scene_end()`'s clear color branches on `g_render_mode == FSV_RENDER_SELECT` rather than giving picking its own render-pass function | the dark-slate clear (Task 2.2) decodes as a non-zero, bogus node id for any pixel the id pass draws nothing over (e.g. empty sky); one branch on already-shared state was simpler than a parallel copy of `gpu_scene_end()` |
 | 2026-08-07 | `gpu_pick()` acquires its own `SDL_GPUCommandBuffer` rather than piggybacking on the main loop's | `input_handle_event()` always runs before that iteration's `gpu_frame_begin()`, so `g_cmd` is provably null at call time; a dedicated command buffer keeps the pick's copy pass and fence wait from ever touching the frame the user is about to see |
+| 2026-08-07 | `draw_lit()`'s fixed-color path draws id 0 (black) in the select pass instead of skipping the draw | skipping would remove TreeV's branch/loop connectors from the pick pass's depth buffer, letting a click pass through to whatever node sits behind them — pick-pass occlusion has to match the visible scene; id 0 keeps the occlusion while correctly reporting "not a node" |
