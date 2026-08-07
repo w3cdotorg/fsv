@@ -178,11 +178,11 @@ main(int argc, char **argv)
 		g_frame_requested = false;
 	}
 
-	// Shutdown order per the vendored example: renderer backend, then
-	// platform backend, then the ImGui context, then SDL objects.
+	// Shutdown order per the vendored example: platform backend, then
+	// renderer backend, then the ImGui context, then SDL objects.
 	SDL_WaitForGPUIdle(device);
-	ImGui_ImplSDLGPU3_Shutdown();
 	ImGui_ImplSDL3_Shutdown();
+	ImGui_ImplSDLGPU3_Shutdown();
 	ImGui::DestroyContext();
 
 	SDL_ReleaseWindowFromGPUDevice(device, g_window);

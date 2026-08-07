@@ -356,6 +356,27 @@ Shutdown` → `ImGui::DestroyContext` → `SDL_ReleaseWindowFromGPUDevice`
 → `SDL_DestroyGPUDevice`/`SDL_DestroyWindow`/`SDL_Quit` → `return 0`
 sequence at the bottom of `main()`).
 
+**Idle CPU:** `SDL_WaitEventTimeout(nullptr, 16)` bounds the loop to
+roughly a 16 ms tick when nothing animates, rather than a tight
+unthrottled spin (which would pin a core at ~100%) — this is the exact
+idiom named in the brief. Measured with `ps` while idle: **6-13%**, not
+literally 0%. Two things account for that, both expected at this
+stage: (1) the loop still runs a full `ImGui::NewFrame`/`Render` and
+GPU submit every ~16 ms even when idle — a true zero-CPU idle would
+skip rendering entirely when neither `animating` nor
+`g_frame_requested` is set, which is out of scope for this task's
+brief-specified mechanism; (2) `SDL_CreateGPUDevice(..., /*debug*/
+true, ...)` (also brief-specified) enables Metal API Validation, which
+adds meaningful per-command-buffer overhead. Not a busy-spin bug; just
+worth being precise about "near zero" here rather than overclaiming.
+
+**Self-review caught one bug before commit:** the first draft had
+`ImGui_ImplSDLGPU3_Shutdown()` before `ImGui_ImplSDL3_Shutdown()`
+(renderer-then-platform) — backwards from the vendored example's
+platform-then-renderer order. Fixed to match the example exactly, per
+this task's explicit "follow the example" instruction for shutdown
+order.
+
 **Regression checks:** `meson test -C builddir-sdl scanfs` → `1/1
 fsv:scanfs OK`. Default `meson setup builddir-gtk-check` (no
 `-Dfrontend`) still configures 8 targets with no SDL/imgui subproject
