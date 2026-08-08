@@ -4314,8 +4314,10 @@ Each axis is zero inside a `FSN_FLIGHT_DEAD_ZONE_PX` (6 px) dead zone and
 linear in the offset past it (`*_SCALE`), so full deflection is reached
 ~160 px out — a comfortable drag inside any viewport. Shift *replaces*
 forward motion rather than adding to it, so the gesture is a pure
-ascent/descent, and it is read live on every motion event rather than
-latched at the press, so it can be tapped mid-flight.
+ascent/descent, and it is read live rather than latched at the press, so
+it can be tapped mid-flight — on every motion event, and (fix round,
+item 3 below) on the Shift press/release itself, so it works with the
+pointer parked too.
 
 `camera->phi` is deliberately untouched: fsn's flight was planar, the
 pitch is part of the viewpoint rather than part of the flying, and there
@@ -4500,6 +4502,122 @@ short-circuited to `0` and the run repeated: still exactly **2 misses**,
 the second logged with the key still holding the *old* node pointer while
 `gen=2 keygen=1`, followed by 482 clean hits. Both probes reverted before
 the commit.
+
+#### Task B2 fix round (code review)
+
+Two important findings and four minors. Commits `b3e6cd2` (input.cpp) and
+`7bd76ff` (camera.c).
+
+**1. A stale `g_flying` swallowed Escape (important).** `camera.c` ends a
+flight *unilaterally* whenever something else claims the camera:
+`camera_look_at_full()` (a click on a pedestal, a tree row, Go Back, the
+rail's Look At), `camera_birdseye_view()` (the rail's Bird's Eye) and
+`camera_init()` (a mode switch, Reset, a rescan). None of those go
+through `input.cpp`, so its `g_flying` stayed true with no flight behind
+it — and every branch gated on it then misfired. The visible one:
+Escape's flight check consumed the keypress on a do-nothing
+`stop_flight()` instead of falling through to the collapse logic, so
+**Escape appeared dead for as long as the middle button stayed down**.
+The middle-drag was left inert after a mode switch for the same reason.
+
+Fixed by reconciling once at the top of `input_handle_event()`
+(`reconcile_flight_state()`: `if (g_flying && !camera_flight_active())
+g_flying = false;`), which covers every unilateral-end path at once
+rather than patching the Escape branch alone. Only that direction needs
+reconciling — `camera.c` never *starts* a flight by itself.
+
+**2. Yaw normalization made the next pan whip the long way round
+(important).** `morph()` interpolates linearly between two *numbers*, and
+theta is an angle. `camera_flight_tick()` normalizes theta into [0, 360]
+on every tick, so a viewer who has turned slightly past the wrap point
+leaves theta at ~3° — and `fsn_look_at()`'s morph to `FSN_CAMERA_THETA`
+(270) then spun **267° the long way**, over a second of gratuitous yaw,
+instead of the 93° short arc.
+
+`unwrap_theta_toward()` shifts `camera->theta` by whole turns until it is
+within 180° of the target before the morph is armed. Free, because every
+other consumer of theta takes its sine or cosine — theta and theta ± 360
+are the same heading everywhere; only the morph, which does arithmetic on
+the number itself, can tell them apart. Applied to `fsn_look_at()` and to
+`camera_birdseye_view()`'s FSN going-up arm, which is the other pan a
+flight can hand a wrapped heading to. **Not** applied to
+`camera_revolve()`, whose identical normalization gives DiscV/MapV/TreeV
+the same long-way-round pan after a manual revolve: pre-existing upstream
+behavior in three modes this task is not touching, recorded here rather
+than changed under cover of an fsn task.
+
+**3. Shift was only sampled on motion events (minor).** The rate model
+makes holding the pointer still a legitimate way to fly — and no motion
+event arrives while it is still, so pressing Shift did nothing until the
+user jiggled the mouse. The last offset handed to
+`camera_flight_update()` is now cached and re-applied from Shift
+`KEY_DOWN`/`KEY_UP`. `SDL_GetModState()` is read at apply time rather
+than derived from the event, so releasing one Shift while the other is
+held correctly stays "Shift down". The claim in this document's Task B2
+note that Shift "is read live … so it can be pressed and released
+mid-flight" was true only while the pointer was moving; it is now true
+unconditionally.
+
+**4. `camera_flight_end()` depended on `globals.fsv_mode` (minor).** It
+called `camera_update_scrollbars(TRUE)`, which switches on the current
+mode and ends in `SWITCH_FAIL` for `FSV_NONE` — and two of its callers
+run at moments when that variable does not describe the world:
+`camera_init()`, which `fsv_set_mode()` calls *after* the new mode's
+`geometry_init()` but *before* assigning `globals.fsv_mode`, and
+`input_reset()`, which runs around a rescan. It was safe only by an
+accident of ordering, which is exactly the kind of thing a later
+reordering breaks silently. Removed rather than defended: the call was
+redundant in both reachable cases (a flight that moved the camera already
+pushed state from its last tick; one that never moved it has nothing to
+push), and dropping it makes the function mode-independent by
+construction. Nothing else relied on it — the only reader of that state
+is the rail's Tilt/Height sliders, which are disabled in FSN mode
+anyway. The `camera_init()` comment added in `130dea5`, which reasoned
+about the old ordering hazard, is replaced by one that just points at the
+new invariant.
+
+**5–6. Comments (minor).** `cancel_pan_for_manual_control()` was explicit
+about skipping `geometry_camera_pan_finished()` but silent about
+`filelist_show_entry()` — a no-op in the SDL frontend today
+(`src/sdl/stubs.c`) but real in the GTK one and a candidate to become
+real here, so it now says why: the pan's destination never became the
+current node, so nothing should select it. And `camera.c`'s `fsn-style.h`
+include comment still claimed the file was included for
+`FSN_GENERATION_GAP` alone.
+
+**Fix-round verification.** Same throwaway `SDL_PushEvent()` harness as
+the Task B2 note, extended and again deleted before commit. Both arms
+rebuilt, `meson test` **4/4 on each**.
+
+- **The Escape repro, both directions.** Script: FSN, middle-press,
+  fly, `camera_look_at(root_dnode)` (ends the flight from camera.c's
+  side, middle button still down), then Escape.
+  `dirtree_entry_expanded(root_dnode)` logged either side of the
+  keypress. **With `reconcile_flight_state()` commented out: 1 → 1** —
+  the press vanished, exactly as reported. **With it: 1 → 0** — Escape
+  collapses as normal.
+- **Escape during a *genuine* flight still stops the flight and nothing
+  else** (the original B2 behavior, re-checked because the reconcile sits
+  in front of it): `flying=1 → flying=0`, `rootexp` unchanged at 1.
+- **Short-arc pan.** Flew forward, then yawed left ~90° until theta
+  wrapped to **3.673**. `camera_look_at(root_dnode)` logged immediately
+  before and after the call: theta **3.673 → 363.673**, i.e. unwrapped in
+  place, |363.673 − 270| = **93.7° ≤ 180**. The pan then swept
+  monotonically down through 328° toward 270 with no wrap-around spin.
+- **Shift while parked.** Middle-press, one motion to full forward
+  deflection, then **no further motion event at all** — just
+  `SDL_SetModState()` + a synthetic Shift `KEY_DOWN`. Altitude went
+  212.34 → 401.62 in 0.60 s = **315 u/s** (`FSN_FLIGHT_ALT_MAX` is 320)
+  while x/y froze after one frame of in-flight residual (5.6 units ≈ one
+  640 u/s frame, the queued event being drained on the next iteration).
+  A synthetic Shift `KEY_UP`, again with no motion event, resumed forward
+  travel at **628 u/s** and stopped the climb.
+- **Regressions.** Flight-during-an-intro-pan still breaks the pan with a
+  continuous pose and `access` back to 1 (target y 1097.03 → 1096.16);
+  plain forward flight still clamps at **640 u/s**; MapV middle-drag
+  still dollies (`flying=0` throughout, `distance` 1468 → 2042 → 1244,
+  `theta` and `target` untouched) and the new Shift key handling is inert
+  there; `--screenshot` renders unchanged in both FSN and MapV.
 
 ## Why this architecture
 
