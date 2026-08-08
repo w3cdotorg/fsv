@@ -96,6 +96,7 @@ draw_controls_window(bool *open)
 				{ "Ctrl + left-button drag", "Revolve camera" },
 				{ "Left click (press)", "Select node under cursor" },
 				{ "Left click (release)", "Fly camera to selected node" },
+				{ "Double-click a directory", "Toggle expand/collapse (addition -- see docs/PORTING.md)" },
 				{ "Right click", "Context menu for node under cursor" },
 			};
 			for (const auto &row : rows) {

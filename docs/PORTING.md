@@ -1147,7 +1147,7 @@ capture), each with a direct SDL equivalent, below.
 | Revolve | Ctrl+left drag, `GDK_CONTROL_MASK` + `GDK_BUTTON1_MASK` | Ctrl+left drag, `SDL_GetModState() & SDL_KMOD_CTRL` + `SDL_BUTTON_LMASK` | Identical math: `camera_revolve(0.5*dx, 0.5*dy)` |
 | Select + fly-to | Left click (press picks/highlights, release flies) | Same, split across `SDL_EVENT_MOUSE_BUTTON_DOWN`/`_UP` | Pick routes through `gpu_pick()` (Task 4.2 stub) |
 | Context menu | Right click → `context_menu()` (GTK popup) | Right click → logged, `filelist_show_entry()` called for real | Inert until Task 5.1's ImGui menu |
-| Double-click | Explicit no-op (`GDK_2BUTTON_PRESS: break;`) | No branch on `ev->button.clicks` | Reproduces the no-op by construction — SDL has no extra event to ignore |
+| Double-click | Explicit no-op (`GDK_2BUTTON_PRESS: break;`) | No branch on `ev->button.clicks` at Task 4.1 time; **superseded** — a post-port addition now toggles expand/collapse for a directory (see "Post-port additions" below) | Task 4.1 itself reproduced the no-op by construction — SDL had no extra event to ignore. The later addition is a deliberate, labeled deviation from that parity, not a silent drift back into it |
 | Scroll wheel | **Does not exist** | `SDL_EVENT_MOUSE_WHEEL` → `camera_dolly()` | **Addition**, not a port — brief and verification bar ask for it explicitly |
 | Cursor icon | `GDK_DOUBLE_ARROW`/`GDK_FLEUR` swap during dolly/revolve, reset on leave | Not ported | Cosmetic only; no gesture math depends on it |
 | Splash/About guard | `about(ABOUT_END)` + `fsv_mode == FSV_SPLASH` early-outs | Not ported | This frontend has no About/splash presentation at all (Task 3.3); both checks are permanently dead code here |
@@ -3042,6 +3042,48 @@ exit. They are greyed out during a recording now (new
 `app_is_recording()`), the same way they already are during a scan.
 Teaching the recording loop to run `scanfs()` mid-capture was rejected:
 it would free the tree the recording script's cues hold `GNode *` into.
+
+## Post-port additions
+
+Gestures/features added to the SDL frontend *after* the port itself was
+considered done (Task 6.5's retrospective above) — i.e. not present in
+upstream `jabl/fsv`, and not something Task 4.1's original gesture port
+carried forward either. Kept in their own section, separate from the
+task-by-task narrative above, since they are new user-facing behavior
+rather than a GTK→SDL translation of existing behavior. The
+scroll-wheel dolly (Task 4.1, in the gesture table above) is the same
+kind of thing, just labeled inline instead of listed here since it
+shipped as part of a task rather than afterward.
+
+- **Double-click a directory to expand/collapse it** (`src/sdl/
+  input.cpp`'s `SDL_EVENT_MOUSE_BUTTON_UP` case): releasing the second
+  click of a double-click over a directory node now calls `colexp()` —
+  `COLEXP_EXPAND` if `dirtree_entry_expanded()` reports it collapsed,
+  `COLEXP_COLLAPSE_RECURSIVE` if expanded — instead of the ordinary
+  `camera_look_at()`. This is the exact same single-level toggle
+  `ui_main.cpp`'s context menu (Expand/Collapse) and `ui_panels.cpp`'s
+  directory-tree-panel arrow click already call; no new colexp/dirtree
+  entry point was added. The first click of the pair still runs the
+  ordinary press/release select-and-fly-to behavior unchanged (so a
+  double-click both flies the camera to the directory *and* expands
+  it) — only the *second* release is intercepted, and only when the
+  indicated node is a directory (`NODE_IS_DIR()`); double-clicking a
+  file or empty space is unaffected. Panel sync needs no extra wiring:
+  `colexp()` already calls `dirtree_entry_expand()`/
+  `dirtree_entry_collapse_recursive()`, which route straight into
+  `ui_panels.cpp`'s tree-row state, the same path the panel's own arrow
+  click and the context menu already use.
+  - Neither `viewport.c` nor Task 4.1's port of it gave the 3D viewport
+    any double-click behavior at all — see the (now superseded) gesture
+    table row above and this file's own header comment in
+    `input.cpp`, which documents both the original no-op and the new
+    toggle side by side.
+  - GTK frontend (`src/viewport.c`) is untouched — this is an
+    SDL-frontend-only addition; `git diff --stat src/viewport.c` against
+    this change is empty.
+  - Documented in `README.md`'s Controls table and the in-app
+    Help → Controls window (`src/sdl/ui_main.cpp`), both marked as an
+    addition the same way the scroll-wheel row already is.
 
 ## Why this architecture
 

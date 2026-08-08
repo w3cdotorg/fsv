@@ -7,18 +7,27 @@
 // equivalent) are called out in comments here and summarized in
 // docs/PORTING.md.
 //
-// Double-click: viewport.c's GDK_2BUTTON_PRESS case is `/* Ignore second
-// click of a double-click */ break;` -- the *first* click's ordinary
-// GDK_BUTTON_PRESS has already run by the time GDK additionally reports
-// the double-click, and viewport.c adds nothing on top of it. There is no
-// "activate" / warp-into-directory / open-file action in the 3D viewport
-// itself (that exists in dirtree.c, for the separate directory-tree pane,
-// and is Task 5.2's ImGui panel to port -- out of scope here). SDL has no
-// event to ignore in the first place: SDL_EVENT_MOUSE_BUTTON_DOWN fires
-// once per physical press with a `clicks` count (1, 2, 3...) attached,
-// rather than GDK's extra event on top. Not branching on
-// `ev->button.clicks` below reproduces viewport.c's actual behavior
-// exactly: a double-click is just two ordinary clicks in a row.
+// Double-click, upstream parity: viewport.c's GDK_2BUTTON_PRESS case is
+// `/* Ignore second click of a double-click */ break;` -- the *first*
+// click's ordinary GDK_BUTTON_PRESS has already run by the time GDK
+// additionally reports the double-click, and viewport.c adds nothing on
+// top of it. SDL has no event to ignore in the first place:
+// SDL_EVENT_MOUSE_BUTTON_DOWN fires once per physical press with a
+// `clicks` count (1, 2, 3...) attached, rather than GDK's extra event on
+// top. Not branching on `ev->button.clicks` in the DOWN case below
+// reproduces that no-op by construction.
+//
+// Double-click-to-expand, ADDITION -- not a port, not upstream parity:
+// the BUTTON_UP case below *does* branch on `ev->button.clicks` for one
+// specific case -- releasing the second click of a double-click over a
+// directory toggles its collapse/expand state (colexp(), the same
+// single-level toggle ui_main.cpp's context menu and ui_panels.cpp's
+// tree-row arrow already use) instead of the ordinary camera_look_at().
+// Requested post-port, since neither viewport.c nor this port's earlier
+// tasks gave the 3D viewport any directory-activation gesture at all
+// (see docs/PORTING.md's "Post-port additions"). A file or empty space
+// under the second click keeps the ordinary camera_look_at() -- the
+// gate only fires for a directory node.
 #include "input.h"
 
 #include <imgui.h>
@@ -28,6 +37,8 @@
 extern "C" {
 #include "common.h"
 #include "camera.h"
+#include "colexp.h" /* colexp() -- double-click-to-expand, see header comment above */
+#include "dirtree.h" /* dirtree_entry_expanded() -- same toggle test ui_main.cpp's context menu uses */
 #include "filelist.h" /* filelist_show_entry() */
 #include "geometry.h" /* geometry_highlight_node(), geometry_should_highlight() */
 #include "viewport.h" /* viewport_node_for_id() */
@@ -223,9 +234,32 @@ input_handle_event(const SDL_Event *ev)
 		const double x = ev->button.x * scale;
 		const double y = ev->button.y * scale;
 
+		// Addition, not a port: viewport.c's original condition here is
+		// a plain `if (camera_moving())`. `camera_moving()` is *always*
+		// still true on this double-click's second press: the first
+		// click's BUTTON_UP just started a camera_look_at() pan (below),
+		// and every visualization mode's minimum pan time
+		// (camera.c's *_MIN_PAN_TIME: 0.5s DiscV/MapV, 1.0s TreeV) is
+		// longer than a physical double-click's inter-click interval.
+		// Without carving out clicks>=2 here, the "impatient user"
+		// branch immediately below would finish that pan and null
+		// g_indicated_node on *every* double-click over a node, before
+		// BUTTON_UP's double-click-to-expand toggle ever got a node to
+		// act on -- silently making the whole feature unreachable
+		// through real double-clicks despite working in a synthetic
+		// same-position test that doesn't hit this same-target-pan race.
+		const bool impatient_reclick = camera_moving() && ev->button.clicks < 2;
+
 		if (camera_moving()) {
-			// "Yipe! Impatient user" -- viewport.c's own comment.
+			// "Yipe! Impatient user" -- viewport.c's own comment. Always
+			// finishes an in-progress pan on any new press, exactly as
+			// before -- only whether the click is then *discarded*
+			// (impatient_reclick) or allowed to pick, right below,
+			// changed for the clicks>=2 case above.
 			camera_pan_finish();
+		}
+
+		if (impatient_reclick) {
 			g_indicated_node = NULL;
 		} else if (!ctrl_key) {
 			if (btn2)
@@ -296,8 +330,34 @@ input_handle_event(const SDL_Event *ev)
 		const bool ctrl_key = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
 		const bool btn1 = ev->button.button == SDL_BUTTON_LEFT;
 
-		if (btn1 && !ctrl_key && !camera_moving() && g_indicated_node != NULL)
-			camera_look_at(g_indicated_node);
+		if (btn1 && !ctrl_key && !camera_moving() && g_indicated_node != NULL) {
+			// Addition, not a port -- see this file's header comment.
+			// `g_indicated_node` is the pick already made on this
+			// click's BUTTON_DOWN (the same node the plain
+			// camera_look_at() below would fly to); this does not
+			// re-pick. Gated on NODE_IS_DIR() the same way
+			// ui_main.cpp's context menu only offers Expand/Collapse
+			// for directories (colexp() itself g_asserts
+			// NODE_IS_DIR()) -- a file or empty space under the
+			// second click falls through to the ordinary
+			// camera_look_at() below, unchanged.
+			if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node)) {
+				// Same single-level toggle ui_main.cpp's context menu
+				// (Expand/Collapse) and ui_panels.cpp's tree-row arrow
+				// click use: dirtree_entry_expanded() is the tree
+				// row's own flag (flipped synchronously the instant
+				// colexp() starts), not DIR_EXPANDED()'s deployment-
+				// animation progress -- see ui_main.cpp's
+				// draw_context_menu() comment for why that distinction
+				// matters here too.
+				if (dirtree_entry_expanded(g_indicated_node))
+					colexp(g_indicated_node, COLEXP_COLLAPSE_RECURSIVE);
+				else
+					colexp(g_indicated_node, COLEXP_EXPAND);
+			} else {
+				camera_look_at(g_indicated_node);
+			}
+		}
 
 		end_capture(ev->button.button);
 		break;
