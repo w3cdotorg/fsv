@@ -3729,6 +3729,174 @@ bucket-persistence assertions inside `test_color_persistence`). GTK:
 regardless of whether the full GTK `fsv` executable also happens to
 build on that host — it did here).
 
+### Task A3 verification (fsn-style camera control rail)
+
+**Files:** `src/window.h` (`window_access_enabled()`, `window_birdseye_active()`/
+`window_birdseye_set_active()` — SDL-frontend-only accessors, doc-commented as
+such); `src/sdl/stubs.c` (real storage behind `window_set_access()`/
+`window_birdseye_view_off()`, previously no-ops); `src/sdl/app.h`/`main.cpp`
+(`app_reset_camera()`; `app_get_scroll_range()`/`app_scrollbar_dragged()`;
+`ScrollAxisState` replaces the old value-only `g_scroll[2]` so lower/upper/page
+survive `fsv_platform.set_scroll()` instead of being discarded; `app_switch_mode()`
+refactored to share a `run_mode_entry()` helper with the new `app_reset_camera()`);
+`src/sdl/ui_rail.h`/`.cpp` (`ui_rail_draw()`, `ui_rail_get_visible()`/
+`ui_rail_set_visible()` — extends the file Task A2 started); `src/sdl/ui_main.cpp`
+(View menu gains "Camera Rail", same toggle pattern as "Directory Tree && Files").
+
+**Pre-reading, as the brief required.** Read `camera_look_at_previous()`
+(history is a `GList` of previously-visited nodes; backtracking marks the
+head `NULL` rather than popping, so `camera_look_at_full()` can tell "went
+back" apart from "went forward" and skip re-pushing); `camera_birdseye_view(
+boolean going_up)` (`going_up` TRUE enters the overhead pose and snapshots
+the pre-birdseye camera into a static `union AnyCamera`; FALSE morphs back to
+that snapshot — confirmed `camera_init()` never itself clears
+`birdseye_view_active`, see the Reset note below); `camera_scrollbar_moved(
+axis)` and the `ScrollState`/`*_get_scrollbar_state()` family (`mapv_
+get_scrollbar_state()`/`treev_get_scrollbar_state()` are real; `discv_
+get_scrollbar_state()` is a `/* TODO */` stub that just echoes back whatever
+`scroll_state[]` already held); `src/window.c`'s GTK impl (`gtk_set_scroll()`/
+`gtk_get_scroll()`/`on_scrollbar_value_changed()`) to mirror its contract:
+the camera *pushes* lower/upper/page/value via `set_scroll()`, and a user
+drag both updates the widget's own value *and* triggers `camera_scrollbar_
+moved()`, which reads that new value back via `get_scroll()`. This port's
+`sdl_set_scroll()` used to discard lower/upper/page (`(void)`-cast) since
+nothing read them back; they are now kept in a small `ScrollAxisState`
+struct so the rail's sliders can render a real range.
+
+**Axis-to-label mapping, verified not guessed.** `task-A3-brief.md` asked to
+confirm what each scrollbar axis actually drives per mode before slapping
+"Tilt"/"Height" on them. Read `mapv_scrollbar_move()`/`treev_scrollbar_move()`
+directly: in MapV, axis 0 (X) pans `target.x` sideways and yaws `theta` to
+compensate; axis 1 (Y) pans `target.y` forward/back *and* pitches `phi` — the
+felt effect of axis 1 is closer to "flying up/down over the map" than axis 0
+is, so the upstream "Tilt"/"Height" labels land closer to right for Y than
+X. In TreeV, axis 0 rotates `target.theta` around the tree's own axis (a
+spin, not a pan) and axis 1 moves `target.r` (radial distance — closer to a
+dolly than a height change). Kept the upstream labels for continuity with
+the reference screenshot rather than inventing new ones, and documented the
+imperfect fit in `ui_rail.cpp`'s file header rather than silently relabeling,
+per the brief.
+
+**Reset semantics.** `app_switch_mode()`'s body (`geometry_init()` +
+`camera_init(mode, FALSE)` + a short `""`-message intro pan) was extracted
+into `run_mode_entry()` so `app_reset_camera()` can call the identical
+sequence for the *current* mode — `app_switch_mode()`'s own `mode ==
+globals.fsv_mode` guard exists specifically to reject exactly what Reset
+needs to do. One addition beyond a bare `run_mode_entry()` call: if
+bird's-eye view is active, `app_reset_camera()` first calls
+`camera_birdseye_view(FALSE)` and `window_birdseye_set_active(FALSE)` — read
+in isolation, `camera_init()` never touches `birdseye_view_active`, so a
+Reset while airborne would otherwise leave that static flag TRUE behind a
+non-birdseye camera pose, desyncing the rail's own "Birds eye" toggle
+highlight and any *subsequent* toggle click's `going_up` polarity from
+reality. No new camera math — both calls already exist in `camera.h`.
+
+**`window_set_access`/`window_birdseye_view_off` are no longer no-ops.**
+`src/sdl/stubs.c` now stores what real widgets would otherwise carry:
+`window_set_access(enabled)` sets a flag `window_access_enabled()` reads
+back (buttons/sliders wrap `ImGui::BeginDisabled(!access_ok)`, `access_ok =
+!app_is_scanning() && window_access_enabled()`); `window_birdseye_view_off()`
+(the core's "you were in bird's-eye view, you no longer are" notification —
+fires from `camera_look_at_full()` when the user picks a new node while
+airborne) clears a second flag `window_birdseye_active()` reads for the
+"Birds eye" button's highlighted/pressed look, kept in sync from *both*
+directions (this button's own clicks, and the core silently exiting
+bird's-eye view on its own).
+
+**Sliders gated to MapV/TreeV, per the brief.** `discv_get_scrollbar_state()`
+being a stub with no real per-node math is why DiscV's Tilt/Height sliders
+are disabled with a "MapV/TreeV only" label rather than merely displaying a
+meaningless range — `sliders_ok = access_ok && (mode == FSV_MAPV || mode ==
+FSV_TREEV)` gates the pair independent of the buttons' own `access_ok`.
+
+**"Front view" is the brief's own named approximation, not a port.**
+`camera.h` has no pose-specific front-view entry point (upstream fsn's exact
+pose is not reproduced — no new camera math per the plan), so this button
+re-runs `camera_look_at()` on `globals.current_node`, documented inline as
+an approximation.
+
+**Headed, direct-state verification (not pixel-accurate ImGui click
+simulation).** Following the brief's explicit "SDL_PushEvent / direct state
+where cleaner" allowance: simulating a mouse click at a button's exact
+screen rect would test ImGui's own hit-testing, not this task's wiring. A
+temporary, never-committed set of `--record` cues (same throwaway-harness
+convention Task A2 used) called the exact app.h/camera.h entry points each
+rail control invokes, gated behind an env var, with `SDL_Log` proof of the
+resulting state, then was deleted before the commit below. On `tests/
+fixture` in `--mapv`:
+- **Go back after two look_ats**: `camera_look_at(dir-a)` then `camera_look_at(
+  dir-a/dir-b)` (current node confirmed via pointer identity at each step),
+  then `camera_look_at_previous()` — logged `current_node` back to `dir-a`'s
+  pointer, matching `camera_look_at_full()`'s backtracking-vs-forward logic
+  read during pre-work.
+- **Birds eye**: `camera_birdseye_view(TRUE)` — `window_access_enabled()`
+  flips to 0 in the very same call (`window_set_access(FALSE)` is the second
+  statement of `camera_birdseye_view()`); ~4s later (the fixed `MAPV_CAMERA_
+  MAX_PAN_TIME`), settled state logged `phi=90.00` (the overhead pose) and
+  `window_access_enabled()` back to 1 (`post_pan_end()`'s scheduled
+  re-enable). `camera_birdseye_view(FALSE)` afterward restored the
+  pre-birdseye `phi`/`theta`/`distance`.
+- **Reset**: `app_reset_camera()` logged an *immediate* jump to `camera_init()`'s
+  fresh MapV pose (`theta=270 phi=90 distance=1728 target=(0,0)`), settling
+  ~1s later into the same intro-pan-derived framing `enter_mode()` itself
+  produces.
+- **Sliders in MapV**: `app_get_scroll_range()`/`app_scrollbar_dragged()` on
+  both axes, mid-session (with `dir-a` already expanded from the go-back
+  test above): axis 0 drag moved `target.x` 6.21 → 4.65 and `theta` 279.60 →
+  277.20; axis 1 drag moved `target.y` 3.12 → 0.78 and `phi` 54.43 → 52.98 —
+  both instantaneous (no morph involved in `mapv_scrollbar_move()`), matching
+  the direct assignment read during pre-work.
+- **Access flag during a pan, checked at every rail-drawn frame, not just
+  cue boundaries**: a second temporary probe logged `window_access_enabled()`
+  and `camera_moving()` together on a frame-sampled cadence throughout a
+  birds-eye pan and confirmed `access=0`/`moving=1` for the pan's full
+  duration, `access=1` only once `camera_moving()` had already gone false.
+
+**Visual dimming: a documented gap, not a false claim.** `ImGui::
+BeginDisabled(!access_ok)` wraps the four buttons exactly like `ui_panels.cpp`'s
+own established use of the same call (its file-list table), and a forced
+`PushStyleVar(ImGuiStyleVar_Alpha, 0.05f)` sanity check confirmed this
+backend's alpha blending itself works (pixels dropped to near-black at that
+extreme). But a paired-frame screenshot comparison at the *default*
+`DisabledAlpha` (0.60) between a confirmed-idle and a confirmed-disabled
+moment showed only a 1–2/255 per-channel difference — likely swamped by
+ImGui's own per-window focus-alpha variance in this floating (non-docked)
+window, which shifted brightness by more than that between otherwise
+identical idle frames in the same test. The flag and the `BeginDisabled`
+call are both proven correct by direct-state logging (above); the *visual*
+greying is real per ImGui's documented contract but was not independently,
+unambiguously confirmed by pixel inspection. Flagged here rather than
+asserted as seen. The DiscV sliders' "MapV/TreeV only" label is unambiguous
+in a screenshot regardless (see below) and is not affected by this caveat.
+
+**Screenshots** (`--record` on `tests/fixture`, ImGui composited for real —
+`--screenshot` does not composite ImGui, per Task 6.4's own note): MapV, rail
+idle — left-anchored "Camera Rail" window with Reset/Go back/Birds eye/Front
+view stacked buttons, a separator, then Tilt/Height vertical sliders
+side-by-side, matching the reference image's left-rail layout (it overlaps
+the Directory Tree panel's own default top-left placement until a user
+drags either window — both default to the same corner; a cosmetic overlap
+this task did not attempt to resolve, since neither panel is force-docked
+into a fixed split, see `ui_rail.h`'s "ordinary dockable window" design
+note). DiscV, same rail: Tilt/Height sliders visibly inert with a
+"MapV/TreeV only" label directly beneath them, buttons still active (Reset/
+Go back/Front view/Birds eye all make sense in DiscV, only scrollbar-driven
+panning does not).
+
+**Both arms build clean, tests 3/3.** SDL/macOS: `ninja -C builddir-sdl`
+clean, `meson test -C builddir-sdl` → 3/3. GTK: fresh `debian:bookworm`
+container, CI's own apt list — `window.c`'s `set_scroll`/`get_scroll`
+contract (`gtk_set_scroll()`/`gtk_get_scroll()`/`on_scrollbar_value_changed()`)
+is untouched by this task, confirmed by re-reading it during pre-work rather
+than assumed — real `fsv` executable (47/47 targets) builds clean, `meson
+test` → 3/3.
+
+**Rail visibility.** View menu gains "Camera Rail" (`ui_rail_get_visible()`/
+`ui_rail_set_visible()`), same toggle pattern as "Directory Tree && Files".
+`ui_rail_draw()` returns early during `g_scanning`/`FSV_NONE`/no-tree, same
+three guards `ui_panels_draw()` already uses for the Directory Tree panel,
+so the rail is hidden outright (not merely greyed) during a scan.
+
 ### Task A1 fix round (code review)
 
 A from-source-trace review of the verification above found two real bugs
