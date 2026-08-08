@@ -68,10 +68,19 @@ struct _FsnWire {
 #define FSN_GEOM_PARAMS(node)	((FsnPedestal *)(NODE_DESC(node)->geomparams))
 
 
-/* Layout pass. PURE: computes and stores geometry for the whole tree
- * rooted at `root` (which must be a directory node -- root_dnode) and
- * makes no gpu.h call whatsoever, so it can be exercised headless. See
- * tests/test_fsn_layout.c. */
+/* Layout pass: computes and stores geometry for the whole tree rooted
+ * at `root` (which must be a directory node -- root_dnode).
+ *
+ * Makes no gpu.h call whatsoever, which is what lets it be exercised
+ * headless -- and is enforced by the linker, not by convention: this
+ * file's implementation is part of libfsvcore, and
+ * tests/test_fsn_layout.c links it with no renderer stubs at all.
+ *
+ * Renderer-free is not side-effect-free, though. Like MapV's
+ * mapv_init_recursive( ), it reads the frontend's expand/collapse state
+ * (dirtree_entry_expanded( )) and writes each directory's `deployment`
+ * to match, so the draw pass and colexp.c start out agreeing with the
+ * directory tree. */
 void fsn_geometry_init( GNode *root );
 
 /* Draw pass. Everything that touches gpu.h lives behind this. */

@@ -146,6 +146,42 @@ fsn_apply_label( GNode *dnode )
 }
 
 
+/* Cache backing fsn_draw_path_text( ) below. node_absname_display( )
+ * walks the node's ancestry, allocates, validates UTF-8 and NFC-composes
+ * the result on every call -- its own contract (src/common.c) says it is
+ * for callers that fire "on hover/selection changes, not per node per
+ * frame", and this one is on the per-frame high-detail path. The path
+ * only changes when the current node does, so keep the composed string
+ * and recompose only when that pointer moves.
+ *
+ * Note node_absname_display( ) returns a pointer to ITS static buffer,
+ * which the next caller (the status bar, the context menu) will free out
+ * from under us -- so this keeps its own copy rather than caching the
+ * returned pointer.
+ *
+ * The key is only ever compared, never dereferenced, and
+ * fsn_geometry_draw( ) drops the whole cache whenever the layout root
+ * changes, which covers every mode switch and rescan. The one residual
+ * is a rescan where the allocator hands back the identical address for
+ * both the new root and the new current node -- which, being the same
+ * directory rescanned, would compose the same path string anyway. Not
+ * worth a generation counter for a decorative ground label. */
+static GNode *path_text_node = NULL;
+static char *path_text_cache = NULL;
+
+/* Drops the cached path string. Called when the layout goes away, so a
+ * freed GNode can never be compared against as a cache key. */
+static void
+fsn_path_text_invalidate( void )
+{
+	if (path_text_cache != NULL) {
+		xfree( path_text_cache );
+		path_text_cache = NULL;
+	}
+	path_text_node = NULL;
+}
+
+
 /* The current node's absolute path, written large on the ground in front
  * of the root pedestal -- the reference screenshot's "/usr/people/kip".
  * Non-pickable by construction: it is text, and gpu_pick( ) calls
@@ -163,6 +199,18 @@ fsn_draw_path_text( void )
 	node = (globals.current_node != NULL) ?
 	    globals.current_node : fsn_layout_root( );
 
+	/* fsn_layout_get( ) is documented nullable, and this runs on the
+	 * high-detail path where a caller could in principle reach us
+	 * between a tree teardown and the next layout */
+	if (p == NULL || node == NULL)
+		return;
+
+	if (node != path_text_node || path_text_cache == NULL) {
+		fsn_path_text_invalidate( );
+		path_text_cache = xstrdup( node_absname_display( node ) );
+		path_text_node = node;
+	}
+
 	pos.x = p->x;
 	pos.y = p->z - 0.5 * p->d - FSN_PATH_TEXT_GAP_RATIO * p->w;
 	pos.z = FSN_TEXT_LIFT;
@@ -171,7 +219,7 @@ fsn_draw_path_text( void )
 	dims.y = FSN_PATH_TEXT_HEIGHT_RATIO * p->w;
 
 	text_set_color( FSN_PATH_R, FSN_PATH_G, FSN_PATH_B );
-	text_draw_straight( node_absname_display( node ), &pos, &dims );
+	text_draw_straight( path_text_cache, &pos, &dims );
 }
 
 
@@ -254,7 +302,19 @@ fsn_draw_recursive( GNode *dnode, int action )
 void
 fsn_geometry_draw( boolean high_detail )
 {
+	static GNode *drawn_root = NULL;
 	GNode *root = fsn_layout_root( );
+
+	/* A new (or absent) layout means a new tree: drop the cached path
+	 * string, so its GNode cache key can never outlive the nodes it was
+	 * taken from. Deliberately here and not in fsn_geometry_free( ) --
+	 * that lives in the layout half, which libfsvcore links and this
+	 * file is absent from, so it cannot call into here without breaking
+	 * the split. */
+	if (root != drawn_root) {
+		fsn_path_text_invalidate( );
+		drawn_root = root;
+	}
 
 	if (root == NULL)
 		return;

@@ -4177,6 +4177,15 @@ got:
 | `src/sdl/ui_dialogs.cpp` | symlink-target eligibility | unchanged — an explicit `== FSV_TREEV` guard for unbuilt TreeV geometry; FSN lays out the whole tree, so it correctly takes the general path |
 | `src/sdl/ui_rail.cpp` | Tilt/Height enable | unchanged — `mode == FSV_MAPV \|\| mode == FSV_TREEV`, deliberately excluding FSN, matching its null scrollbar state |
 | `src/sdl/main.cpp` | `initial_camera_pan()` | unchanged — an `== FSV_TREEV` guard for the L-shaped pan; FSN takes the ordinary pan |
+| `src/window.c:207` (GTK) | **not a switch at all** — `gui_radio_menu_begin(fsv_mode - 1)` depends on the enum's *ordinal* | checked, left alone. This is the class of site a `switch`/`SWITCH_FAIL` grep cannot see, so it is listed here deliberately. It maps the mode onto a radio-item index in the GTK Vis menu, whose items are MapV and TreeV (DiscV is `#if 0`'d out), so `FSV_FSN` would index past the end. It cannot get there: `initial_fsv_mode` is only ever assigned from `--discv`/`--mapv`/`--treev` (`src/fsv.c:232-244`) or from `fsv_set_mode()`'s own bookkeeping, driven by that same two-item menu; the mode is not persisted to `~/.fsvrc` either. FSN has no parser flag, no menu item and no persistence path in the GTK build, so this expression can never be handed it without a code change that would have to add the menu item anyway |
+
+Beyond `switch` statements, the tree was also swept for code that depends
+on `FsvMode`'s *numeric order* rather than its members — the failure mode
+an enum insertion causes that no switch audit can catch. There is exactly
+one such site, `src/window.c:207`, in the table above;
+`grep -rn 'fsv_mode *[-+]\|(int)globals.fsv_mode' src/ tools/` finds no
+other arithmetic on the enum, and every remaining use is an `==`/`!=`
+against a named member.
 
 Non-`FsvMode` switches that `grep SWITCH_FAIL` also matches were checked
 and left alone: `src/common.c` (HSV sextant), `src/color.c`,
@@ -4184,6 +4193,101 @@ and left alone: `src/common.c` (HSV sextant), `src/color.c`,
 (`MorphType`), `src/about.c` (`AboutMesg`), `src/dialog.c`,
 `src/colexp.c`'s own `ColExpMesg` switches, and
 `src/ogl-gpu-compat.c`/`src/camera.c`'s axis switches.
+
+
+#### Task B1 fix round (code review)
+
+**Per-frame allocation on the high-detail path (the important one).**
+`fsn_draw_path_text()` called `node_absname_display()` every frame, which
+walks the node's ancestry, allocates, UTF-8-validates and NFC-composes —
+against that function's own documented contract (`src/common.c`: for
+callers that fire "on hover/selection changes, not per node per frame").
+Now cached: the composed string is kept in the draw file, keyed on the
+`GNode *` it was composed from, and recomposed only when
+`globals.current_node` moves. It keeps its *own copy* rather than the
+returned pointer, because `node_absname_display()` hands back its own
+static buffer, which the next caller (status bar, context menu) frees.
+
+The cache is dropped whenever the layout root changes, which covers every
+mode switch and rescan. That check lives in `fsn_geometry_draw()`, not in
+`fsn_geometry_free()`, because the latter is in the layout half —
+`libfsvcore` links it and the draw file is absent there, so a call in
+that direction would not link. The key is only ever compared, never
+dereferenced.
+
+Measured, not assumed: a temporary counter in `fsn_draw_path_text()` over
+a 10-second `--record` run in FSN mode (300 high-detail frames, with the
+recording script's two scripted `camera_look_at_full()` cues) logged
+**300 draws / 3 cache misses** — one for the initial current node
+(`src`), one at frame 141 when the camera looked at `src/sdl`, one at
+frame 220 when it looked at `src/sdl/gpu.cpp`. 297 of 300 frames
+allocated and composed nothing. The rendered result was checked too: with
+the current node pointed at a child, the ground text reads
+`…/fsn/fsv/src/xmaps` instead of `…/fsn/fsv/src`, so the invalidation
+reaches the screen and not just the counter. Both probes reverted.
+
+**Unchecked nullable deref.** `fsn_draw_path_text()` dereferenced
+`fsn_layout_get()`'s documented-nullable return; guarded now, matching
+the guard two lines further down.
+
+**Test: vacuous assertions replaced, and the real coverage gap closed.**
+Two of the wire assertions could not fail (`wire.x0 == parent->x` by
+construction, and `|0| <= positive`). They are replaced by an
+`on_footprint_edge()` predicate — the endpoint must lie exactly on the
+facing edge's line *and* within that footprint's width — applied by a
+recursive walk over every directory in the tree rather than to `dir-a`
+alone. The walk returns its visit count, and the caller asserts the exact
+number, so it cannot pass vacuously on an empty loop.
+
+The genuinely untested logic was the ground-width slicing:
+`FSN_DIR_SPAN`'s "max(own width, children's total)" measuring rule and
+the placement cursor's `FSN_SIBLING_GAP` step. The test now asserts that
+sibling *subtree* bands — recomputed from the public accessor, not read
+back out of the span the layout wrote down — are pairwise disjoint at
+every depth. `tests/fixture` grew the shape needed to make both halves
+observable: `dir-c` as a second top-level directory, and `dir-d`/`dir-e`
+under `dir-a` so that `dir-a`'s subtree is several times wider than its
+own pedestal (with only one child, the max() rule has no effect and a
+broken version passes). Both halves were then broken on purpose and
+confirmed to fail:
+
+| Perturbation | Result |
+|---|---|
+| `FSN_DIR_SPAN(dnode) = ped->w` (measuring rule ignores children) | FAIL — sibling bands overlap |
+| placement cursor advances by 0 instead of `span + FSN_SIBLING_GAP` | FAIL — sibling bands overlap |
+| wire anchored at the parent's centre instead of its outward edge | FAIL — `on_footprint_edge` |
+| wire endpoint past the child's corner | FAIL — `on_footprint_edge` |
+
+`test_scanfs`'s `>= 6` node-count assertion still passes (it is a floor
+by design); its stale comment listing the fixture's exact contents was
+rewritten to say so explicitly, so the next fixture addition doesn't look
+like it needs an edit there.
+
+**Comments that were wrong or overclaimed.**
+
+- `geometry.c`'s note on the newly-exported `geometry_node_set_color()`
+  named `geometry-fsn.c` as its consumer and "size reasons alone" as the
+  motive. Both wrong, and dangerously so: the consumer is
+  `geometry-fsn-draw.c`, and `geometry-fsn.c` must *never* call it —
+  that file is in `libfsvcore` precisely because it touches no renderer
+  function, which is the property the layout test enforces at link time.
+  Rewritten to name the right file and the renderer-boundary rationale.
+- `fsn-style.h` claimed a file box "must never be tall enough to hide the
+  pedestal it stands on", which the constants do not deliver
+  (`FSN_BOX_H_MAX` 320 ≫ `FSN_PEDESTAL_H_MIN` 24). Weakened to describe
+  the tendency, with the reason no clamp was added: box height *is* file
+  size, and clamping it against its pedestal would render two equal files
+  at different heights depending on which directory they sit in.
+- "PURE" on `fsn_geometry_init()` overclaimed. Renderer-free is not
+  side-effect-free: like `mapv_init_recursive()`, it reads
+  `dirtree_entry_expanded()` and writes each directory's `deployment`.
+  Both the declaration and the definition now say what is actually
+  guaranteed (no `gpu.h`, enforced by the linker) and what is not.
+
+**Re-verified after the fixes.** Both arms build; `meson test` 4/4 on
+each (macOS/SDL and the Debian container's `-Dfrontend=gtk`) with the
+enlarged fixture, `scanfs` included; FSN, MapV, TreeV and DiscV
+screenshots all still render.
 
 ## Why this architecture
 
@@ -4271,3 +4375,6 @@ code is kept.
 | 2026-08-08 | fsn-mode Task B1: FSN camera reuses MapV's *storage* (`MAPV_CAMERA`, the Cartesian target) but not MapV's *math* | `mapv_look_at()` and every other `mapv_*` camera helper is written in `MAPV_GEOM_PARAMS`, which holds an `FsnPedestal` in FSN mode (the modes share `NodeDesc::geomparams`) — delegating outright would feed the camera another mode's numbers reinterpreted as its own. The storage, by contrast, is genuinely the same shape, so the pan/morph arms fall through to MapV's |
 | 2026-08-08 | fsn-mode Task B1: `geometry.c`'s `node_set_color()` exported as `geometry_node_set_color()` instead of copied into `geometry-fsn-draw.c` | one select-pass id encoding and one highlight boost for both files rather than two that could drift; `highlight_node_id` is `geometry.c`'s private state, so a copy could not have shared it anyway |
 | 2026-08-08 | fsn-mode Task B1: FSN wires draw black in the select pass rather than being skipped | same reasoning as `draw_lit()`'s fixed-color path above (2026-08-07): skipping drops them from the pick pass's depth buffer, letting a click pass through to whatever sits behind; id 0 keeps the occlusion honest while correctly reporting "not a node" |
+| 2026-08-08 | fsn-mode Task B1 fix round: FSN's ground path text caches its composed string, keyed on the `GNode *` it came from, with invalidation in `fsn_geometry_draw()` rather than `fsn_geometry_free()` | `node_absname_display()`'s own contract (`src/common.c`) is "hover/selection changes, not per node per frame", and this call was per frame; the invalidation cannot live in `fsn_geometry_free()` because that is the layout half, which `libfsvcore` links and the draw file is absent from — a call in that direction would not link. Measured at 3 cache misses over 300 recorded frames with two scripted `camera_look_at_full()` cues |
+| 2026-08-08 | fsn-mode Task B1 fix round: `tests/fixture` gained `dir-c` (a second top-level directory) and `dir-a/dir-d` + `dir-a/dir-e` | the FSN layout's ground-width slicing was untestable on the old fixture: with one child, `FSN_DIR_SPAN`'s `max(own width, children's total)` rule has no effect and a broken implementation passes — confirmed by breaking it deliberately before the fixture grew and watching the test still pass. Three siblings under `dir-a` make its subtree several times wider than its own pedestal, which is what makes the rule observable. `test_scanfs`'s bound is a floor (`>= 6`), so it is unaffected by design |
+| 2026-08-08 | fsn-mode Task B1 fix round: file-box height left unclamped against its pedestal's height, with the comment corrected instead | box height *is* the file's size; clamping it against the pedestal it happens to stand on would render two identically-sized files at different heights depending on which directory they are in, which misinforms worse than a tall box on a short slab |

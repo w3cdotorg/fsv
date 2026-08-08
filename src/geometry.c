@@ -61,11 +61,18 @@ static unsigned int highlight_node_id;
  * is resolving a pick (unlit, so the id survives the fragment shader
  * untouched).
  *
- * Exported (it was static until fsn-mode Task B1) so that
- * src/geometry-fsn.c, which is a separate translation unit for size
- * reasons alone, gets the *same* select-pass encoding and the same
- * highlight boost rather than a second copy that could drift -- and
- * because highlight_node_id above is this file's private state. */
+ * Exported (it was static until fsn-mode Task B1) for FSV_FSN's draw
+ * pass, src/geometry-fsn-draw.c: it needs the *same* select-pass id
+ * encoding and the same highlight boost, and highlight_node_id above is
+ * this file's private state, so a second copy could not have shared it
+ * even if drift were acceptable.
+ *
+ * NOT src/geometry-fsn.c, which is FSN's *layout* half. That file is
+ * part of libfsvcore precisely because it touches no renderer function,
+ * a property tests/test_fsn_layout.c enforces at link time by carrying
+ * no renderer stubs at all. A call to this from there would break that
+ * invariant -- the renderer boundary, not file size, is what the FSN
+ * split is drawn along. */
 void
 geometry_node_set_color(GNode *node)
 {

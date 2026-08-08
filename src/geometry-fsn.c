@@ -237,8 +237,11 @@ fsn_place( GNode *dnode, double x, double z )
 }
 
 
-/* Top-level call to lay out FSN mode. Pure: no gpu.h calls anywhere
- * below this point until the DRAW section. */
+/* Top-level call to lay out FSN mode. No gpu.h call anywhere in this
+ * file -- see the contract on the declaration in geometry-fsn.h,
+ * including what "no renderer" does and does not promise (this does
+ * read dirtree state and write `deployment`, exactly as MapV's
+ * mapv_init_recursive( ) does). */
 void
 fsn_geometry_init( GNode *root )
 {

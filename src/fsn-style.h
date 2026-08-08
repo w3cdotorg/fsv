@@ -192,8 +192,16 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
 #define FSN_PEDESTAL_H_SCALE    20.0
 #define FSN_PEDESTAL_H_MAX     512.0
 
-/* File box height: same log law, gentler slope and a lower ceiling --
- * a box must never be tall enough to hide the pedestal it stands on. */
+/* File box height: same log law, with a gentler slope and a lower
+ * ceiling than the pedestals above, so a directory full of large files
+ * still reads as a slab carrying boxes rather than as a thicket.
+ *
+ * Note this is a tendency, not a guarantee: FSN_BOX_H_MAX (320) is well
+ * above FSN_PEDESTAL_H_MIN (24), so a big file on a small directory's
+ * pedestal genuinely does tower over it. That is honest -- the box
+ * height *is* the file's size, and clamping it against its pedestal
+ * would make two equal files render at different heights depending on
+ * which directory they sit in, which is worse. */
 #define FSN_BOX_H_MIN           16.0
 #define FSN_BOX_H_SCALE         12.0
 #define FSN_BOX_H_MAX          320.0
