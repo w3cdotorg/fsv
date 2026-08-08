@@ -4,6 +4,12 @@
 > Metal renderer (SDL3 GPU + Dear ImGui). See [`docs/PORTING.md`](docs/PORTING.md).
 > For the stable GTK/OpenGL version, use [jabl/fsv](https://github.com/jabl/fsv).
 
+![fsv navigating its own source tree](docs/media/demo.gif)
+
+*(GIF above is size-optimized — 15fps, downscaled. See
+[`docs/media/demo.mp4`](docs/media/demo.mp4) for the smooth, full-resolution
+version.)*
+
 This repo is a fork of [fsv](http://fsv.sourceforge.net/), updated to current environments.
 The original author is [Daniel Richard G.](https://github.com/iskunk), a former student of Computer Science at the MIT.
 

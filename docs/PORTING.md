@@ -5,7 +5,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.2 + 6.3 (Xcode project, CI, release artifacts)**
+- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.4 (Xcode project, CI, release artifacts, demo video)**
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -2669,6 +2669,150 @@ otherwise touched; the release-packaging shell re-dry-run against fake
 artifact layouts for both the SDL-present and SDL-absent-fallback-to-
 GTK cases, now producing tarballs with the new `USAGE.txt` files with
 exactly the intended content (confirmed with `tar -xzO`).
+
+## Task 6.4 verification (`--record` demo video)
+
+Added a `--record OUTDIR SECONDS` mode to the SDL frontend and used it to
+produce `docs/media/demo.mp4`/`demo.gif`: a scripted camera flythrough of
+this repository's own `src/` tree, embedded at the top of `README.md`.
+
+### The real question this task had to answer first
+
+`--screenshot`'s existing offscreen-capture mechanism
+(`gpu_screenshot_begin/end()`, Task 3.3) renders the scene into a
+private `R8G8B8A8_UNORM` texture and has never carried ImGui — and for
+good reason: ImGui's one SDL_GPU pipeline is built once, in `main()`, in
+whatever pixel format `SDL_GetGPUSwapchainTextureFormat()` reports (this
+port's actual target, confirmed `B8G8R8A8_UNORM`). SDL_GPU pipelines are
+format-bound at creation; rendering ImGui's draw data into a
+differently-formatted target than the one its pipeline was built for is
+not just wrong-looking output, it is an unsupported combination. So a
+recording that wants the menu bar and docked panels visible (the brief's
+explicit ask — "shows it's a real app") cannot simply reuse
+`gpu_screenshot_begin()`'s texture and add an ImGui pass on top.
+
+The fix needs no new ImGui pipeline and no restructuring of the ImGui
+backend: `gpu_record_begin()` (`src/sdl/gpu.cpp`) creates its offscreen
+texture in the *swapchain's own* pixel format instead of a fixed
+`R8G8B8A8_UNORM`, and a new `g_recording_frame` flag tells
+`gpu_scene_begin()` to draw into it with pipeline target index 0 — the
+same scene/text pipelines a visible frame uses, not `--screenshot`'s
+separate index-1 set. Because the format now matches exactly, the
+*same* ImGui pipeline built once in `main()` can render straight into
+this texture, with a render pass shaped exactly like `submit_frame()`'s
+own pass 2 (`LOADOP_LOAD`, no depth target). `gpu_record_end()` then
+downloads and writes the frame, decoding whichever of
+`R8G8B8A8_UNORM`/`B8G8R8A8_UNORM` the swapchain format turned out to be
+(queried live, not assumed) into the matching `SDL_PixelFormat` before
+handing the pixels to `SDL_SaveBMP()`.
+
+### The scripted flythrough (`src/sdl/main.cpp`'s `run_record_mode()`)
+
+A small fixed timeline, keyed off wall-clock seconds since recording
+started (see below for why wall-clock, not frame count):
+
+1. **0.0s** — the ordinary startup fly-in to root already runs
+   automatically (`initial_camera_pan()`, unchanged); nothing to script.
+2. **4.6s** — expand `src/sdl/` (`colexp(..., COLEXP_EXPAND)`) and pan
+   to it (`camera_look_at_full(..., MORPH_SIGMOID, 2.2)`).
+3. **7.2s** — pan to `src/sdl/gpu.cpp` — this port's renderer core, and
+   (not coincidentally) the file this task's own investigation spent
+   the most time in.
+4. **9.8s–11.3s** — a continuous dolly-in, one small `camera_dolly()`
+   delta per recorded frame (exactly what a mouse drag sends
+   `input.cpp`), not a morph.
+5. **11.6s** — switch to TreeV. Naively this would `app_switch_mode()`
+   and let the mode's own automatic pan (`camera_treev_lpan_look_at()`,
+   scheduled one tick later) fly to wherever `globals.current_node`
+   still pointed — `gpu.cpp`, the *previous* cue's target — and then
+   need a second, separate `camera_look_at_full()` to actually reach
+   this cue's real destination. Two stacked camera cuts, with an
+   awkward "camera pointed at nothing while reorienting" gap between
+   them (seen and rejected during manual review of an earlier cut of
+   the recording — see below). Fixed by setting
+   `globals.current_node` to the real target (`src/geometry.c`, the
+   largest single file in `src/`) *before* calling `app_switch_mode()`,
+   so the mode's own built-in L-pan flies directly to it — one clean
+   pan into the new mode.
+6. **13.0s–18.5s** — a continuous, gentle `camera_revolve()` around
+   `geometry.c` for the remainder of the recording.
+
+Targets are resolved once, up front, via `node_named()` (`common.c`) —
+the same absolute-path/component-walk lookup `ui_dialogs.cpp`'s
+symlink-target resolution already relies on — against `app_root_dir()`
+(wherever `scanfs()` actually `chdir()`'d into), not a hardcoded path. A
+target that doesn't resolve (a future checkout with a renamed/missing
+file) degrades to "that cue is skipped", not a crash.
+
+### Why the loop paces itself to real wall-clock time
+
+`camera_look_at_full()`/`colexp()`'s morphs time themselves off
+`animation.c`'s `xgettime()` — the real wall clock, not "how many times
+`fsv_animation_tick()` has been called" (`--screenshot`'s own intro-pan
+wait already depends on this same fact). Recording offscreen has no
+vsync to wait on, so a naive loop runs many times faster than real
+time; calling `fsv_animation_tick()` hundreds of times within a handful
+of real milliseconds would let every morph's *progress fraction*
+collapse into a tiny slice of real time, then sit frozen for the
+(virtual, frame-counted) remainder — a recording that looks like it
+jumps, not pans. So each iteration of `run_record_mode()`'s loop
+`SDL_Delay()`s until the next 1/30s boundary of real elapsed time
+*before* reading `t` and driving that iteration's cues/tick/capture —
+making "frame N is video-time N/30s" and "the morph is M seconds into a
+2-second pan" the same statement instead of two clocks that can drift
+apart.
+
+### `tools/make-demo.sh`
+
+Builds (if needed), records 19s (1s of margin under the 20s cap) into a
+scratch directory, then two `ffmpeg` passes: BMPs → `demo.mp4` (h264,
+`yuv420p`, `+faststart` — the widely-compatible combination browsers and
+GitHub's own README renderer expect) → `demo.gif` (palette-optimized
+two-pass, 720px wide, 15fps; automatically retries at 480px/10fps if the
+first pass still exceeds the ~10MB budget). Frame dumps are deleted
+(`trap ... EXIT`) whether or not encoding succeeds.
+
+### Verification performed
+
+- Both arms: fresh `meson setup builddir -Dfrontend=sdl && ninja &&
+  meson test` — 3/3. `-Dfrontend=gtk && ninja && meson test` — 3/3 (on
+  macOS this builds the headless core/tests only, unaffected by this
+  task; the actual GTK GUI binary is intentionally Linux-only —
+  `src/meson.build`'s `host_machine.system() != 'darwin'` gate,
+  unrelated to and pre-existing this task — verified Linux-side in
+  Task 6.2's CI, not here).
+- `./builddir/src/sdl/fsv src --record <dir> 19`: wrote exactly 570
+  frames (`19 * 30`), real elapsed time ≈19.4s (pacing overhead from
+  `SDL_Delay()`'s granularity, not drift — frame count and content both
+  land on the intended timeline).
+- `ffprobe` on the resulting `demo.mp4`: `codec_name=h264`,
+  `pix_fmt=yuv420p`, `1280x800`, `duration=19.000000`.
+- `demo.gif`: 8.6MB (under the 10MB budget, no fallback pass needed).
+- **Visual review**: extracted frames at both a dense sampling (during
+  development, to catch the two-stacked-camera-cuts problem above) and
+  six evenly-spaced timestamps (1s/4s/8s/11s/14s/18s) from the final
+  `demo.mp4` and inspected them directly. Confirmed: labels
+  (`sdl`/`xmaps`/`geometry.c`/`gpu.cpp`/directory names) readable in
+  every sampled frame; the camera visibly at a different position/mode
+  in every frame (root overview → MapV `src/sdl/` expanded → `gpu.cpp`
+  close-up → TreeV `geometry.c` orbit); the ImGui menu bar and docked
+  "Directory Tree" panel (plus its file-list table) visible in every
+  frame from ~3s onward; zero black or corrupt frames.
+- `actionlint`/CI unaffected — this task touches no workflow files.
+
+### Deviations / notes
+
+- The demo scans `src/`, not the repository root: the root also
+  contains `builddir*/`, `.git/`, and other build byproducts that would
+  dominate a size-proportional MapV layout (their disk usage dwarfs the
+  actual source) and add nothing to a "navigating the source code"
+  demo. `src/` is what the brief's own example targets (`sdl` dir,
+  `gpu.cpp`) already pointed at.
+- `--record` stays in the binary (not a build-time-only tool): it costs
+  one `bool` flag, three small functions in `gpu.cpp`, and a
+  self-contained block in `main.cpp`; documented above and in this
+  file's own "Task 6.4" section for whoever next needs to
+  re-record after a UI change.
 
 ## Why this architecture
 
