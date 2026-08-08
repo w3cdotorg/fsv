@@ -69,7 +69,7 @@ dirtree_select_cb(GtkTreeSelection *selection, gpointer data)
 			return;
 		}
 		geometry_highlight_node(dnode, FALSE);
-		window_statusbar(SB_RIGHT, node_absname(dnode));
+		window_statusbar(SB_RIGHT, node_absname_display(dnode));
 		if (dnode != dirtree_current_dnode) {
 			filelist_populate( dnode );
 			dirtree_current_dnode = dnode;
@@ -89,7 +89,7 @@ dirtree_select_cb(GtkTreeSelection *selection, gpointer data)
 	 * the row, but GTK+ does that automatically for us) */
 	if ((ev_button->button == 1) && (ev_button->type == GDK_BUTTON_PRESS)) {
 		geometry_highlight_node( dnode, FALSE );
-		window_statusbar( SB_RIGHT, node_absname( dnode ) );
+		window_statusbar( SB_RIGHT, node_absname_display( dnode ) );
 		if (dnode != dirtree_current_dnode)
 			filelist_populate( dnode );
 		dirtree_current_dnode = dnode;
@@ -111,7 +111,7 @@ dirtree_select_cb(GtkTreeSelection *selection, gpointer data)
 	if (ev_button->button == 3) {
 		gtk_clist_select_row( GTK_CLIST(ctree_w), row, 0 );
 		geometry_highlight_node( dnode, FALSE );
-		window_statusbar( SB_RIGHT, node_absname( dnode ) );
+		window_statusbar( SB_RIGHT, node_absname_display( dnode ) );
 		if (dnode != dirtree_current_dnode)
 			filelist_populate( dnode );
 		dirtree_current_dnode = dnode;

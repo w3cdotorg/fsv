@@ -41,13 +41,6 @@ int font_atlas_cols( void );
  * when the XBM fallback is in use -- map to the single '?' cell. */
 int font_atlas_cell( gunichar uc );
 
-/* Path of the scalable font the atlas was built from, or NULL if the
- * XBM fallback is in use. For .ttc collections, *index receives the
- * face index within the collection (0 otherwise). Only meaningful
- * after font_atlas_build( ); the SDL frontend reuses it so the ImGui
- * panels and the 3D labels always agree on the typeface. */
-const char *font_atlas_font_path( int *index );
-
 /* Runs font discovery without building anything, so a caller that only
  * wants the font (src/sdl/main.cpp's ImGui setup) does not depend on
  * text_init( ) having run first. Same return convention as

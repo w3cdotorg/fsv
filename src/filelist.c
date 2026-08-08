@@ -198,7 +198,7 @@ filelist_show_entry( GNode *node )
 				   -1);
 
 		// Do something with the data
-		if (strcmp(fname, NODE_DESC(node)->name) == 0)
+		if (strcmp(fname, NODE_DNAME(node)) == 0)
 		{
 			g_free(fname);
 			break;

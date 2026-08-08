@@ -197,16 +197,6 @@ font_atlas_find_font( int *index )
 }
 
 
-const char *
-font_atlas_font_path( int *index )
-{
-	if (index != NULL)
-		*index = font_index;
-
-	return font_path;
-}
-
-
 /* Copies one rasterized glyph into its cell, clipped to the cell's own
  * rectangle (a glyph whose ink overflows the cell -- a tall accented
  * capital in a face with unusually tight vertical metrics -- must lose
@@ -336,22 +326,47 @@ build_from_font( const char *path, int index, int *width, int *height )
 byte *
 font_atlas_build( int *width, int *height )
 {
-	const char *path;
+	unsigned int i;
 	byte *pixels;
-	int index;
+	boolean any_existed = FALSE;
 
-	path = font_atlas_find_font( &index );
-	if (path != NULL) {
+	/* Authoritative discovery-and-parse loop: a candidate that exists
+	 * but fails to parse (corrupt file, unsupported format) must not
+	 * end the search -- try the remaining candidates before giving up
+	 * and falling back to the XBM charset. This is stricter than
+	 * font_atlas_find_font( )'s existence-only check, so it runs its
+	 * own loop rather than deferring to it, and publishes the winning
+	 * (or, on total failure, absent) candidate into font_searched/
+	 * font_path/font_index so a later font_atlas_find_font( ) call --
+	 * the ImGui setup in src/sdl/main.cpp -- agrees with whichever
+	 * font actually rasterized. */
+	for (i = 0; i < G_N_ELEMENTS(font_candidates); i++) {
+		const char *path = font_candidates[i].path;
+		int index = font_candidates[i].index;
+
+		if (!g_file_test( path, G_FILE_TEST_IS_REGULAR ))
+			continue;
+		any_existed = TRUE;
+
 		pixels = build_from_font( path, index, width, height );
 		if (pixels != NULL) {
+			font_searched = TRUE;
+			font_path = path;
+			font_index = index;
 			atlas_ranges = ttf_ranges;
 			atlas_nranges = G_N_ELEMENTS(ttf_ranges);
 			g_message( "fsv: 3D label glyphs rasterized from %s (%d x %d atlas)", path, *width, *height );
 			return pixels;
 		}
-		g_warning( "fsv: %s could not be rasterized; 3D labels fall back to the built-in ASCII charset", path );
-		font_path = NULL; /* so the ImGui panels fall back in step */
+		g_warning( "fsv: %s could not be rasterized; trying next candidate font", path );
 	}
+
+	font_searched = TRUE;
+	font_path = NULL; /* so the ImGui panels fall back in step */
+	if (any_existed)
+		g_warning( "fsv: no candidate font could be rasterized; 3D labels fall back to the built-in ASCII charset" );
+	else
+		g_message( "fsv: no monospace TrueType font found; 3D labels fall back to the built-in ASCII charset (non-ASCII characters will render as '?')" );
 
 	/* Built-in charset: ASCII only, exactly as upstream fsv had it */
 	atlas_ranges = xbm_ranges;
