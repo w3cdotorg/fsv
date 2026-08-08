@@ -58,3 +58,24 @@ void gpu_frame_end(void);
 // be set up or written; gpu_screenshot_end() always releases the texture.
 bool gpu_screenshot_begin(int width, int height);
 bool gpu_screenshot_end(const char *path);
+
+// --record (Task 6.4): like gpu_screenshot_begin/end() above, but the
+// offscreen texture is created in the swapchain's own pixel format
+// instead of a fixed R8G8B8A8_UNORM, and the scene pass reuses the
+// swapchain's pipelines -- see the "--record" comment in gpu.cpp. That
+// format match is what lets the caller also render ImGui's draw data
+// into this texture with ImGui's one already-built pipeline, so a
+// recorded frame can composite scene + ImGui exactly like a visible
+// frame does:
+//
+//   SDL_GPUCommandBuffer *cmd = gpu_record_begin(w, h);
+//   gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();
+//   // ImGui pass on `cmd`, target = gpu_record_texture(), LOADOP_LOAD
+//   gpu_record_end("frame.bmp");
+//
+// gpu_record_begin() returns nullptr (having logged the reason) on
+// failure, exactly like gpu_frame_begin() -- do not call gpu_record_end()
+// in that case. gpu_record_end() always releases the texture.
+SDL_GPUCommandBuffer *gpu_record_begin(int width, int height);
+SDL_GPUTexture *gpu_record_texture(void);
+bool gpu_record_end(const char *path);

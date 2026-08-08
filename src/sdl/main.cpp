@@ -30,7 +30,9 @@ extern "C" {
 #include "common.h"
 #include "animation.h"
 #include "camera.h"
+#include "colexp.h" /* --record: colexp( ), scripted directory expand */
 #include "color.h"
+#include "dirtree.h" /* --record: dirtree_entry_expanded( ) */
 #include "fsv-platform.h"
 #include "geometry.h"
 #include "scanfs.h"
@@ -466,6 +468,256 @@ submit_frame(void)
 	gpu_frame_end();
 }
 
+// ---- --record ----------------------------------------------------------
+//
+// Task 6.4: an offscreen, scripted "fly the camera around this checkout's
+// own src/ tree" recording, for a short demo video. Reuses the exact
+// frame shape submit_frame() above builds (ImGui::Render() while the
+// window's own swapchain-format pipelines are still what's bound, then
+// PrepareDrawData -> scene pass -> ImGui pass), but through
+// gpu_record_begin()/gpu_record_texture()/gpu_record_end() instead of
+// gpu_frame_*()/the swapchain -- see the comment in src/sdl/gpu.cpp's
+// "--record" section for why that offscreen texture can carry ImGui's
+// pass at all (format-matched to the swapchain, not a fixed capture
+// format).
+//
+// Morphs (camera_look_at_full(), colexp()) time themselves off the real
+// wall clock (animation.c's xgettime(), same source --screenshot's
+// intro-pan wait already relies on -- see main()'s screenshot branch
+// below), not off how many ticks have been called. So this loop paces
+// itself to real time too, one iteration per ~1/30s of wall clock, and
+// keys its own script off that same wall clock -- otherwise a loop that
+// (being fully offscreen, no vsync) runs faster than real time would
+// let the morphs race ahead of the frame numbers meant to capture them,
+// and a slower one would leave them lagging. Pacing here is what makes
+// "frame N happens at video-time N/30s" and "the morph is M seconds into
+// a 2-second pan" agree.
+
+// One entry in the scripted timeline below: at t_seconds (wall-clock
+// seconds since recording started), call action(). Each fires once.
+struct RecordCue {
+	double t_seconds;
+	void (*action)(void);
+};
+
+// The nodes the script flies to, resolved once up front (see
+// run_record_mode()) from this checkout's own src/ tree -- gpu.cpp is
+// this port's renderer core, and src/sdl/ is the directory this whole
+// SDD phase has been building. A path missing from a future checkout
+// (renamed file, different tree) degrades to "that cue's node is
+// nullptr and camera_look_at_full()/colexp() are skipped", not a crash.
+static GNode *g_record_sdl_dir;
+static GNode *g_record_gpu_cpp;
+static GNode *g_record_geometry_c;
+
+static void
+record_cue_expand_sdl(void)
+{
+	if (g_record_sdl_dir == nullptr)
+		return;
+	// Same guard ui_main.cpp's context menu uses before offering
+	// "Expand": colexp() asserts NODE_IS_DIR(dnode), and this path is
+	// already known to be a directory (record_find_node() below only
+	// hands back whatever node_named() resolved, but the demo script
+	// picks a path it knows is a directory).
+	if (!dirtree_entry_expanded(g_record_sdl_dir))
+		colexp(g_record_sdl_dir, COLEXP_EXPAND);
+	camera_look_at_full(g_record_sdl_dir, MORPH_SIGMOID, 2.2);
+}
+
+static void
+record_cue_look_gpu_cpp(void)
+{
+	if (g_record_gpu_cpp == nullptr)
+		return;
+	// Belt-and-suspenders, exactly like ui_dialogs.cpp's "Go to" button:
+	// the previous cue already expanded src/sdl/, but camera_look_at_
+	// full()'s DEBUG assert (parent directory must be expanded) is worth
+	// satisfying unconditionally rather than relying on cue ordering.
+	if (NODE_IS_DIR(g_record_gpu_cpp->parent) &&
+	    !dirtree_entry_expanded(g_record_gpu_cpp->parent))
+		colexp(g_record_gpu_cpp->parent, COLEXP_EXPAND_ANY);
+	camera_look_at_full(g_record_gpu_cpp, MORPH_SIGMOID, 2.3);
+}
+
+// Points the switch straight at geometry.c instead of leaving it to land
+// wherever the mode switch's own automatic pan would otherwise take it.
+// app_switch_mode()'s enter path schedules initial_camera_pan() one tick
+// later, which -- entering TreeV -- calls camera_treev_lpan_look_at(
+// globals.current_node, 1.0); globals.current_node is still whatever the
+// *previous* cue last looked at (src/sdl/gpu.cpp), so without this the
+// camera would L-pan to gpu.cpp's new TreeV position first and only then
+// need a *second*, separate reorientation to reach geometry.c -- two
+// stacked camera cuts instead of one clean pan into the new mode.
+static void
+record_cue_switch_treev(void)
+{
+	if (g_record_geometry_c != nullptr)
+		globals.current_node = g_record_geometry_c;
+	app_switch_mode((int)FSV_TREEV);
+}
+
+// Continuous cues (dolly, revolve) are driven per-frame by t-ranges in
+// run_record_mode() below, not one-shot RecordCue entries -- camera_
+// dolly()/camera_revolve() are immediate deltas (the same calls input.cpp
+// makes per mouse-motion event), not morphs, so "smooth" here means
+// "called with a small delta every recorded frame across the range".
+static const RecordCue g_record_cues[] = {
+	{ 4.6, record_cue_expand_sdl },
+	{ 7.2, record_cue_look_gpu_cpp },
+	{ 11.6, record_cue_switch_treev },
+};
+
+// Resolves a script target by path relative to the recorded root (app_
+// root_dir(), the directory scanfs() actually chdir()'d into -- see
+// load_filesystem()) into the matching GNode, via common.c's node_named(
+// ), which does the same absolute-path/component-walk resolution ui_
+// dialogs.cpp's symlink-target lookup already relies on.
+static GNode *
+record_find_node(const char *relpath)
+{
+	std::string abspath = app_root_dir();
+	abspath += "/";
+	abspath += relpath;
+	return node_named(abspath.c_str());
+}
+
+// Task 6.4's demo-video capture. Runs for `duration_seconds` (already
+// loaded/mode-entered filesystem required -- main() only calls this after
+// load_filesystem() succeeds, same precondition the normal loop has).
+// Writes `frame_00000.bmp`, `frame_00001.bmp`, ... into `outdir` at a
+// fixed 30fps; tools/make-demo.sh turns those into the actual mp4/gif.
+// Returns false (having logged the reason) if the output directory
+// couldn't be created or the very first frame couldn't be captured;
+// a mid-recording capture failure just skips that one frame rather than
+// aborting the whole recording, matching --screenshot's "fail loud, but
+// only for what actually failed" style.
+static bool
+run_record_mode(const char *outdir, double duration_seconds)
+{
+	if (!SDL_CreateDirectory(outdir)) {
+		SDL_Log("fsv: --record: could not create \"%s\": %s", outdir,
+		    SDL_GetError());
+		return false;
+	}
+
+	int width = 0, height = 0;
+	SDL_GetWindowSizeInPixels(g_window, &width, &height);
+	if (width <= 0 || height <= 0) {
+		SDL_Log("fsv: --record: invalid window size");
+		return false;
+	}
+
+	g_record_sdl_dir = record_find_node("sdl");
+	g_record_gpu_cpp = record_find_node("sdl/gpu.cpp");
+	g_record_geometry_c = record_find_node("geometry.c");
+	if (g_record_sdl_dir == nullptr || g_record_gpu_cpp == nullptr ||
+	    g_record_geometry_c == nullptr)
+		SDL_Log("fsv: --record: one or more scripted targets not "
+		    "found under \"%s\" -- recording will skip those cues",
+		    app_root_dir());
+
+	const double fps = 30.0;
+	const Uint64 frame_ms = (Uint64)(1000.0 / fps);
+	const int total_frames = (int)(duration_seconds * fps);
+	size_t next_cue = 0;
+
+	const Uint64 t0 = SDL_GetTicks();
+	bool ok = true;
+	int frame;
+	for (frame = 0; frame < total_frames; frame++) {
+		// Pace to wall clock -- see the block comment above. Only
+		// waits when this iteration finished *ahead* of schedule
+		// (the common case: offscreen rendering has no vsync to
+		// wait on); never tries to "catch up" by skipping frames,
+		// so a slow frame just makes the recording run a little
+		// long in real time without desyncing frame numbers from
+		// each other.
+		const Uint64 target_ms = t0 + (Uint64)frame * frame_ms;
+		const Uint64 now_ms = SDL_GetTicks();
+		if (now_ms < target_ms)
+			SDL_Delay((Uint32)(target_ms - now_ms));
+
+		const double t = (SDL_GetTicks() - t0) / 1000.0;
+
+		// Keeping the window pumped and quit-able matters here for
+		// the same reason gui_update() pumps events during a scan
+		// (see below): this runs for real wall-clock seconds with
+		// no user interaction otherwise reaching SDL.
+		SDL_Event ev;
+		bool quit = false;
+		while (SDL_PollEvent(&ev)) {
+			ImGui_ImplSDL3_ProcessEvent(&ev);
+			if (ev.type == SDL_EVENT_QUIT)
+				quit = true;
+		}
+		if (quit)
+			break;
+
+		while (next_cue < SDL_arraysize(g_record_cues) &&
+		    t >= g_record_cues[next_cue].t_seconds) {
+			g_record_cues[next_cue].action();
+			next_cue++;
+		}
+		// Continuous dolly-in (~1.5s) on gpu.cpp, then -- once the
+		// TreeV switch's own pan (record_cue_switch_treev(), 1s) has
+		// landed on geometry.c -- a slow revolve for the rest of the
+		// recording. Each is a per-frame delta exactly like a mouse
+		// drag would send input.cpp -- see the block comment above.
+		if (t >= 9.8 && t < 11.3)
+			camera_dolly(-2.0);
+		if (t >= 13.0 && t < 18.5)
+			camera_revolve(0.3, 0.0);
+
+		fsv_animation_tick();
+
+		imgui_new_frame();
+		ui_main_draw();
+		ui_dockspace_draw();
+		ui_panels_draw();
+		ui_dialogs_draw();
+		ImGui::Render();
+
+		ImDrawData *draw_data = ImGui::GetDrawData();
+		const bool empty_draw = draw_data == nullptr ||
+		    draw_data->CmdListsCount == 0 ||
+		    draw_data->DisplaySize.x <= 0.0f ||
+		    draw_data->DisplaySize.y <= 0.0f;
+
+		SDL_GPUCommandBuffer *cmd = gpu_record_begin(width, height);
+		if (cmd == nullptr)
+			continue; // skip this one frame, not the recording
+
+		if (!empty_draw)
+			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
+
+		draw_scene();
+
+		if (!empty_draw) {
+			SDL_GPUColorTargetInfo target = {};
+			target.texture = gpu_record_texture();
+			target.load_op = SDL_GPU_LOADOP_LOAD;
+			target.store_op = SDL_GPU_STOREOP_STORE;
+			SDL_GPURenderPass *pass =
+			    SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
+			ImGui_ImplSDLGPU3_RenderDrawData(draw_data, cmd, pass);
+			SDL_EndGPURenderPass(pass);
+		}
+
+		char path[1024];
+		SDL_snprintf(path, sizeof(path), "%s/frame_%05d.bmp", outdir,
+		    frame);
+		if (!gpu_record_end(path)) {
+			SDL_Log("fsv: --record: frame %d capture failed", frame);
+			ok = false; // report it, but keep recording the rest
+		}
+	}
+
+	SDL_Log("fsv: --record: wrote %d frame(s) to \"%s\" (%dx%d @ %gfps)",
+	    frame, outdir, width, height, fps);
+	return ok;
+}
+
 // ---- Scan progress ---------------------------------------------------
 //
 // scanfs() blocks this thread for the whole scan -- minutes on a large
@@ -558,7 +810,7 @@ static void
 usage(const char *argv0)
 {
 	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev] "
-	    "[--screenshot FILE]", argv0);
+	    "[--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
 }
 
 int
@@ -566,6 +818,8 @@ main(int argc, char **argv)
 {
 	const char *root_dir = ".";
 	const char *screenshot_path = nullptr;
+	const char *record_outdir = nullptr;
+	double record_seconds = 0.0;
 	// Same default as the GTK frontend (src/fsv.c).
 	FsvMode initial_mode = FSV_MAPV;
 	// Backs io.IniFilename below (Task 5.2 docking) -- declared here,
@@ -583,7 +837,10 @@ main(int argc, char **argv)
 			initial_mode = FSV_TREEV;
 		else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
 			screenshot_path = argv[++i];
-		else if (argv[i][0] == '-') {
+		else if (strcmp(argv[i], "--record") == 0 && i + 2 < argc) {
+			record_outdir = argv[++i];
+			record_seconds = SDL_atof(argv[++i]);
+		} else if (argv[i][0] == '-') {
 			usage(argv[0]);
 			return 1;
 		} else
@@ -722,6 +979,26 @@ main(int argc, char **argv)
 			SDL_Log("fsv: wrote %s (%dx%d)", screenshot_path, w, h);
 
 		SDL_WaitForGPUIdle(device);
+		gpu_shutdown();
+		SDL_DestroyWindow(g_window);
+		SDL_Quit();
+		return ok ? 0 : 1;
+	}
+
+	// --record: Task 6.4's demo-video capture. Unlike --screenshot, this
+	// needs ImGui (the menu bar/docked panels are meant to be visible in
+	// the recording) -- which is already initialized above, since this
+	// branch is only reachable when screenshot_path was null and so the
+	// `if (screenshot_path == nullptr)` ImGui-init block already ran.
+	// Full shutdown sequence (unlike --screenshot's shorter one), because
+	// there is an ImGui context here to tear down.
+	if (record_outdir != nullptr) {
+		bool ok = run_record_mode(record_outdir, record_seconds);
+
+		SDL_WaitForGPUIdle(device);
+		ImGui_ImplSDL3_Shutdown();
+		ImGui_ImplSDLGPU3_Shutdown();
+		ImGui::DestroyContext();
 		gpu_shutdown();
 		SDL_DestroyWindow(g_window);
 		SDL_Quit();

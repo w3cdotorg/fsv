@@ -193,10 +193,22 @@ SDL_GPUCommandBuffer *g_cmd;
 SDL_GPUTexture *g_swapchain;
 Uint32 g_swapchain_width, g_swapchain_height;
 
-// --screenshot: when non-null, the scene renders into this offscreen
-// R8G8B8A8 texture instead of the swapchain (see gpu_screenshot_begin()).
+// --screenshot/--record: when non-null, the scene renders into this
+// offscreen texture instead of the swapchain (see gpu_screenshot_begin()/
+// gpu_record_begin()).
 SDL_GPUTexture *g_capture_texture;
 Uint32 g_capture_width, g_capture_height;
+
+// True only between gpu_record_begin() and gpu_record_end(). Distinguishes
+// the two offscreen-capture callers for gpu_scene_begin()'s target_index
+// pick below: --screenshot/gpu_pick's g_capture_texture is a fixed
+// R8G8B8A8_UNORM format with its own pipelines (target index 1);
+// --record's is deliberately created in the *swapchain's* pixel format
+// (see gpu_record_begin()) so it can reuse the swapchain's own pipelines
+// (target index 0) -- the same ones ImGui's backend was initialized
+// against -- letting a recorded frame composite scene + ImGui exactly
+// like a visible one does, with no second ImGui pipeline required.
+bool g_recording_frame;
 
 // Where the scene pass is currently drawing, and which of pipeline_for()'s
 // two color-target formats that is.
@@ -1338,7 +1350,9 @@ gpu_scene_begin(void)
 {
 	g_color_target = g_capture_texture != nullptr ? g_capture_texture
 						      : g_swapchain;
-	g_target_index = g_capture_texture != nullptr ? 1 : 0;
+	g_target_index = g_capture_texture == nullptr ? 0
+	    : g_recording_frame ? 0 /* matches swapchain format -- see g_recording_frame */
+	                         : 1;
 	if (g_cmd == nullptr || g_color_target == nullptr || !g_ready)
 		return;
 
@@ -1934,5 +1948,183 @@ out:
 	SDL_ReleaseGPUTexture(g_device, g_capture_texture);
 	g_capture_texture = nullptr;
 	g_capture_width = g_capture_height = 0;
+	return ok;
+}
+
+// ---- --record ----------------------------------------------------------
+//
+// Task 6.4's demo-video capture: like gpu_screenshot_*() above, but the
+// offscreen texture is created in the swapchain's *own* pixel format
+// (SDL_GetGPUSwapchainTextureFormat()) rather than a fixed
+// R8G8B8A8_UNORM, and gpu_scene_begin() is told (via g_recording_frame)
+// to draw into it with target index 0 -- the same scene/text pipelines a
+// visible frame uses. That format match is what lets the caller also
+// render ImGui's draw data into this texture using the *one* pipeline
+// ImGui_ImplSDLGPU3_Init() ever builds (against that same swapchain
+// format, in main.cpp) -- no second ImGui pipeline, no restructuring of
+// the ImGui backend. The caller drives the whole frame:
+//
+//   SDL_GPUCommandBuffer *cmd = gpu_record_begin(w, h);
+//   gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();
+//   // ImGui pass on `cmd`, target = gpu_record_texture(), LOADOP_LOAD
+//   gpu_record_end("frame.bmp");
+//
+// gpu_record_begin() returns nullptr (having logged the reason) on
+// failure, exactly like gpu_frame_begin() -- the caller must not call
+// gpu_record_end() in that case. gpu_record_end() always releases the
+// texture and clears g_recording_frame, whether or not the write
+// succeeded.
+SDL_GPUCommandBuffer *
+gpu_record_begin(int width, int height)
+{
+	if (!g_ready || width <= 0 || height <= 0)
+		return nullptr;
+
+	SDL_GPUTextureCreateInfo info = {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = SDL_GetGPUSwapchainTextureFormat(g_device, g_window);
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	info.width = (Uint32)width;
+	info.height = (Uint32)height;
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+	g_capture_texture = SDL_CreateGPUTexture(g_device, &info);
+	if (g_capture_texture == nullptr) {
+		SDL_Log("gpu: record texture creation failed: %s",
+		    SDL_GetError());
+		return nullptr;
+	}
+	g_capture_width = (Uint32)width;
+	g_capture_height = (Uint32)height;
+	g_recording_frame = true;
+
+	if (!ensure_depth_texture(g_capture_width, g_capture_height)) {
+		SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+		g_capture_texture = nullptr;
+		g_recording_frame = false;
+		return nullptr;
+	}
+
+	g_cmd = SDL_AcquireGPUCommandBuffer(g_device);
+	if (g_cmd == nullptr) {
+		SDL_Log("gpu: record command buffer failed: %s",
+		    SDL_GetError());
+		SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+		g_capture_texture = nullptr;
+		g_recording_frame = false;
+		return nullptr;
+	}
+	return g_cmd;
+}
+
+SDL_GPUTexture *
+gpu_record_texture(void)
+{
+	return g_capture_texture;
+}
+
+bool
+gpu_record_end(const char *path)
+{
+	bool ok = false;
+
+	if (g_capture_texture == nullptr || g_cmd == nullptr) {
+		g_recording_frame = false;
+		return false;
+	}
+
+	// The texture is whatever SDL_GetGPUSwapchainTextureFormat()
+	// returned in gpu_record_begin() -- confirmed B8G8R8A8_UNORM on
+	// this port's actual target (macOS/Metal, see docs/PORTING.md),
+	// but queried live rather than assumed. Map the two byte orders
+	// SDL_GPU's swapchain formats can plausibly be to the matching
+	// SDL_PixelFormat rather than hard-coding one, so a wrong guess
+	// fails loudly (mis-mapping colors, not just a bad enum tag) on a
+	// platform where the swapchain format ever differs.
+	const SDL_GPUTextureFormat fmt =
+	    SDL_GetGPUSwapchainTextureFormat(g_device, g_window);
+	SDL_PixelFormat pixel_format;
+	switch (fmt) {
+	case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
+		pixel_format = SDL_PIXELFORMAT_RGBA32;
+		break;
+	case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
+		pixel_format = SDL_PIXELFORMAT_BGRA32;
+		break;
+	default:
+		SDL_Log("gpu: record: unhandled swapchain format %d, "
+		    "cannot decode captured pixels", (int)fmt);
+		SDL_SubmitGPUCommandBuffer(g_cmd);
+		g_cmd = nullptr;
+		goto out;
+	}
+
+	{
+		const Uint32 bytes = g_capture_width * g_capture_height * 4;
+
+		SDL_GPUTransferBufferCreateInfo transfer_info = {};
+		transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+		transfer_info.size = bytes;
+		SDL_GPUTransferBuffer *download =
+		    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
+		if (download == nullptr) {
+			SDL_Log("gpu: record transfer buffer failed: %s",
+			    SDL_GetError());
+			SDL_SubmitGPUCommandBuffer(g_cmd);
+			g_cmd = nullptr;
+			goto out;
+		}
+
+		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
+		SDL_GPUTextureRegion source = {};
+		source.texture = g_capture_texture;
+		source.w = g_capture_width;
+		source.h = g_capture_height;
+		source.d = 1;
+		SDL_GPUTextureTransferInfo destination = {};
+		destination.transfer_buffer = download;
+		destination.offset = 0;
+		destination.pixels_per_row = g_capture_width;
+		destination.rows_per_layer = g_capture_height;
+		SDL_DownloadFromGPUTexture(copy_pass, &source, &destination);
+		SDL_EndGPUCopyPass(copy_pass);
+
+		SDL_GPUFence *fence =
+		    SDL_SubmitGPUCommandBufferAndAcquireFence(g_cmd);
+		g_cmd = nullptr;
+		if (fence != nullptr) {
+			SDL_WaitForGPUFences(g_device, true, &fence, 1);
+			SDL_ReleaseGPUFence(g_device, fence);
+		}
+
+		void *pixels = SDL_MapGPUTransferBuffer(g_device, download, false);
+		if (pixels == nullptr)
+			SDL_Log("gpu: record map failed: %s", SDL_GetError());
+		else {
+			SDL_Surface *surface = SDL_CreateSurfaceFrom(
+			    (int)g_capture_width, (int)g_capture_height,
+			    pixel_format, pixels, (int)g_capture_width * 4);
+			if (surface == nullptr)
+				SDL_Log("gpu: SDL_CreateSurfaceFrom failed: %s",
+				    SDL_GetError());
+			else {
+				ok = SDL_SaveBMP(surface, path);
+				if (!ok)
+					SDL_Log("gpu: SDL_SaveBMP failed: %s",
+					    SDL_GetError());
+				SDL_DestroySurface(surface);
+			}
+			SDL_UnmapGPUTransferBuffer(g_device, download);
+		}
+		SDL_ReleaseGPUTransferBuffer(g_device, download);
+	}
+
+out:
+	SDL_ReleaseGPUTexture(g_device, g_capture_texture);
+	g_capture_texture = nullptr;
+	g_capture_width = g_capture_height = 0;
+	g_recording_frame = false;
 	return ok;
 }
