@@ -3978,6 +3978,213 @@ camera never reads `phi`/`theta`; it looks straight down the world Z
 axis at a fixed distance", which is what the from-source trace and the
 matrix-row derivation above actually show.
 
+
+### Task B1 verification (FSV_FSN mode — pedestal/wire landscape)
+
+**Files:** `src/geometry-fsn.h` (new — `FsnPedestal`, `FsnWire`,
+`FSN_GEOM_PARAMS`, the whole FSN API); `src/geometry-fsn.c` (new —
+layout, *gpu-free*, part of `libfsvcore`); `src/geometry-fsn-draw.c`
+(new — draw pass, part of each frontend); `src/fsn-style.h` (layout,
+wire and text constants); `src/common.h` (`FSV_FSN` enum member);
+`src/geometry.c`/`.h` (dispatch arms; `node_set_color()` exported as
+`geometry_node_set_color()`); `src/camera.c` (placeholder FSN camera);
+`src/colexp.c` (`FSN_COLEXP_TIME`); `src/ogl.c` + `src/sdl/gpu.cpp`
+(modelview arm, ground plane); `src/sdl/main.cpp` (`--fsn`);
+`src/sdl/ui_main.cpp` (Vis → FSN); `src/meson.build`,
+`src/sdl/meson.build`, `tests/meson.build`; `tests/test_fsn_layout.c`
+(new).
+
+**The layout, and why it is a separate translation unit from its own
+draw pass.** `fsn_geometry_init()` is pure math over the scanned tree: it
+writes an `FsnPedestal` into every node's existing `geomparams` scratch
+(five doubles — exactly the struct's size, same trick MapV plays) and
+three more per directory into `geomparams2` (subtree span, grid
+columns/rows). It calls nothing from `gpu.h`. That is what puts
+`geometry-fsn.c` in `libfsvcore`, next to `camera.c` — which *reads* the
+layout to frame the landscape — and what lets `tests/test_fsn_layout.c`
+link exactly like `test_scanfs`, with core objects plus
+`tools/fsv-headless-stubs.c` and not one renderer stub. The invariant is
+enforced by the linker rather than by a comment: the day the layout pass
+grows a `gpu.h` call, the test stops linking. The drawing half lives in
+`geometry-fsn-draw.c`, which is frontend-side like `geometry.c` and
+appears in both frontends' source lists.
+
+An earlier arrangement had both halves in one file compiled directly
+into the test, with a block of `gpu_*`/`text_*` no-ops in the test to
+satisfy the linker. It was replaced when `fsv-scan` (which links
+`libfsvcore`, and so now links `camera.c`'s new calls into the FSN
+layout) failed to link: stubbing `fsn_layout_*` in
+`fsv-headless-stubs.c` would have collided with the real definitions in
+the test's own copy. The split removes the problem instead of working
+around it.
+
+**Coordinates.** `FsnPedestal`'s field names come from the task brief and
+follow the graphics convention (`x`/`z` on the ground, height separate).
+fsv's world does not: it is z-up, exactly as MapV and TreeV use it. So
+`FsnPedestal::z` is the ground *depth* axis and maps to **world y**, and
+`::h` is world z. `FsnWire`, which feeds `gpu_draw()` directly, is in
+world coordinates. Both are spelled out at the top of `geometry-fsn.h`;
+this is the one place in the file pair where the two conventions meet.
+
+**Layout algorithm.** Two passes, because a directory's ground width
+depends on its whole subtree and so nothing can be positioned until
+everything is measured:
+
+1. *Measure* (bottom-up): file count → a squarish row-major grid of
+   `FSN_BOX_EDGE` boxes → the pedestal's footprint (grid plus
+   `FSN_PEDESTAL_MARGIN`, floored at `FSN_PEDESTAL_MIN_EDGE`); subtree
+   bytes → the pedestal's height; and the subtree's total ground span
+   (its own width, or the sum of its children's spans plus
+   `FSN_SIBLING_GAP`, whichever is larger).
+2. *Place* (top-down): root at the ground origin; files gridded on the
+   pedestal top; subdirectories fanned out across the parent's span, one
+   `FSN_GENERATION_GAP` further along the depth axis. Because each child
+   gets a disjoint slice of ground width, sibling subtrees cannot overlap
+   at any depth.
+
+Heights (pedestals and file boxes alike) are `MIN + SCALE * log2(1 +
+bytes/1024)`, clamped. Logarithmic rather than linear or sqrt: a real
+source tree spans five or six orders of magnitude of subtree size, and
+anything gentler leaves the root towering over everything else in the
+same frame — the reference screenshot's pedestals are all within a small
+factor of each other. The clamp bounds the pathological multi-TB case
+outright. All constants are in `src/fsn-style.h` with their rationale.
+
+**Deployment.** Identical contract to MapV: a collapsed directory draws
+its pedestal and its own file boxes but neither its children nor their
+wires; a directory caught mid-morph draws its children under a z-only
+scale, so a subtree grows up out of the ground plane instead of popping
+in. Positions never move (the layout is deployment-independent), so only
+heights animate. The wire to a child is drawn in the *parent's* unscaled
+frame with the child end's height scaled by hand — putting it inside the
+scale would drag the parent end down with it.
+
+**Select-pass discipline**, per kind of geometry:
+
+- pedestals and file boxes go through `geometry_node_set_color()`, so
+  they paint node ids and are pickable — they are the only FSN geometry
+  that *is* a node;
+- wires paint **black** (id 0, "nothing there") rather than skipping the
+  draw, matching `geometry.c`'s TreeV connectors: a wire that occludes
+  something on screen has to occlude it in the pick pass too;
+- name labels and the ground path text are absent from the select pass by
+  construction — `gpu_pick()` calls `geometry_draw(FALSE)`, and the whole
+  text block is gated on `high_detail`.
+
+`geometry.c`'s `node_set_color()` became the exported
+`geometry_node_set_color()` for this: one id encoding and one highlight
+boost shared by both files, rather than a second copy that could drift
+(and `highlight_node_id` stays private to `geometry.c`).
+
+**Camera: a documented placeholder, replaced by Task B2.** FSN reuses
+MapV's camera *storage* — the Cartesian XYZ target in `MapVCamera` — so
+`camera_pan_finish()`, `camera_pan_break()` and the bird's-eye restore
+share MapV's arms outright, and both frontends' `setup_modelview_matrix()`
+fall through to the `FSV_MAPV` case. It deliberately does **not** reuse
+MapV's camera *math*: `mapv_look_at()`, `mapv_camera_theta()/_phi()`,
+`mapv_get_scrollbar_state()` and the bird's-eye distance are all written
+in `MAPV_GEOM_PARAMS`, which in FSN mode holds an `FsnPedestal` (the two
+modes share `NodeDesc::geomparams`), so delegating would feed the camera
+another mode's numbers reinterpreted as its own. `camera_init()`,
+`camera_look_at_full()` and `camera_birdseye_view()` therefore get thin
+`fsn_*` equivalents shaped like their MapV counterparts but reading the
+FSN layout; the scrollbars get the *null* state for the same reason, and
+`ui_rail.cpp` keeps Tilt/Height disabled in FSN mode to match.
+
+**Known limitations, all Task B2's subject.** The initial view is
+`camera_look_at(root)`, which frames the root pedestal plus one
+generation gap. On a wide tree (this repo's own root, ~10 subdirectories)
+the child fan is far wider than that frame, so most children sit
+off-screen with their wires running out of both edges. That is the
+layout being correct and the camera being a placeholder, not a layout
+bug — the same tree viewed from `src/` reads exactly like the reference
+screenshot. There is also no node cursor and no spotlight in FSN yet, and
+`geometry_camera_pan_finished()`'s FSN arm is deliberately empty for that
+reason.
+
+**Deviations from the reference screenshot**, deliberate and scoped out
+of B1:
+
+- No subdirectory "tower" standing on the parent's own pedestal. Every
+  subdirectory is a ground-level pedestal of its own reached by a wire,
+  which is what the brief's layout spec asks for; the reference shows
+  both idioms.
+- Directory name labels are drawn flat on the clear margin band at the
+  near edge of the pedestal top (MapV's label idiom), not upright on the
+  pedestal's front face. Upright text needs TreeV's rotated-label matrix
+  work for a cosmetic gain.
+- The ground path text is sized *relative to the root pedestal's width*
+  rather than in absolute units, because the camera frames the whole
+  landscape: a fixed cap height reads as gigantic on a small tree and as
+  a smudge on a large one.
+
+**GTK arm.** Builds and passes tests, but has no Vis → FSN menu entry:
+that menu is a GtkBuilder resource (`src/fsv-gresource.xml`) driving
+`callbacks.c`'s `on_vis_*_activate()`, and adding an entry there is out
+of this task's scope. `FSV_FSN` is reachable in the GTK build only
+programmatically. The GTK frontend also keeps its flat clear (its
+`gpu_set_landscape()` is still a no-op, Task A1), so FSN there would draw
+pedestals with no sky or ground.
+
+**Verification.**
+
+- `meson test` 4/4 on both arms (macOS/SDL and the Debian bookworm
+  container's `-Dfrontend=gtk`), including the new `fsn_layout` test. The
+  test was confirmed to actually bite by perturbing `FSN_GENERATION_GAP`
+  to a negative value (fails) and restoring it (passes).
+- Headed, `fsv src --fsn --screenshot`: gradient sky over green ground,
+  the `src` pedestal in the foreground carrying a grid of age-colored
+  file boxes, two child pedestals (`sdl`, `xmaps`) one generation back,
+  white wires from the root's far edge to each child's near edge, the
+  `src` name label on the pedestal's near margin, and the absolute path
+  written large on the ground in front.
+- Picking, via a temporary (reverted) `gpu_pick()` probe in the
+  `--screenshot` path: a file box → its file node (`camera.c`,
+  `ui_main.cpp`), a pedestal face or a gap between boxes → the directory
+  node (`src`, `xmaps`), sky → id 0, ground → id 0, a wire pixel → id 0.
+- Expand/collapse, via a temporary (reverted) `colexp()` probe:
+  collapsing the root recursively removes both child pedestals and both
+  wires, leaving the root pedestal and its file boxes. `colexp` is
+  mode-agnostic, so the double-click and context-menu paths that drive it
+  need no FSN-specific code.
+- No regression in the other modes: `--discv`/`--mapv`/`--treev`
+  screenshots still render as before the enum insertion.
+
+**Switch audit.** Every `switch` on `FsvMode` in the tree, and what it
+got:
+
+| File | Switch | Treatment |
+|---|---|---|
+| `src/geometry.c` | `geometry_init()` | arm → `fsn_geometry_init(root_dnode)` (from the root *directory*, not the metanode) |
+| `src/geometry.c` | `geometry_draw()` | arm → `fsn_geometry_draw()` |
+| `src/geometry.c` | `geometry_camera_pan_finished()` | arm, empty + comment (FSN draws no node cursor, so there is no resting position to record) |
+| `src/geometry.c` | `geometry_should_highlight()` | arm → `TRUE` (every directory has a pedestal on screen whether expanded or not, unlike MapV) |
+| `src/geometry.c` | `draw_node()` | arm, empty + comment — the function is dead code (`__attribute__((unused))`), like its `FSV_DISCV` arm |
+| `src/camera.c` | `camera_init()` | arm — frames the landscape from behind the root pedestal off `fsn_layout_extents()` |
+| `src/camera.c` | `camera_scrollbar_moved()` | arm → `fsn_scrollbar_move()` (pan only, no coupled yaw/pitch) |
+| `src/camera.c` | `camera_update_scrollbars()` | arm → `null_get_scrollbar_state()` (no FSN scroll model yet) |
+| `src/camera.c` | `camera_pan_finish()` | deliberate fall-through into `FSV_MAPV` (shared Cartesian target storage) |
+| `src/camera.c` | `camera_pan_break()` | deliberate fall-through into `FSV_MAPV` (same) |
+| `src/camera.c` | `camera_look_at_full()` | arm → `fsn_look_at()` |
+| `src/camera.c` | `camera_birdseye_view()` pan time | arm → `FSN_CAMERA_MAX_PAN_TIME` |
+| `src/camera.c` | `camera_birdseye_view()` going-up | arm — distance from `fsn_layout_extents()`, not `MAPV_NODE_WIDTH()` |
+| `src/camera.c` | `camera_birdseye_view()` coming-down | deliberate fall-through into `FSV_MAPV` (same storage) |
+| `src/colexp.c` | collapse/expand time | arm → `FSN_COLEXP_TIME` |
+| `src/ogl.c` | `setup_modelview_matrix()` | deliberate fall-through into `FSV_MAPV` (identical transform) |
+| `src/sdl/gpu.cpp` | `setup_modelview_matrix()` | deliberate fall-through into `FSV_MAPV` (same) |
+| `src/sdl/gpu.cpp` | `draw_landscape()` ground gate | arm → `draw_ground = true` (FSN is the mode the landscape exists for) |
+| `src/fsv.c` | `fsv_set_mode()` | unchanged — switches on the *previous* mode with a `default:` arm, which is the correct behavior for FSN (remember it as the next startup mode) |
+| `src/sdl/ui_dialogs.cpp` | symlink-target eligibility | unchanged — an explicit `== FSV_TREEV` guard for unbuilt TreeV geometry; FSN lays out the whole tree, so it correctly takes the general path |
+| `src/sdl/ui_rail.cpp` | Tilt/Height enable | unchanged — `mode == FSV_MAPV \|\| mode == FSV_TREEV`, deliberately excluding FSN, matching its null scrollbar state |
+| `src/sdl/main.cpp` | `initial_camera_pan()` | unchanged — an `== FSV_TREEV` guard for the L-shaped pan; FSN takes the ordinary pan |
+
+Non-`FsvMode` switches that `grep SWITCH_FAIL` also matches were checked
+and left alone: `src/common.c` (HSV sextant), `src/color.c`,
+`src/window.c` (`ColorMode`, `StatusBarID`), `src/animation.c`
+(`MorphType`), `src/about.c` (`AboutMesg`), `src/dialog.c`,
+`src/colexp.c`'s own `ColExpMesg` switches, and
+`src/ogl-gpu-compat.c`/`src/camera.c`'s axis switches.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -4057,3 +4264,10 @@ code is kept.
 | 2026-08-08 | fsn-mode Task A1 fix round: added `FSV_DEPTH_ALWAYS_NOWRITE` (`gpu.h`/`pipeline_for()`) — depth test disabled outright, not left enabled with `SDL_GPU_COMPAREOP_ALWAYS` — for the landscape sky instead of tuning the rejected NDC-depth constant | disabling the test is what SDL_GPU (mirroring Vulkan/Metal) actually ties the "no depth write" guarantee to, on every backend, regardless of the projection's shape; a compare-op tweak on the old approach would still have been exploitable at a big enough near:far ratio |
 | 2026-08-08 | fsn-mode Task A1 fix round: ground plane gated to `FSV_MAPV`/`FSV_TREEV` only (`draw_landscape()`'s explicit, `SWITCH_FAIL`-terminated switch on `globals.fsv_mode`), not drawn unconditionally in every mode | confirmed by screenshot that an unconditional ground plane produces a full-frame green wall in `FSV_DISCV` for any realistically-sized directory (camera there looks straight down the world Z axis at a fixed distance — it never reads `phi`/`theta` the way MapV/TreeV do — so the ground quad, sitting just past the disc's own content, fills the entire view once `distance ≥ 96`); a 2-file test fixture's small default distance masked this at first and the earlier claim that "DiscV's ground does not render at all" was wrong |
 | 2026-08-08 | fsn-mode Task A1: landscape persistence (`landscape_get/_set/_init`) lives in `src/color.c`/`color.h` rather than a new module | identical shape to the color config already there (nvstore-backed, read once at startup, written immediately on change) — a new file would duplicate the open/close-per-call pattern for no isolation benefit |
+| 2026-08-08 | fsn-mode Task B1: `FSV_FSN` inserted into `FsvMode` before `FSV_SPLASH`, not appended after `FSV_NONE` | it lands among the real visualization modes, so every `switch` ending in `SWITCH_FAIL` must account for it; a missed one aborts loudly (`g_assert_not_reached`) instead of silently taking a wrong arm — exactly the failure mode wanted while the mode is being built out |
+| 2026-08-08 | fsn-mode Task B1: FSN split across two translation units (`geometry-fsn.c` layout in `libfsvcore`, `geometry-fsn-draw.c` drawing per frontend) rather than one file next to `geometry.c` | the layout is pure math that `camera.c` (itself core) reads, and keeping it gpu-free is the property the headless layout test exists to protect — with the split, `tests/test_fsn_layout.c` links with zero renderer stubs, so the linker enforces the invariant. The single-file arrangement was tried first and broke `fsv-scan`'s link: stubbing `fsn_layout_*` for `libfsvcore`'s consumers would have collided with the test's own compiled-in copy |
+| 2026-08-08 | fsn-mode Task B1: FSN geometry stored in `NodeDesc::geomparams`/`DirNodeDesc::geomparams2` like every other mode, rather than a side table | `FsnPedestal` is exactly five doubles, which is `geomparams`'s exact size (MapV plays the same trick), and the three extra per-directory values the two-pass layout carries fit `geomparams2` exactly; a side table would need its own lifetime tied to a tree that `scanfs()` already frees wholesale |
+| 2026-08-08 | fsn-mode Task B1: pedestal and file-box heights are `log2` of size, clamped — not linear, not sqrt | a real source tree spans five or six orders of magnitude of subtree size; anything gentler leaves the root pedestal towering over everything else in the same frame, where the reference screenshot's pedestals are all within a small factor of each other |
+| 2026-08-08 | fsn-mode Task B1: FSN camera reuses MapV's *storage* (`MAPV_CAMERA`, the Cartesian target) but not MapV's *math* | `mapv_look_at()` and every other `mapv_*` camera helper is written in `MAPV_GEOM_PARAMS`, which holds an `FsnPedestal` in FSN mode (the modes share `NodeDesc::geomparams`) — delegating outright would feed the camera another mode's numbers reinterpreted as its own. The storage, by contrast, is genuinely the same shape, so the pan/morph arms fall through to MapV's |
+| 2026-08-08 | fsn-mode Task B1: `geometry.c`'s `node_set_color()` exported as `geometry_node_set_color()` instead of copied into `geometry-fsn-draw.c` | one select-pass id encoding and one highlight boost for both files rather than two that could drift; `highlight_node_id` is `geometry.c`'s private state, so a copy could not have shared it anyway |
+| 2026-08-08 | fsn-mode Task B1: FSN wires draw black in the select pass rather than being skipped | same reasoning as `draw_lit()`'s fixed-color path above (2026-08-07): skipping drops them from the pick pass's depth buffer, letting a click pass through to whatever sits behind; id 0 keeps the occlusion honest while correctly reporting "not a node" |
