@@ -81,6 +81,13 @@ static double g_prev_y = 0.0;
 static bool g_mouse_captured = false;
 static Uint8 g_capture_button = 0;
 
+// Deferred hover pick -- see input_flush_hover_pick() below. Coordinates
+// are PIXEL space (pixel_scale()-multiplied), the space node_at_cursor()
+// wants.
+static bool g_hover_pending = false;
+static double g_hover_x = 0.0;
+static double g_hover_y = 0.0;
+
 // Context-menu request seam (Task 5.1) -- see input.h. Written only from
 // the right-click branch below; read/cleared only by
 // input_take_context_menu_request(). win_x/win_y are LOGICAL window
@@ -200,6 +207,13 @@ input_handle_event(const SDL_Event *ev)
 		if (io.WantCaptureMouse)
 			break; // ImGui owns this click (its own window/widget)
 
+		// The click path picks immediately (below) and owns
+		// g_indicated_node from here; a hover pick queued earlier in
+		// this drain would only overwrite that decision -- and
+		// update_highlight(false) after this event's
+		// update_highlight(btn1) would drop the selection highlight.
+		g_hover_pending = false;
+
 		const bool ctrl_key = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
 		const bool btn1 = ev->button.button == SDL_BUTTON_LEFT;
 		const bool btn2 = ev->button.button == SDL_BUTTON_MIDDLE;
@@ -274,6 +288,11 @@ input_handle_event(const SDL_Event *ev)
 	// reading of the same intent ("was this the left button being
 	// released") without depending on the GDK quirk.
 	case SDL_EVENT_MOUSE_BUTTON_UP: {
+		// A release either starts a camera pan (which the hover flush
+		// would skip anyway, camera_moving()) or ends a drag; neither
+		// wants a stale queued hover pick applied on top.
+		g_hover_pending = false;
+
 		const bool ctrl_key = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
 		const bool btn1 = ev->button.button == SDL_BUTTON_LEFT;
 
@@ -311,29 +330,55 @@ input_handle_event(const SDL_Event *ev)
 		const double y = ev->motion.y * scale;
 
 		if (!camera_moving()) {
+			// Any motion supersedes a hover pick queued by an
+			// earlier motion in this same drain; the branches below
+			// either re-queue one (the no-button case) or take over
+			// g_indicated_node themselves.
+			g_hover_pending = false;
+
 			if (btn2) {
 				// Dolly the camera.
 				const double dy = MOUSE_SENSITIVITY * (y - g_prev_y);
 				camera_dolly(-dy);
 				g_indicated_node = NULL;
+				update_highlight(btn1);
 			} else if (ctrl_key && btn1) {
 				// Revolve the camera.
 				const double dx = MOUSE_SENSITIVITY * (x - g_prev_x);
 				const double dy = MOUSE_SENSITIVITY * (y - g_prev_y);
 				camera_revolve(dx, dy);
 				g_indicated_node = NULL;
+				update_highlight(btn1);
 			} else if (!ctrl_key && (btn1 || btn3)) {
-				// Pointless dragging.
+				// Pointless dragging. Deliberately NOT deferred:
+				// this branch's meaning is "did the cursor leave
+				// the node it was pressed on", which every
+				// intermediate position can answer differently --
+				// coalescing to the last one would miss a drag
+				// that wandered off the node and back on. It also
+				// only picks at all while a node is already
+				// indicated, so it is not the flood the hover
+				// path was.
 				if (g_indicated_node != NULL) {
 					GNode *node = node_at_cursor((int)x, (int)y);
 					if (node != g_indicated_node)
 						g_indicated_node = NULL;
 				}
+				update_highlight(btn1);
 			} else {
-				g_indicated_node = node_at_cursor((int)x, (int)y);
+				// Hover, no buttons down. This is the case that
+				// used to run a full offscreen render + fence
+				// wait (~2-9ms) per motion event, of which one
+				// drain can deliver many. Record the position and
+				// let input_flush_hover_pick() do it once, after
+				// the drain -- the highlight then follows the
+				// final cursor position, which is the only
+				// position the user can still see.
+				g_hover_pending = true;
+				g_hover_x = x;
+				g_hover_y = y;
 			}
 
-			update_highlight(btn1);
 			g_prev_x = x;
 			g_prev_y = y;
 		}
@@ -356,6 +401,7 @@ input_handle_event(const SDL_Event *ev)
 			break;
 		camera_dolly(-ev->wheel.y * SCROLL_DOLLY_SCALE);
 		g_indicated_node = NULL;
+		g_hover_pending = false;
 		break;
 	}
 
@@ -368,11 +414,33 @@ input_handle_event(const SDL_Event *ev)
 		geometry_highlight_node(NULL, FALSE);
 		window_statusbar(SB_RIGHT, "");
 		g_indicated_node = NULL;
+		// The cursor is gone; a hover pick queued for a position
+		// inside the window would re-light the highlight this case
+		// just cleared.
+		g_hover_pending = false;
 		break;
 
 	default:
 		break;
 	}
+}
+
+void
+input_flush_hover_pick(void)
+{
+	if (!g_hover_pending)
+		return;
+	g_hover_pending = false;
+
+	// Re-checked, not inherited from the motion event: the drain may
+	// have started a camera pan after the hover motion arrived (a
+	// left-button release, ui_main.cpp's Look At), and viewport.c's
+	// motion handler never picks while the camera is moving.
+	if (camera_moving())
+		return;
+
+	g_indicated_node = node_at_cursor((int)g_hover_x, (int)g_hover_y);
+	update_highlight(false); // no buttons down -- this is the hover path
 }
 
 void
@@ -384,6 +452,7 @@ input_reset(void)
 	g_indicated_node = NULL;
 	g_context_menu_request.pending = false;
 	g_context_menu_request.node = nullptr;
+	g_hover_pending = false;
 
 	// Drag/capture state. A scan blocks the main thread for as long as
 	// it takes (gui_update() pumps events, but input_handle_event() is

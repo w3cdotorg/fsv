@@ -19,11 +19,31 @@
 // how GTK's implicit pointer grab kept viewport.c's own drags alive past
 // the widget's bounds.
 //
-// No per-frame tick is needed: viewport.c only ever moves the camera from
-// GDK_MOTION_NOTIFY's own delta, never from a timer or the busy animation
-// loop while a button is held but the mouse is stationary. This function
-// is the complete port of that mechanism.
+// The camera side needs no per-frame tick: viewport.c only ever moves the
+// camera from GDK_MOTION_NOTIFY's own delta, never from a timer or the
+// busy animation loop while a button is held but the mouse is stationary.
+// The *hover pick* side does -- see input_flush_hover_pick() below.
 void input_handle_event(const SDL_Event *ev);
+
+// Runs the hover pick (the "which node is under the cursor with no button
+// held" highlight) that input_handle_event() deferred, at most once per
+// call. Call once per main-loop iteration, after the SDL_PollEvent()
+// drain and before fsv_animation_tick(), so the highlight is up to date
+// for the frame this iteration renders.
+//
+// Why it is deferred at all: that pick is a gpu_pick(), i.e. a full
+// offscreen id-colour render plus a fence wait -- 1.85ms to 9.29ms
+// measured. SDL delivers one motion event per physical mouse report, so a
+// single drain can hold a dozen of them, and doing the pick inline turned
+// a fast mouse sweep into multiple synchronous GPU round-trips per frame.
+// Only the last position is still under the cursor by the time anything
+// is drawn, so coalescing to it costs no visible fidelity.
+//
+// The click path is NOT deferred: a press picks inline, in
+// input_handle_event(), exactly as before. A press is one event, not a
+// flood, and its pick has to resolve before the same event decides
+// whether to open a context menu.
+void input_flush_hover_pick(void);
 
 // Drops every piece of state this file carries across events: the
 // indicated (highlighted) node, any pending context-menu request, and the

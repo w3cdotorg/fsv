@@ -1062,6 +1062,14 @@ main(int argc, char **argv)
 			continue;
 		}
 
+		// One hover pick per loop iteration, from the last motion
+		// position seen in the drain above -- see input.h. Deliberately
+		// after the minimized check (a pick is a real GPU round-trip;
+		// there is nothing to highlight on a hidden window) and before
+		// fsv_animation_tick(), so the highlight it sets is part of the
+		// frame this iteration renders rather than the next one.
+		input_flush_hover_pick();
+
 		bool animating = fsv_animation_tick() != 0;
 
 		if (!animating && !g_frame_requested) {
