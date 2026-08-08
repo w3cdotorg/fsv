@@ -18,7 +18,7 @@
 #include "filelist.h"
 #include "fsv-platform.h"
 #include "geometry.h"
-#include "fsn-style.h" /* FSN_GENERATION_GAP -- FSV_FSN framing */
+#include "fsn-style.h" /* FSN_GENERATION_GAP (FSV_FSN framing), FSN_FLIGHT_* (flight navigation) */
 #include "geometry-fsn.h" /* FSV_FSN layout accessors */
 #include "window.h"
 
@@ -136,17 +136,10 @@ camera_init( FsvMode mode, boolean initial_view )
 	double d, d1, d2;
 
 	/* A mode switch, a rescan or a Reset re-poses the camera outright;
-	 * whatever the user was flying toward is gone with it.
-	 *
-	 * Note the ordering this sits in: fsv_set_mode( ) (and the SDL
-	 * frontend's enter_mode( )) run geometry_init( ) for the NEW mode,
-	 * then this, then assign globals.fsv_mode -- so the
-	 * camera_update_scrollbars( ) inside camera_flight_end( ) dispatches
-	 * on the OLD mode while the geometry parameters already belong to
-	 * the new one. Harmless, and not by accident: a flight can only be
-	 * in progress if the old mode is FSV_FSN, whose scrollbar arm is the
-	 * null state and reads no geometry at all. Worth re-checking if FSN
-	 * ever grows a real scroll model. */
+	 * whatever the user was flying toward is gone with it. Safe this
+	 * early -- fsv_set_mode( ) has not assigned globals.fsv_mode yet at
+	 * this point, and camera_flight_end( ) deliberately does not read
+	 * it (see the note on its definition). */
 	camera_flight_end( );
 
 	camera->fov = 60.0;
@@ -797,10 +790,21 @@ static double flight_t_prev = 0.0;
  * replacement pan, master morph included, so none of them noticed.
  * Flight is the first one that doesn't.
  *
- * geometry_camera_pan_finished( ) is deliberately NOT called here: it
- * records where the node cursor came to rest, and an interrupted pan
- * never came to rest anywhere. (FSN's arm of it is empty in any case --
- * the mode draws no cursor.) */
+ * Two of post_pan_end( )'s four actions are deliberately NOT reproduced:
+ *
+ *   - geometry_camera_pan_finished( ): it records where the node cursor
+ *     came to rest, and an interrupted pan came to rest nowhere. (FSN's
+ *     arm of it is empty in any case -- the mode draws no cursor.)
+ *   - filelist_show_entry( node ): it scrolls the file list to the node
+ *     the pan was *heading for*, which is precisely the node the user
+ *     just decided not to go to. A no-op in the SDL frontend today
+ *     (src/sdl/stubs.c) but real in the GTK one and a candidate to
+ *     become real here, so this is a decision, not an oversight: the
+ *     pan's destination never became the current node, so nothing should
+ *     select it.
+ *
+ * The other two -- window_set_access( TRUE ) and the
+ * camera_currently_moving clear -- are what this function exists for. */
 static void
 cancel_pan_for_manual_control( void )
 {
@@ -811,6 +815,43 @@ cancel_pan_for_manual_control( void )
 	camera_currently_moving = FALSE;
 	camera->pan_part = 1.0;
 	window_set_access( TRUE );
+}
+
+
+/* Shifts camera->theta by whole turns until it is within 180 degrees of
+ * target_theta, so that a morph between the two takes the short way
+ * round. Call immediately before arming such a morph.
+ *
+ * Why it is needed: morph( ) interpolates linearly between two
+ * *numbers*, and theta is an angle -- two headings a few degrees apart
+ * on the compass can be most of a turn apart numerically. Flight makes
+ * that routine, because camera_flight_tick( ) normalizes theta into
+ * [0, 360] on every tick: a viewer who has turned slightly past the
+ * wrap point leaves theta at, say, 3 degrees, and a pan to
+ * FSN_CAMERA_THETA (270) would then spin the long way round (267
+ * degrees, over a second of gratuitous yaw) instead of taking the
+ * 93-degree short arc.
+ *
+ * Why it is free: every other consumer of theta takes its sine or
+ * cosine, so theta and theta +/- 360 are the same heading everywhere
+ * (mapv_get_camera_position( ) included). Only the morph, which does
+ * arithmetic on the number itself, can tell them apart -- which is
+ * exactly the bug.
+ *
+ * Applied to the two FSN pans that can follow a flight (fsn_look_at( )
+ * and camera_birdseye_view( )'s going-up arm) and deliberately nowhere
+ * else. camera_revolve( ) normalizes theta the same way, so DiscV, MapV
+ * and TreeV have the same long-way-round pan after a manual revolve --
+ * pre-existing upstream behavior in three modes this task is not
+ * touching, recorded in docs/PORTING.md rather than changed under cover
+ * of an fsn task. */
+static void
+unwrap_theta_toward( double target_theta )
+{
+	while ((target_theta - camera->theta) > 180.0)
+		camera->theta += 360.0;
+	while ((camera->theta - target_theta) > 180.0)
+		camera->theta -= 360.0;
 }
 
 
@@ -895,7 +936,19 @@ camera_flight_update( double dx_from_press, double dy_from_press, boolean vertic
 
 /* Stops a flight. Idempotent, and safe in any mode: this is what
  * input_reset( ), the Escape key and every camera_look_at( ) call
- * reach for, none of which can know whether a flight is in progress. */
+ * reach for, none of which can know whether a flight is in progress.
+ *
+ * Deliberately does NOT push scrollbar state. The last tick that moved
+ * the camera already did (camera_flight_tick( )'s
+ * camera_update_scrollbars( FALSE )), and a flight that never moved the
+ * camera has nothing to push -- so the call would be redundant in both
+ * cases. Leaving it out also keeps this function free of any dependency
+ * on globals.fsv_mode, which matters because two of its callers run at
+ * moments when that variable does not describe the world:
+ * camera_init( ), which fsv_set_mode( ) calls after the NEW mode's
+ * geometry_init( ) but BEFORE assigning globals.fsv_mode; and
+ * src/sdl/input.cpp's input_reset( ), which runs around a rescan.
+ * camera_update_scrollbars( ) ends in SWITCH_FAIL for FSV_NONE. */
 void
 camera_flight_end( void )
 {
@@ -906,8 +959,6 @@ camera_flight_end( void )
 	flight_speed = 0.0;
 	flight_yaw_rate = 0.0;
 	flight_climb = 0.0;
-
-	camera_update_scrollbars( TRUE );
 }
 
 
@@ -1221,6 +1272,8 @@ fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
 		pan_time = MAX(FSN_CAMERA_MIN_PAN_TIME,
 		    MIN(1.0, k) * FSN_CAMERA_MAX_PAN_TIME);
 	}
+
+	unwrap_theta_toward( new_cam->theta );
 
 	morph( &camera->theta, mtype, new_cam->theta, pan_time );
 	morph( &camera->phi, mtype, new_cam->phi, pan_time );
@@ -1693,6 +1746,9 @@ camera_birdseye_view( boolean going_up )
 			fsn_layout_extents( &fsn_ext.x, &fsn_ext.y, NULL );
 			new_cam->distance = field_distance( camera->fov,
 			    MAX(1.0, MAX(fsn_ext.x, fsn_ext.y)) );
+			/* Same reason as fsn_look_at( )'s: this is the other
+			 * pan a flight can hand a wrapped heading to */
+			unwrap_theta_toward( new_cam->theta );
 			break;
 
 			SWITCH_FAIL
