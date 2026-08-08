@@ -3568,6 +3568,167 @@ gettext file libglu1-mesa-dev`), `meson setup -Dfrontend=gtk`, `ninja`
 (47/47 targets, `src/fsv` links, only pre-existing unrelated
 `G_LOG_DOMAIN` redefinition warnings), `meson test` → 3/3.
 
+### Task A2 verification (7-bucket age spectrum + ages legend)
+
+**Files:** `src/color.h` (`SPECTRUM_FSN_BUCKETS`, inserted before
+`SPECTRUM_NONE`; `color_timestamp_spectrum_type()` accessor);
+`src/color.c` (`fsn_bucket_color()`, the `time_color()`/
+`color_spectrum_color()` branches, `tokens_timestamp_spectrum_type[]`'s
+new `"fsnbuckets"` token); `src/fsn-style.h` (`FsnAgeBucket`,
+`fsn_age_buckets[7]`, `FSN_AGE_BUCKET_COUNT`); `src/sdl/ui_rail.cpp`/`.h`
+(new — `ui_legend_draw()`), registered in `src/sdl/meson.build`;
+`src/sdl/main.cpp` (calls `ui_legend_draw()` alongside
+`ui_dialogs_draw()`, both loop sites); `src/sdl/ui_dialogs.cpp` (Color
+Setup timestamp tab's spectrum `Combo` gains a fourth choice);
+`src/dialog.c` (GTK's own combo gains the same fourth choice — trivial,
+see below); `tests/test_color_persistence.c` (extended).
+
+**Enum insertion safety, actually checked, not assumed.** The brief
+asked to verify that inserting `SPECTRUM_FSN_BUCKETS` before
+`SPECTRUM_NONE` is safe on disk. It is: `lib/nvstore.c`'s
+`nvs_write_int_token()`/`nvs_read_int_token_default()` persist a
+`SpectrumType` as the matching **string** in
+`tokens_timestamp_spectrum_type[]` (`"rainbow"`/`"heat"`/`"gradient"`),
+never the raw enum integer — confirmed by reading both functions, not
+just inferred from the array's shape. An existing `~/.fsvrc` with (say)
+`spectrumtype gradient` resolves by string match regardless of where
+`SPECTRUM_FSN_BUCKETS` lands numerically; the new `"fsnbuckets"` token
+was added at the matching array position (index 3, same as the
+enumerator's position), the same hand-kept-in-sync convention every
+other token array in `color.c` already relies on.
+
+**Colors: sampled, not eyeballed — and the brief's own guess for the
+7th bucket was wrong.** The reference screenshot's "ages:" bar
+(`35037135976_0d90f4a3d5_z.jpg`, approx. `x=148..284, y=497..506`) was
+cropped and, for each of the 7 swatches, given a per-channel **median**
+pixel value in Python/PIL (robust against the bold white label text and
+JPEG ringing sitting on top of each flat fill) — the same
+sample-real-pixels approach Task A1 used for the sky/ground colors. Six
+of the seven read cleanly as distinct hues (maroon-red, orange-brown,
+olive-yellow, dark teal-green, deep blue, purple). The 7th ("> 1 yr"),
+which the brief's own first-pass description called "grey", does not
+survive a close look: median ≈ `(87, 44, 68)`, and an 8x crop of just
+that swatch (checked directly, not inferred) shows a visibly dark
+plum/wine color with a clear reddish-purple hue, not a neutral
+grey — corrected in `fsn-style.h` to the sampled value, with the
+before/after reasoning documented right next to the table.
+
+**Bucket semantics.** `fsn_bucket_color()` (`src/color.c`) steps a
+file's age (`now - node's chosen timestamp`, real wall-clock `time(
+NULL)`, computed inside `time_color()`) through `fsn_age_buckets[]`'s
+`max_age_s` cutoffs (7d/14d/30d/91d/182d/365d, catch-all beyond) and
+returns that bucket's color; deliberately **ignores**
+`color_config.by_timestamp.old_time`/`new_time` — fsn's buckets are
+fixed, absolute ages, not the continuous, user-adjustable windowed
+spectrum the rainbow/heat/gradient path uses. Directories are
+unaffected: `time_color()`'s existing `NODE_IS_DIR` early-return (node
+type color, not a timestamp color) sits before the new branch and was
+not touched. `color_spectrum_color()` also gained a
+`SPECTRUM_FSN_BUCKETS` case — not for real node coloring (that always
+goes through `fsn_bucket_color()` instead), but because
+`generate_spectrum_colors()`'s 1024-shade table build and
+`ui_dialogs.cpp`'s Color Setup preview strip both unconditionally
+sample `color_spectrum_color()` across `x=[0,1]` and would otherwise hit
+`SWITCH_FAIL`; the added case steps through the 7 bucket colors in `x`
+order, which incidentally makes the preview strip show a legible
+7-band swatch of the bucket palette.
+
+**Select-pass discipline unaffected.** `node_set_color()`
+(`src/geometry.c`) already branches on `gpu_render_mode()` before ever
+reading `NODE_DESC(node)->color` — in `FSV_RENDER_SELECT` it paints the
+node's id-derived color unconditionally and never looks at the color
+this task's spectrum choice feeds into `color_assign_recursive()`. So
+`SPECTRUM_FSN_BUCKETS` changes only what `NORMAL`-pass pixels show, with
+zero effect on picking; verified by reading the function (unchanged by
+this task) rather than by re-running the Task A1 pick-hook exercise,
+since nothing this task touched is anywhere near that code path.
+
+**The legend bar and the `--screenshot`/ImGui gap.** `--screenshot`'s
+offscreen capture (`gpu_screenshot_begin/end`) renders only the 3D scene
+pass and has never composited ImGui (Task 6.4's own investigation, cited
+in this file's `--record` section, established why: the ImGui pipeline
+is built once against the swapchain's own pixel format, and
+`--screenshot`'s texture uses a different, fixed one). `ui_legend_draw()`
+is a plain ImGui window, so proving it draws correctly needed the one
+mechanism in this codebase that *does* composite ImGui into a real,
+GPU-rendered frame without a visible display: `--record`. Used
+end-to-end for this task's headed verification rather than a live
+screen capture (this sandbox has no display to capture from — a gap
+already disclosed in the Task 5.2 fix-round section above):
+
+1. A throwaway harness (same shape as `tests/test_color_persistence.c`
+   — `color_init()`, `color_get_config()`, flip `spectrum_type`,
+   `color_set_config()`+`color_write_config()`, never committed to the
+   repo) wrote a real `~/.fsvrc` with `colormode time` /
+   `spectrumtype fsnbuckets` under a scratch `$HOME`.
+2. A fixture directory got 7 files, each `touch -t`-ed to a distinct
+   age (3d/10d/20d/60d/120d/200d/500d — one per bucket, all with
+   non-trivial size so MapV's layout gives each a real, distinct box
+   instead of degenerating into a zero-area sliver) and non-zero
+   content.
+3. `fsv --record OUTDIR SECONDS FIXTURE_DIR` with that `$HOME` produced
+   30fps BMP frames; `--record`'s scripted camera cues target this
+   repo's own `src/` paths and log-and-skip when they don't resolve
+   under the fixture root (by design, per Task 6.4), so this just
+   recorded the ordinary automatic fly-to-root pan with no crash.
+4. The final frame (read back with PIL, not eyeballed) shows: the
+   bottom-center "ages:" bar with all 7 correctly-labeled, correctly-
+   colored swatches in the reference's own order, **and** all 7 fixture
+   files rendered as 7 visibly distinct box colors. Per-pixel sampling
+   of each box's lit top face confirms exact correspondence to
+   `fsn_age_buckets[]`: every one of the 7 sampled colors is that
+   bucket's defined RGB scaled by the same ~0.80 lighting factor (e.g.
+   "1 wk" red `(144,60,53)` defined → `(116,48,43)` sampled, ratio
+   0.80/0.80/0.81; "> 1 yr" plum `(87,44,68)` defined → `(70,36,55)`
+   sampled at its lit face, ratio 0.80/0.82/0.81) — the same uniform
+   attenuation across all 7, which is exactly what one shared diffuse
+   lighting term applied to 7 different flat input colors should look
+   like, not 7 independent coincidences.
+5. **Toggling to rainbow hides the legend**: re-wrote the same
+   `~/.fsvrc` with `spectrumtype rainbow` (mode left at
+   `COLOR_BY_TIMESTAMP`) and re-ran `--record` on the same fixture — the
+   resulting frame shows the expected continuous rainbow coloring on the
+   3D nodes and **no legend bar at all**, confirming
+   `ui_legend_draw()`'s `color_get_mode()`/
+   `color_timestamp_spectrum_type()` gate actually gates.
+6. Color Setup dialog round-trip: covered structurally (the "fsn
+   buckets" `Combo` entry feeds the same, unchanged
+   `color_set_config()`/`color_write_config()`/Apply-button path every
+   other spectrum choice already uses) and end-to-end by
+   `tests/test_color_persistence.c`'s new assertions (below) — not
+   separately re-verified by driving the live ImGui widget, since
+   nothing about *how* the widget commits its value changed, only which
+   values it offers.
+
+**TDD.** Extended `tests/test_color_persistence.c` with a `set
+SPECTRUM_FSN_BUCKETS → color_write_config() → color_init() (simulated
+relaunch) → assert` block, same shape as the file's existing
+by_wpattern regression case. Confirmed RED first — not just by
+inspection — via `git stash push -- src/color.h src/color.c` (reverting
+only the enum/logic, keeping the new test), which failed to compile
+with `use of undeclared identifier 'SPECTRUM_FSN_BUCKETS'`; `git stash
+pop` restored the implementation and the suite went GREEN.
+
+**GTK arm.** `color.c` is shared, so GTK gets the 7 bucket colors for
+real node coloring for free. `src/dialog.c`'s own spectrum combo (a
+plain `GtkComboBoxText`, not a structural widget) needed only a fourth
+`gtk_combo_box_text_append_text()` string and one more `strcmp()`
+branch in its "changed" callback — genuinely trivial, done rather than
+skipped. The ages legend bar itself is **not** ported to GTK: it is a
+plain ImGui window with no GTK equivalent, and the plan scopes it as
+SDL-only. Verified in a fresh `debian:bookworm` container (this port's
+macOS host has no GTK, matching CI, same package list as Task A1's own
+GTK verification): the real `fsv` executable — including `dialog.c` —
+builds clean, `meson test` → 3/3.
+
+**Both arms build clean, tests 3/3.** SDL/macOS: `ninja -C
+builddir-sdl`, `meson test -C builddir-sdl` → 3/3 (including the new
+bucket-persistence assertions inside `test_color_persistence`). GTK:
+`debian:bookworm` container as above, 3/3 (this arm's test binaries link
+`libfsvcore` and don't depend on `gtkdep`, so the same 3 tests run
+regardless of whether the full GTK `fsv` executable also happens to
+build on that host — it did here).
+
 ### Task A1 fix round (code review)
 
 A from-source-trace review of the verification above found two real bugs
