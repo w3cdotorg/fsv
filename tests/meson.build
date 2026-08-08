@@ -26,3 +26,16 @@ test_color_persistence = executable('test_color_persistence',
   dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   include_directories: incdir)
 test('color_persistence', test_color_persistence)
+
+# fsn-mode Task B1: FSV_FSN's layout pass is deliberately gpu-free so it
+# can be checked without a renderer. src/geometry-fsn.c is compiled in
+# directly (it is frontend-side, like geometry.c, and so is absent from
+# libfsvcore); the test file itself supplies the handful of gpu.h/
+# tmaptext.h no-ops its *draw* pass needs to link -- see its header.
+test_fsn_layout = executable('test_fsn_layout',
+  ['test_fsn_layout.c', '../src/geometry-fsn.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  include_directories: incdir,
+  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+test('fsn_layout', test_fsn_layout)

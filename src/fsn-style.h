@@ -150,4 +150,74 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
 	{ "> 1 yr",          -1.0, { 0.341f, 0.173f, 0.269f } }, /* dark plum (catch-all; max_age_s unused), ~(87,44,68) */
 };
 
+/**** Landscape layout (fsn-mode Task B1, src/geometry-fsn.c) ****/
+
+/* World units. fsv has no unit system of its own: MapV derives every
+ * footprint from sqrt(bytes) and TreeV from a fixed 256-unit leaf edge
+ * (TREEV_LEAF_NODE_EDGE, src/geometry.h), so "one unit" is whatever each
+ * mode says it is. FSN picks a fixed absolute scale -- a file box is
+ * always FSN_BOX_EDGE across, however big the file is; only its *height*
+ * carries the size -- and deliberately stays in the same order of
+ * magnitude as the other two modes (tens to hundreds of units), so the
+ * shared camera near/far clip ratios (NEAR_TO_DISTANCE_RATIO /
+ * FAR_TO_NEAR_RATIO, src/camera.h) keep working unchanged.
+ *
+ * All eyeballed from the reference screenshot (task-B1-brief.md's
+ * 3060c037-069f-4715-a01e-c30e53e505a2.jpg): a directory is a wide, low
+ * slab carrying a tight grid of small boxes, sibling directories sit
+ * roughly one slab-width apart, and each generation is several
+ * slab-depths further from the camera than the last. */
+#define FSN_BOX_EDGE            64.0  /* file box footprint, square */
+#define FSN_BOX_GAP             24.0  /* gap between adjacent file boxes */
+#define FSN_PEDESTAL_MARGIN     48.0  /* clear band around the box grid;
+                                       * also where the name label goes */
+#define FSN_PEDESTAL_MIN_EDGE  192.0  /* floor for an empty directory, so
+                                       * it is still a visible target */
+#define FSN_SIBLING_GAP        320.0  /* clear space between the subtree
+                                       * spans of two sibling directories */
+#define FSN_GENERATION_GAP    1024.0  /* clear space between a parent's
+                                       * outward edge and its children's
+                                       * inward edge -- the wire length */
+
+/* Pedestal height:
+ *     h = MIN + SCALE * log2(1 + subtree_bytes / FSN_SIZE_UNIT), clamped
+ * A real source tree spans five or six orders of magnitude of subtree
+ * size; linear or even sqrt scaling makes the root pedestal tower so far
+ * over its children that nothing else is legible in the same frame (the
+ * reference screenshot's pedestals are all within a small factor of each
+ * other). Log2 compresses that to a usable range, and the MAX clamp
+ * bounds the pathological case (a multi-TB root) outright. */
+#define FSN_SIZE_UNIT         1024.0  /* one "size step" is one kilobyte */
+#define FSN_PEDESTAL_H_MIN      24.0
+#define FSN_PEDESTAL_H_SCALE    20.0
+#define FSN_PEDESTAL_H_MAX     512.0
+
+/* File box height: same log law, gentler slope and a lower ceiling --
+ * a box must never be tall enough to hide the pedestal it stands on. */
+#define FSN_BOX_H_MIN           16.0
+#define FSN_BOX_H_SCALE         12.0
+#define FSN_BOX_H_MAX          320.0
+
+/* Directory-to-child wire: thin, bright, unlit. Eyeballed as plain white
+ * in the reference screenshot; gpu_set_line_width() is honored by the GTK
+ * shim and ignored by the SDL_GPU backend (see src/gpu.h), so the SDL
+ * frontend draws these one pixel wide -- which is what the reference's
+ * hairline wires look like anyway. */
+#define FSN_WIRE_R 1.0f
+#define FSN_WIRE_G 1.0f
+#define FSN_WIRE_B 1.0f
+#define FSN_WIRE_WIDTH 1.0f
+
+/* Text. The reference screenshot puts the current path on the ground in
+ * front of the root pedestal in large outlined white letters; node name
+ * labels are small and dark, like MapV's. Both are drawn flat (in the
+ * world x/y plane, text_draw_straight( )), lifted FSN_TEXT_LIFT units off
+ * whatever surface they label so they never z-fight with it. */
+#define FSN_TEXT_LIFT            1.0
+#define FSN_PATH_TEXT_HEIGHT   220.0  /* cap height of the ground path text */
+#define FSN_PATH_TEXT_GAP      256.0  /* its distance from the root pedestal */
+#define FSN_PATH_R 1.0f
+#define FSN_PATH_G 1.0f
+#define FSN_PATH_B 1.0f
+
 #endif /* FSV_FSN_STYLE_H */
