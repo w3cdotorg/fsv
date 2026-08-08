@@ -231,6 +231,155 @@ fsn_draw_path_text( void )
 }
 
 
+/* Whether `node` is currently on screen. Follows fsn_draw_recursive( )'s
+ * own rule exactly, which is less obvious than "some ancestor is
+ * collapsed" and easy to get backwards: a directory draws its own box
+ * AND its own files unconditionally, at the top of the function, before
+ * it ever looks at its own `collapsed`; that flag only gates the loop
+ * below it, which recurses into the directory's own CHILD directories.
+ * So collapsing a directory D hides D's subdirectories (and, transitively,
+ * everything under them) but never D's own files, and never D itself.
+ *
+ * Consequently:
+ *   - a DIRECTORY node's own box draws only once its PARENT's recursion
+ *     reaches it, which requires the parent (and the parent's parent,
+ *     and so on) to be uncollapsed -- so the walk below starts at
+ *     node->parent and checks it, same as every ancestor above it.
+ *   - a FILE node is one of its parent's own files, drawn the moment the
+ *     parent itself is reached, regardless of the PARENT's own collapsed
+ *     flag -- so the walk has to skip that one flag and start checking
+ *     one generation further up, at the parent's parent (which is what
+ *     actually gates whether the parent was reached at all). A file
+ *     directly under the root (root->parent == NULL, so there is no
+ *     "one generation further up") is therefore always visible, which
+ *     matches reality: root's own recursion always runs. */
+static boolean
+fsn_node_visible( GNode *node )
+{
+	GNode *ancestor;
+
+	ancestor = NODE_IS_DIR(node) ? node->parent :
+	    (node->parent != NULL ? node->parent->parent : NULL);
+
+	for (; ancestor != NULL; ancestor = ancestor->parent) {
+		if (NODE_IS_DIR(ancestor) && DIR_COLLAPSED(ancestor))
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
+
+/* Draws one ring of the spotlight decal: a filled ellipse, flat at world
+ * z, as a single triangle fan (center + a closed loop of perimeter
+ * points). Winding follows draw_landscape( )'s ground quad convention
+ * (src/sdl/gpu.cpp): angle increasing from 0 is counter-clockwise as
+ * seen from +z looking down, which is the visible winding for a decal
+ * lying flat on a surface viewed from above -- this app's camera never
+ * dips below the landscape (same assumption that quad's own comment
+ * documents), so back-face culling losing the decal from underneath is
+ * accepted, not a bug. */
+static void
+fsn_gldraw_spotlight_ring( double cx, double cy, double z,
+    double rx, double ry, float alpha )
+{
+	FsvVertex verts[FSN_SPOTLIGHT_SEGMENTS + 2];
+	int i, n = 0;
+
+	verts[n].pos[0] = (float)cx;
+	verts[n].pos[1] = (float)cy;
+	verts[n].pos[2] = (float)z;
+	verts[n].normal[0] = 0.0f;
+	verts[n].normal[1] = 0.0f;
+	verts[n].normal[2] = 1.0f;
+	++n;
+
+	for (i = 0; i <= FSN_SPOTLIGHT_SEGMENTS; i++) {
+		double theta = 2.0 * G_PI * (double)i / (double)FSN_SPOTLIGHT_SEGMENTS;
+
+		verts[n].pos[0] = (float)(cx + rx * cos( theta ));
+		verts[n].pos[1] = (float)(cy + ry * sin( theta ));
+		verts[n].pos[2] = (float)z;
+		verts[n].normal[0] = 0.0f;
+		verts[n].normal[1] = 0.0f;
+		verts[n].normal[2] = 1.0f;
+		++n;
+	}
+
+	gpu_set_color( 1.0f, 1.0f, 1.0f, alpha );
+	gpu_draw( FSV_TRIANGLE_FAN, verts, n, NULL, 0 );
+}
+
+
+/* Selection spotlight (Task B3, US5861885's literal ground-glow under
+ * the selected node): a soft white elliptical light pool on the surface
+ * the current node actually stands on -- world z == 0 (the true ground)
+ * for a directory, or its parent pedestal's top (world z == parent->h)
+ * for a file, since that pedestal top is "the ground" a file box sits
+ * on. See FSN_SPOTLIGHT_LIFT's comment (fsn-style.h) for why that lift
+ * is its own constant rather than reusing FSN_TEXT_LIFT.
+ *
+ * SELECT PASS: this decal is not a node, has no id, and -- unlike
+ * fsn_gldraw_wire( )'s black-not-skipped wires -- must not be drawn at
+ * all: it is alpha-blended, so painting it into the pick target with any
+ * color, id or otherwise, would blend partial coverage into whatever id
+ * color is already there and corrupt the read-back. Checked here
+ * (gpu_render_mode( )) rather than by the caller, matching
+ * fsn_gldraw_wire( )'s own self-check a few functions up. */
+static void
+fsn_draw_spotlight( void )
+{
+	GNode *node = globals.current_node;
+	const FsnPedestal *ped, *parent_ped;
+	double cx, cz, base_z, rx, rz;
+	int i;
+
+	if (gpu_render_mode( ) != FSV_RENDER_NORMAL)
+		return;
+
+	if (globals.fsv_mode != FSV_FSN || node == NULL)
+		return;
+
+	ped = fsn_layout_get( node );
+	if (ped == NULL)
+		return; /* no layout pass yet, or node is the metanode */
+
+	if (!fsn_node_visible( node ))
+		return; /* a collapsed ancestor hides it */
+
+	if (NODE_IS_DIR(node)) {
+		cx = ped->x;
+		cz = ped->z;
+		base_z = 0.0; /* directories stand on the true ground */
+		rx = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->w;
+		rz = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->d;
+	}
+	else {
+		if (node->parent == NULL || !NODE_IS_DIR(node->parent))
+			return; /* shouldn't happen -- every file has a dir parent */
+		parent_ped = fsn_layout_get( node->parent );
+		if (parent_ped == NULL)
+			return;
+		cx = ped->x;
+		cz = ped->z;
+		base_z = parent_ped->h; /* files stand on their parent's pedestal top */
+		rx = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->w;
+		rz = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->d;
+	}
+
+	gpu_set_lighting( 0 );
+	gpu_set_depth_test( FSV_DEPTH_LESS_NOWRITE );
+
+	for (i = 0; i < FSN_SPOTLIGHT_RING_COUNT; i++)
+		fsn_gldraw_spotlight_ring( cx, cz, base_z + FSN_SPOTLIGHT_LIFT,
+		    fsn_spotlight_rings[i].radius_frac * rx,
+		    fsn_spotlight_rings[i].radius_frac * rz,
+		    fsn_spotlight_rings[i].alpha );
+
+	gpu_set_depth_test( FSV_DEPTH_LESS );
+}
+
+
 /* FSN mode "full draw", one directory and everything under it.
  *
  * Deployment drives the recursion exactly as it does in MapV: a
@@ -337,6 +486,15 @@ fsn_geometry_draw( boolean high_detail )
 		return;
 
 	fsn_draw_recursive( root, FSN_DRAW_GEOMETRY );
+
+	/* After the solid geometry, so its FSV_DEPTH_LESS_NOWRITE test sees
+	 * every pedestal/box's real depth already written -- see
+	 * fsn_draw_spotlight( )'s own SELECT PASS note for why this call runs
+	 * unconditionally (including from gpu_pick( )'s high_detail == FALSE
+	 * pass) rather than being gated here alongside the high_detail return
+	 * below: the self-check inside is what actually keeps it out of the
+	 * select pass. */
+	fsn_draw_spotlight( );
 
 	/* Line width is per-draw-state, not per-batch, and the wires just
 	 * set it: hand the default back the way cursor_post( ) does */

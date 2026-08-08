@@ -183,7 +183,7 @@ SDL_GPUShader *g_frag_shader;
 // Only combinations actually drawn get created; a normal frame builds
 // two (triangles+LESS, lines+LESS) and adds the two cursor line variants
 // the first time a cursor is drawn.
-enum { NUM_PRIMS = 2, NUM_DEPTH_TESTS = 4, NUM_TARGETS = 2 };
+enum { NUM_PRIMS = 2, NUM_DEPTH_TESTS = 5, NUM_TARGETS = 2 };
 SDL_GPUGraphicsPipeline *g_pipelines[NUM_PRIMS][NUM_DEPTH_TESTS][NUM_TARGETS];
 
 SDL_GPUTexture *g_depth_texture;
@@ -453,6 +453,16 @@ pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 		// of leaning on it implicitly.
 		depth_stencil_state.enable_depth_test = false;
 		depth_stencil_state.enable_depth_write = false;
+	} else if (depth_test == FSV_DEPTH_LESS_NOWRITE) {
+		// fsn-mode selection spotlight (Task B3): test against the real
+		// depth buffer (LESS, same comparison as ordinary opaque scene
+		// geometry) but never write to it -- see gpu.h's FsvDepthTest
+		// comment for why this is the opposite trade-off from
+		// FSV_DEPTH_ALWAYS_NOWRITE above, and why it is also the variant
+		// that enables blending below.
+		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+		depth_stencil_state.enable_depth_test = true;
+		depth_stencil_state.enable_depth_write = false;
 	} else {
 		switch (depth_test) {
 			case FSV_DEPTH_LEQUAL:
@@ -469,14 +479,34 @@ pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 		depth_stencil_state.enable_depth_write = true;
 	}
 
-	// No blending: the GL frontend sets a blend func but never enables
-	// GL_BLEND for scene geometry (only the text overlay uses it, which
-	// is Task 3.4's pipeline).
+	// No blending for ordinary scene geometry: the GL frontend sets a
+	// blend func but never enables GL_BLEND for it (only the text overlay
+	// used to, Task 3.4's pipeline). FSV_DEPTH_LESS_NOWRITE is the one
+	// exception -- gpu.h's FsvDepthTest comment explains why blending
+	// rides on this particular depth-test value rather than getting its
+	// own gpu_draw() parameter -- and uses the same SRC_ALPHA /
+	// ONE_MINUS_SRC_ALPHA factors as text_pipeline_for()'s blend_state
+	// below, for the same reason: the GL original's one ogl_init()
+	// glBlendFunc() call is shared by everything translucent.
+	SDL_GPUColorTargetBlendState blend_state = {};
+	blend_state.enable_blend = false;
+	if (depth_test == FSV_DEPTH_LESS_NOWRITE) {
+		blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+		blend_state.dst_color_blendfactor =
+		    SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+		blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+		blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+		blend_state.dst_alpha_blendfactor =
+		    SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+		blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+		blend_state.enable_blend = true;
+	}
+
 	SDL_GPUColorTargetDescription color_target_desc = {};
 	color_target_desc.format = target == 0
 	    ? SDL_GetGPUSwapchainTextureFormat(g_device, g_window)
 	    : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-	color_target_desc.blend_state.enable_blend = false;
+	color_target_desc.blend_state = blend_state;
 
 	SDL_GPUGraphicsPipelineTargetInfo target_info = {};
 	target_info.color_target_descriptions = &color_target_desc;

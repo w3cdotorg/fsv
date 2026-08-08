@@ -164,12 +164,29 @@ void gpu_set_lighting(int enabled);
  * the far clip plane -- which would make the backdrop wrongly occlude
  * that geometry instead of always losing to it. Disabling the test
  * outright has no such failure mode regardless of the projection's
- * shape, and needs no per-scene tuning. */
+ * shape, and needs no per-scene tuning.
+ *
+ * FSV_DEPTH_LESS_NOWRITE (fsn-mode Task B3, src/geometry-fsn-draw.c's
+ * selection spotlight): the opposite trade-off from
+ * FSV_DEPTH_ALWAYS_NOWRITE above -- a translucent decal that DOES want
+ * to respect the depth buffer (so it loses to real geometry standing
+ * between it and the camera, the same as any opaque draw) but must
+ * never leave a depth value behind, both so it never occludes anything
+ * drawn after it in the same frame and so several overlapping decal
+ * layers blend against each other by draw order rather than fighting
+ * each other's depth. This is also the one FsvDepthTest value that pairs
+ * with alpha blending: src/sdl/gpu.cpp's pipeline_for() enables blending
+ * (SRC_ALPHA / ONE_MINUS_SRC_ALPHA, the same factors as the text
+ * pipeline) only for this variant, since the spotlight is currently its
+ * only caller and gpu_draw()'s contract has no separate knob for blend
+ * state -- see that function's own comment for why tying the two
+ * together here was chosen over adding one. */
 typedef enum {
 	FSV_DEPTH_LESS = 0,
 	FSV_DEPTH_LEQUAL,
 	FSV_DEPTH_GREATER,
-	FSV_DEPTH_ALWAYS_NOWRITE
+	FSV_DEPTH_ALWAYS_NOWRITE,
+	FSV_DEPTH_LESS_NOWRITE
 } FsvDepthTest;
 
 void gpu_set_depth_test(FsvDepthTest test);

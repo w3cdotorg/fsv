@@ -43,6 +43,15 @@ typedef struct {
  * wants the pre-A1 behavior verbatim. */
 #define FSN_LANDSCAPE_OFF (-1)
 
+/* Index of the "classic" preset in fsn_landscapes[] -- src/sdl/main.cpp's
+ * FSN auto-landscape default (Task B3: entering FSN mode selects this
+ * unless the user has explicitly chosen a landscape from the Display
+ * menu, src/color.c's landscape_explicit()/landscape_set()). Named rather
+ * than spelled 0 at the call site because "classic" being array index 0
+ * is otherwise only implicit in fsn_landscapes[]'s declaration order and
+ * color.c's parallel tokens_landscape[] -- see that array's own comment. */
+#define FSN_LANDSCAPE_CLASSIC 0
+
 /* Colors eyeballed from the two reference screenshots (task-A1-brief.md's
  * "Spec sources"): 3060c037-069f-4715-a01e-c30e53e505a2.jpg (overview +
  * "fsn" window, oblique view, wires) and 35037135976_0d90f4a3d5_z.jpg
@@ -280,5 +289,68 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
 #define FSN_PATH_R 1.0f
 #define FSN_PATH_G 1.0f
 #define FSN_PATH_B 1.0f
+
+/**** Selection spotlight (fsn-mode Task B3, src/geometry-fsn-draw.c) ****/
+
+/* The SGI patent's (US5861885) literal ground-glow under the selected
+ * node -- reference screenshot task-B3-brief.md points at
+ * (35037135976_0d90f4a3d5_z.jpg): a soft white elliptical light pool on
+ * the surface directly beneath the selected file box.
+ *
+ * DEPARTURE, same shape as Task A1's banded sky (see fsn_landscapes[]'s
+ * own history): the brief's ideal is a true per-vertex alpha gradient
+ * (center opaque, rim transparent) on a single fan. FsvVertex (src/gpu.h)
+ * carries only position and normal -- no per-vertex color channel -- so
+ * that gradient is not expressible through gpu_draw() as it stands, and
+ * adding one purely for a decorative ground decal would be exactly the
+ * kind of contract growth the task brief asks to avoid. Instead this
+ * draws FSN_SPOTLIGHT_RING_COUNT concentric filled ellipses, largest
+ * (faintest) first, each a flat FsvVertex fan at a single uniform alpha;
+ * painted back-to-front with FSV_DEPTH_LESS_NOWRITE's alpha blending,
+ * standard "over" compositing accumulates them into a stepped
+ * approximation of the target falloff -- the per-layer alphas below were
+ * chosen (and hand-verified via the over-compositing formula) so the
+ * composited alpha at the center comes out near FSN_SPOTLIGHT_ALPHA_CENTER
+ * while the outermost ring stays faint enough that its hard edge at
+ * radius_frac 1.0 reads as a soft boundary rather than a visible ring. */
+#define FSN_SPOTLIGHT_ALPHA_CENTER 0.55f /* documentation only -- see the
+                                           * table below, which is what
+                                           * the code actually reads */
+#define FSN_SPOTLIGHT_SEGMENTS 32        /* fan resolution per ring */
+#define FSN_SPOTLIGHT_RING_COUNT 6
+
+typedef struct {
+	double radius_frac; /* of the ellipse's full radius, outermost first */
+	float alpha;        /* this layer's own (draw-order) alpha */
+} FsnSpotlightRing;
+
+/* Composited alpha at each band, outermost to innermost, drawing in this
+ * order over a transparent background: 0.05, 0.12, 0.20, 0.29, 0.41,
+ * 0.52 -- close enough to FSN_SPOTLIGHT_ALPHA_CENTER at the center given
+ * everything here is eyeballed already. */
+static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
+	{ 1.00, 0.05f },
+	{ 0.80, 0.07f },
+	{ 0.60, 0.09f },
+	{ 0.40, 0.12f },
+	{ 0.20, 0.16f },
+	{ 0.08, 0.20f },
+};
+
+/* Ellipse size, as a multiple of the selected node's own footprint --
+ * task-B3-brief.md's "~2x the file box footprint" for a file, "around its
+ * pedestal" (snugger -- a pedestal is already much larger than a file
+ * box) for a directory. */
+#define FSN_SPOTLIGHT_FILE_SCALE 2.00
+#define FSN_SPOTLIGHT_DIR_SCALE  1.15
+
+/* Height above the surface the decal sits on -- a directory's true
+ * ground (world z = 0) or a file's parent pedestal top (world z ==
+ * parent->h) -- same idea as FSN_TEXT_LIFT and deliberately a different,
+ * smaller constant: the two lifts avoid z-fighting with different things
+ * (a label sits on top of solid geometry it never overlaps in x/y; the
+ * spotlight is a large translucent disc that often *does* overlap the
+ * pedestal/box footprint it surrounds) and nothing ties them together. */
+#define FSN_SPOTLIGHT_LIFT 0.5
 
 #endif /* FSV_FSN_STYLE_H */
