@@ -3444,17 +3444,21 @@ in `src/sdl/gpu.cpp`, summarized here:
    ordinary `gpu_draw()` call with a CPU-lerped color between
    `sky_top`/`sky_horizon` — smaller surface, no shader work, and the
    banding is not visible in a screenshot at that band count.
-2. *"depth-write off"* isn't a per-draw knob either —
-   `pipeline_for()` always sets `enable_depth_write = true` for every
-   (primitive, depth-test, target) combination in the existing scene
-   pipeline. Rather than add a pipeline variant, the sky bands are drawn
-   through an *identity* projection/modelview (so their object-space x/y
-   land directly in NDC — a screen-space quad) at `z = 0.999`, just
-   under the `1.0` far value `gpu_scene_end()` clears the depth buffer
-   to. Every real draw that follows is nearer than that in any normal
-   camera configuration, and `FSV_DEPTH_LESS` (every pipeline's compare
-   op here) passes and overwrites whenever the new fragment is nearer —
-   so the sky depth-writes but never occludes, with no second pipeline.
+2. *"depth-write off"* is `FSV_DEPTH_ALWAYS_NOWRITE` (new `gpu.h` enum
+   value), not a per-draw knob on the existing modes — `pipeline_for()`
+   always set `enable_depth_write = true` for every (primitive,
+   depth-test, target) combination the existing scene pipeline could
+   express. **This went through a wrong first attempt, corrected in the
+   Task A1 fix round below**: the original version drew the sky through
+   an identity projection/modelview at a fixed NDC `z = 0.999`, reasoning
+   that every real draw would be nearer and win `FSV_DEPTH_LESS`. That
+   reasoning silently assumed linear depth; it is not linear (see the
+   fix round). The shipped version disables the depth test outright for
+   the sky's draws (`enable_depth_test = false`, which SDL_GPU/Vulkan/
+   Metal guarantee also disables the write, regardless of
+   `enable_depth_write`), so it can never occlude anything and is never
+   occluded by anything drawn before it, independent of the projection's
+   shape.
 
 **Ground plane placement.** `geometry_mapv_node_z0()` (`src/geometry.c`)
 puts the *bottom* of the root MapV node at world `z=0` and stacks every
@@ -3465,18 +3469,10 @@ drawn at `z = -6` (`GROUND_Z_OFFSET`) instead — under 5% of
 `mapv_leaf_height` (128), so not visually distinguishable at any of
 MapV's own scales, and confirmed by screenshot (below) to show no
 z-fighting at the box/ground seam. This is one global ground plane for
-*every* mode right now, not yet scoped to `FSV_FSN` (Task B3's job):
-TreeV shares MapV's `z=0` floor convention closely enough that the
-ground renders correctly under it too (confirmed by screenshot), but
-**DiscV's ground does not render at all** — `setup_modelview_matrix()`'s
-`FSV_DISCV` case applies a fixed `Ry(90°)·Rz(90°)` reorientation instead
-of using `camera->phi`/`theta` directly the way MapV/TreeV do, which
-(empirically, not just in theory) puts DiscV's effective "up" axis
-somewhere the world-space ground plane never intersects its frustum. Not
-a bug in this task's code — DiscV was already documented as not sharing
-MapV's z=0 floor convention — just an explicit note that "ground
-everywhere" currently means "ground under MapV and TreeV", and DiscV
-gets sky only until Task B3 scopes this properly.
+MapV and TreeV, not yet scoped to `FSV_FSN` (Task B3's job) — **DiscV is
+explicitly excluded, not merely undertested; see the Task A1 fix round
+below for why an earlier version of this section's claim about DiscV was
+wrong.**
 
 **Select-pass discipline.** `gpu_scene_begin()` checks
 `g_render_mode == FSV_RENDER_NORMAL` before calling `draw_landscape()` at
@@ -3533,14 +3529,16 @@ than assuming the change was additive.
 this repo's own `src/`), all read back with PIL, not just eyeballed in a
 terminal:
 
-- **Sky gradient**: `--discv` (phi=0, a level camera with no ground
-  intersection — see above) on `src/` gives a full-frame, clean
-  vivid-blue-to-pale-cyan gradient with no visible banding at 32 bands.
+- **Sky gradient**: `--discv` on `src/` gives a full-frame, clean
+  vivid-blue-to-pale-cyan gradient with no visible banding at 32 bands,
+  and (post-fix-round) no ground wall behind it — see the fix round for
+  what DiscV's camera actually does and why an earlier draft of this
+  note mischaracterized it as "phi=0, a level camera".
 - **Ground + no z-fighting**: `--mapv` and `--treev` on `tests/fixture`
-  both render solid, correctly-colored green ground filling the frame
-  around the scene geometry; a 4x pixel-zoomed crop of the MapV
-  box/ground seam and the TreeV platform/ground seam both show a clean
-  edge, no mottling/dithering artifact.
+  and on `src/` both render solid, correctly-colored green ground filling
+  the frame around the scene geometry; a 4x pixel-zoomed crop of the
+  MapV box/ground seam and the TreeV platform/ground seam both show a
+  clean edge, no mottling/dithering artifact.
 - **Combined horizon shot**: MapV's and TreeV's *resting* default camera
   elevation (`mapv_camera_phi()` returns a fixed 52.5°; TreeV's
   equivalent settles at 30°) points the *entire* vertical FOV below
@@ -3569,6 +3567,87 @@ GTK: fresh `debian:bookworm` container, the CI job's own package list
 gettext file libglu1-mesa-dev`), `meson setup -Dfrontend=gtk`, `ninja`
 (47/47 targets, `src/fsv` links, only pre-existing unrelated
 `G_LOG_DOMAIN` redefinition warnings), `meson test` → 3/3.
+
+### Task A1 fix round (code review)
+
+A from-source-trace review of the verification above found two real bugs
+in the first version of this task and one mischaracterization in this
+file's own wording. All three are fixed in the same commit series; this
+subsection is the honest record of what was wrong and why, left in place
+rather than silently rewriting the sections above.
+
+**Critical — the "DiscV's ground does not render at all" claim was
+false**, confirmed empirically, not just re-derived on paper.
+`setup_modelview_matrix()`'s `FSV_DISCV` case never reads
+`camera->phi`/`theta` at all (unlike MapV/TreeV) — it applies a *fixed*
+`Ry(90°)·Rz(90°)` reorientation to a translate-back-by-distance, and the
+resulting modelview's third row (`gpu_mat.modelview[i][2]` across all
+`i`, i.e. the matrix row that produces view-space Z) works out to
+`(0, 0, 1, -distance)`: view-space Z is world Z minus the camera's dolly
+distance, independent of world X/Y. In other words DiscV's camera looks
+straight down the world Z axis from `distance` units above it — a
+literal top-down "pie chart" view, not a level one — and the original
+report's "phi=0, a level camera" description was simply wrong (`phi`
+isn't consulted by this code path at all; the fact that the *value*
+happened to be 0 doesn't mean it did anything). A ground quad sitting a
+fixed 6 units below DiscV's own content plane is squarely inside that
+downward view, not off to some unused side of it, whenever it falls
+inside the near/far clip band: `camera->near_clip = 0.9375·distance`,
+`camera->far_clip = 1.0625·distance` (`camera.c:126-127`), so the ground
+(view-space depth `distance + 6`) is in range exactly when
+`distance + 6 ≤ 1.0625·distance`, i.e. `distance ≥ 96`. The task's own
+verification screenshot used `tests/fixture` (two files, `distance ≈
+52`) — comfortably under that threshold — which is exactly why it never
+caught this. Re-run on this repo's own `src/` (≈1MB, `distance ≈
+1750`+, far over the threshold): confirmed, a full-frame green wall
+filling the entire view behind the disc, sky nowhere visible. **Fix**:
+`draw_landscape()` now switches on `globals.fsv_mode` and only draws the
+ground for `FSV_MAPV`/`FSV_TREEV`; `FSV_DISCV` (and `FSV_SPLASH`/
+`FSV_NONE`) get the sky only. The switch lists every `FsvMode` value
+explicitly and ends in `SWITCH_FAIL` (no silent `default:`), so `FSV_FSN`
+landing in this enum (Task B1) forces a deliberate choice here instead of
+inheriting one. Re-verified: the same `--discv --screenshot` on `src/`
+now shows the sky gradient with no ground wall.
+
+**Important — the sky's depth-write value could occlude real geometry.**
+The original `SKY_NDC_DEPTH = 0.999` trick assumed every real draw's
+depth would be nearer, which assumed *linear* depth. It isn't:
+`glm_frustum_rh_zo`'s zero-to-one depth is a `1/z`-shaped curve, and
+MapV/TreeV's near:far ratio is 128:1 (`camera.h`'s
+`NEAR_TO_DISTANCE_RATIO * FAR_TO_NEAR_RATIO` = `0.5 * 128`). Solving
+`d(z) = far·(z-near) / (z·(far-near)) = 0.999` for `z` at that ratio
+gives `z ≈ 0.887·far` — meaning any real geometry in roughly the outer
+11% of the frustum's world-space depth range (closer to camera than the
+far clip plane, still legitimately visible) would have its own NDC depth
+*greater* than 0.999 and lose `FSV_DEPTH_LESS` to the sky's already-
+written value, vanishing behind a background that was supposed to be
+infinitely far away. **Fix**: new `gpu.h` enum value
+`FSV_DEPTH_ALWAYS_NOWRITE` — `pipeline_for()` builds this pipeline
+variant with `enable_depth_test = false` (not merely
+`SDL_GPU_COMPAREOP_ALWAYS` with the test still enabled: SDL_GPU mirrors
+Vulkan/Metal's rule that a depth *write* only takes effect while the
+test itself is enabled, so disabling the test is what actually
+guarantees the write never happens, on every backend, rather than
+leaning on that rule implicitly). The sky's `SKY_NDC_DEPTH` constant is
+now genuinely arbitrary (`0.5`, kept only inside the valid clip range so
+the quad isn't near/far-clipped) since depth no longer affects it at
+all. `NUM_DEPTH_TESTS` (`src/sdl/gpu.cpp`) went from 3 to 4 for the new
+pipeline dimension; `src/ogl-gpu-compat.c`'s `gpu_set_depth_test()`
+gained a matching (currently unreachable — GTK's `gpu_set_landscape()`
+is still a no-op) `GL_ALWAYS` case so a future GTK landscape
+implementation doesn't silently inherit the old `GL_LESS` default.
+Re-verified: "slate" is still byte-for-byte identical to the pre-task
+screenshot after this pipeline change (re-ran the same stash/rebuild/
+diff as the original verification); picking the sky/ground still
+resolves to id 0 on all three modes (`--discv`/`--mapv`/`--treev` on
+`src/`, sky/ground pixel → `0`, a real node → its real id, same as
+before this fix round).
+
+**Minor.** The paragraphs above and the original task report described
+DiscV as "phi=0, a level camera" — corrected throughout to "DiscV's
+camera never reads `phi`/`theta`; it looks straight down the world Z
+axis at a fixed distance", which is what the from-source trace and the
+matrix-row derivation above actually show.
 
 ## Why this architecture
 
@@ -3645,6 +3724,7 @@ code is kept.
 | 2026-08-08 | Glyph coverage stops at Latin Extended-A (+ dashes/quotes/€) for the 3D atlas | the atlas is a fixed-cell grid sized up front; CJK would need thousands of cells and a proportional-width layout engine. Uncovered codepoints degrade to one `?` each, which is honest and cheap. The ImGui panels have no such limit (1.92 loads glyphs on demand) |
 | 2026-08-08 | `lib/stb_truetype.h` is a second, verbatim copy of ImGui's `imstb_truetype.h` rather than an include of it | `src/fontatlas.c` is plain C compiled into *both* frontends, and the GTK arm has no ImGui at all; a copy keeps the two updatable independently and the C arm free of any `subprojects/imgui/` dependency |
 | 2026-08-08 | fsn-mode Task A1: sky drawn as `SKY_BANDS` (32) flat-colored horizontal strips instead of a real vertex-colored gradient quad | `FsvVertex`/`gpu_draw()` have no per-vertex color channel — fill color is a uniform (`gpu_set_color()`) — so a true gradient would need a new vertex format, a dedicated pipeline and a new compiled shader pair (MSL+SPIR-V); 32 flat bands is invisible banding in a screenshot at zero shader-toolchain cost |
-| 2026-08-08 | fsn-mode Task A1: sky drawn through a temporary identity projection/modelview at `z=0.999` NDC (screen-space) instead of a depth-write-off pipeline variant | `pipeline_for()` always sets `enable_depth_write=true` for every existing (primitive, depth-test, target) combination; parking the sky just under `gpu_scene_end()`'s `1.0` depth-clear value means every real draw's smaller depth still passes `FSV_DEPTH_LESS` and overwrites it, with no new pipeline needed |
-| 2026-08-08 | fsn-mode Task A1: ground plane is one global overlay shared by every mode (MapV/TreeV/DiscV alike), not yet scoped to `FSV_FSN` | Task B3 owns per-mode scoping; scoping early would be dead code until then. Confirmed by screenshot that MapV/TreeV render it correctly and DiscV does not (its fixed `Ry(90°)Rz(90°)` camera reorientation doesn't share MapV's z=0-up convention) — documented as a known interim gap rather than worked around |
+| 2026-08-08 | fsn-mode Task A1 (superseded same day by the fix round below): sky drawn through a temporary identity projection/modelview at `z=0.999` NDC instead of a depth-write-off pipeline variant | rejected after review: `glm_frustum_rh_zo`'s non-linear zero-to-one depth means a fixed NDC depth near 1.0 still falls within the *linear* world-space depth range real geometry can legitimately occupy near the far clip plane at MapV/TreeV's 128:1 near:far ratio, which would make the sky wrongly occlude that geometry instead of always losing to it — see `FSV_DEPTH_ALWAYS_NOWRITE` below |
+| 2026-08-08 | fsn-mode Task A1 fix round: added `FSV_DEPTH_ALWAYS_NOWRITE` (`gpu.h`/`pipeline_for()`) — depth test disabled outright, not left enabled with `SDL_GPU_COMPAREOP_ALWAYS` — for the landscape sky instead of tuning the rejected NDC-depth constant | disabling the test is what SDL_GPU (mirroring Vulkan/Metal) actually ties the "no depth write" guarantee to, on every backend, regardless of the projection's shape; a compare-op tweak on the old approach would still have been exploitable at a big enough near:far ratio |
+| 2026-08-08 | fsn-mode Task A1 fix round: ground plane gated to `FSV_MAPV`/`FSV_TREEV` only (`draw_landscape()`'s explicit, `SWITCH_FAIL`-terminated switch on `globals.fsv_mode`), not drawn unconditionally in every mode | confirmed by screenshot that an unconditional ground plane produces a full-frame green wall in `FSV_DISCV` for any realistically-sized directory (camera there looks straight down the world Z axis at a fixed distance — it never reads `phi`/`theta` the way MapV/TreeV do — so the ground quad, sitting just past the disc's own content, fills the entire view once `distance ≥ 96`); a 2-file test fixture's small default distance masked this at first and the earlier claim that "DiscV's ground does not render at all" was wrong |
 | 2026-08-08 | fsn-mode Task A1: landscape persistence (`landscape_get/_set/_init`) lives in `src/color.c`/`color.h` rather than a new module | identical shape to the color config already there (nvstore-backed, read once at startup, written immediately on change) — a new file would duplicate the open/close-per-call pattern for no isolation benefit |
