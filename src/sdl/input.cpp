@@ -28,6 +28,39 @@
 // (see docs/PORTING.md's "Post-port additions"). A file or empty space
 // under the second click keeps the ordinary camera_look_at() -- the
 // gate only fires for a directory node.
+//
+// Escape-to-collapse, ADDITION -- not a port, viewport.c has no keyboard
+// handling in the 3D view at all: the SDL_EVENT_KEY_DOWN case below is
+// new, not a translation of any GDK_KEY_PRESS branch. Pressing Escape
+// closes globals.current_node's directory if it is expanded
+// (colexp(node, COLEXP_COLLAPSE_RECURSIVE), the same call double-click
+// uses), or -- if the current node is a file or an already-collapsed
+// directory -- steps out one level by collapsing its parent (if the
+// parent is itself expanded) and flying the camera there. Repeated
+// presses walk up the tree, and terminate at the real root: root_dnode's
+// parent is globals.fstree, the invisible metanode created by
+// scanfs.c's g_node_new() with NODE_METANODE (not NODE_DIRECTORY), so
+// NODE_IS_DIR() on it is false and the "step out" branch below never
+// fires past the root. Collapsing the root directory itself IS allowed
+// when it is the current node and expanded -- ui_panels.cpp's tree-row
+// arrow lets the root row collapse too (draw_dir_node(root_dnode) is
+// the panel's own top-level call), so this matches, not overrides, that
+// parity.
+//
+// Gated on io.WantCaptureKeyboard *and* a separate IsPopupOpen() check,
+// not WantCaptureKeyboard alone: this app never sets
+// ImGuiConfigFlags_NavEnableKeyboard (see main.cpp's ImGui init), and
+// imgui.cpp's own io.WantCaptureKeyboard update only goes true for an
+// active widget (g.ActiveId != 0) or a *modal* window -- an ordinary
+// BeginPopup() like ui_main.cpp's right-click context menu sets
+// neither. Confirmed by reading imgui.cpp rather than assumed: with
+// NavEnableKeyboard off, ImGui's own nav-cancel Escape handling
+// (NavUpdateCancelRequest(), gated on that same flag) never runs either,
+// so nothing in ImGui would otherwise close that popup on Escape at
+// all. ui_main.cpp's draw_context_menu() therefore has its own explicit
+// IsKeyPressed(ImGuiKey_Escape) -> CloseCurrentPopup(), and this case
+// checks IsPopupOpen() itself so this file's own action does not *also*
+// fire underneath that popup on the same keypress.
 #include "input.h"
 
 #include <imgui.h>
@@ -484,6 +517,87 @@ input_handle_event(const SDL_Event *ev)
 		camera_dolly(-ev->wheel.y * SCROLL_DOLLY_SCALE);
 		g_indicated_node = NULL;
 		g_hover_pending = false;
+		break;
+	}
+
+	// Addition, not a port -- see this file's header comment. No
+	// SDL_EVENT_KEY_UP counterpart: the action fires on press, exactly
+	// like every other keyboard shortcut in this app (menu accelerators,
+	// etc.) -- there is no press/release split here the way the mouse's
+	// select-vs-fly-to gesture has one.
+	case SDL_EVENT_KEY_DOWN: {
+		if (ev->key.key != SDLK_ESCAPE)
+			break;
+
+		// A held key's auto-repeat KEY_DOWNs (ev->key.repeat) would
+		// otherwise walk multiple levels up the tree from a single
+		// physical keypress -- no other gesture in this file has an
+		// auto-repeat concept to guard against (mouse clicks don't
+		// repeat), so only the initial press acts.
+		if (ev->key.repeat)
+			break;
+
+		// ImGui gets first refusal -- see the header comment above for
+		// why this is two checks, not one.
+		if (io.WantCaptureKeyboard)
+			break;
+		if (ImGui::IsPopupOpen("",
+		    ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+			break;
+
+		GNode *node = globals.current_node;
+		if (node == NULL)
+			break;
+
+		// Same real "is this directory expanded" test the double-click
+		// branch above and ui_main.cpp's context menu use:
+		// dirtree_entry_expanded() (the tree row's own flag), not
+		// DIR_EXPANDED() (deployment > 1-EPSILON, the *animation's*
+		// progress) -- see ui_main.cpp's draw_context_menu() comment
+		// for why that distinction matters.
+		if (NODE_IS_DIR(node) && dirtree_entry_expanded(node)) {
+			// Current node is an expanded directory: close it in
+			// place. Same colexp() call the double-click branch and
+			// ui_main.cpp's "Collapse" menu item use.
+			colexp(node, COLEXP_COLLAPSE_RECURSIVE);
+		} else {
+			// Current node is a file, or an already-collapsed
+			// directory: there is nothing to close *on* it, so step
+			// out instead -- collapse its parent (only if the parent
+			// is itself a directory that is expanded) and fly the
+			// camera there, reading as "close and step out".
+			// NODE_IS_DIR(parent) is false for root_dnode's own parent
+			// (globals.fstree, the metanode); that is what stops this
+			// from ever acting above the real root (e.g. current node
+			// == an already-collapsed root_dnode falls through to a
+			// no-op here, matching the panel's own
+			// fully-collapsed-root state).
+			GNode *parent = node->parent;
+			if (parent != NULL && NODE_IS_DIR(parent) &&
+			    dirtree_entry_expanded(parent)) {
+				colexp(parent, COLEXP_COLLAPSE_RECURSIVE);
+				// colexp() above already re-pans the camera to
+				// `parent` on its own *if* the camera is not under
+				// manual control (colexp.c's curnode_is_descendant
+				// branch, since `node` is a descendant of `parent`)
+				// -- but that auto-repan is skipped entirely whenever
+				// camera->manual_control is TRUE (the user has been
+				// dragging the camera manually). This explicit call
+				// is what makes "Esc steps out" reliable in that case
+				// too; when colexp() already panned there, this just
+				// restarts the same pan to the same target -- the
+				// same "double look-at, same target" pattern
+				// docs/PORTING.md's Post-port additions section
+				// already discloses for the double-click branch's own
+				// curnode_is_equal case, not a new quirk introduced
+				// here.
+				camera_look_at(parent);
+			}
+			// Else: current node is a file/collapsed-dir whose parent
+			// isn't an expanded directory (e.g. the current node
+			// already IS an already-collapsed root_dnode) -- nothing
+			// collapsible above it. No-op.
+		}
 		break;
 	}
 

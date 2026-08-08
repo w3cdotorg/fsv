@@ -105,6 +105,7 @@ handling — see [`src/sdl/input.cpp`](src/sdl/input.cpp)):
 | Scroll wheel | Dolly (zoom) — an addition in this port; upstream fsv has no wheel gesture, only the middle-drag |
 | Double-click a directory | Toggle expand/collapse of that directory — an addition in this port; upstream fsv (and this port, before this addition) treats a double-click as just two ordinary left-clicks in a row, with no directory-activation gesture in the 3D view at all |
 | Right-click | Open the context menu for the node under the cursor (Look At, Properties…, Expand/Collapse) |
+| Escape | Collapse the current directory if it's expanded, otherwise collapse its parent and fly the camera there — an addition in this port; upstream fsv has no keyboard handling in the 3D view at all. Does nothing if a context menu or other ImGui popup is open (that gets to consume Escape first) |
 
 Double-clicking a file, or empty space, has no special action beyond
 the ordinary left-click behavior above (select + fly the camera there

@@ -3127,6 +3127,86 @@ shipped as part of a task rather than afterward.
     asked for; left as a known pre-existing quirk rather than patched
     incidentally.
 
+- **Escape collapses the current directory** (`src/sdl/input.cpp`'s new
+  `SDL_EVENT_KEY_DOWN` case): pressing Escape in the 3D viewport closes
+  `globals.current_node`'s directory if it is expanded
+  (`colexp(node, COLEXP_COLLAPSE_RECURSIVE)`, the exact call the
+  double-click addition above and `ui_main.cpp`'s "Collapse" menu item
+  both use) — or, if the current node is a file or an already-collapsed
+  directory, collapses its *parent* (only if the parent is itself an
+  expanded directory) and flies the camera there
+  (`camera_look_at(parent)`), reading as "close and step out". Repeated
+  presses walk up the tree one level at a time. `viewport.c` has no
+  keyboard handling in the 3D view at all — not even a no-op to
+  supersede, unlike the double-click addition's `GDK_2BUTTON_PRESS`
+  row above — so this has no gesture-mapping-table row; it is purely a
+  new key, not a translation of anything.
+  - **Where it terminates.** `root_dnode`'s parent is `globals.fstree`,
+    the invisible metanode `scanfs.c` creates with `NODE_METANODE` (not
+    `NODE_DIRECTORY`); `NODE_IS_DIR()` on it is false, so the "collapse
+    the parent" branch never fires past the real root. Collapsing the
+    root directory *itself* is allowed when it is the current node and
+    expanded — this matches, not overrides, `ui_panels.cpp`'s tree-row
+    arrow, which lets the root row collapse too
+    (`draw_dir_node(root_dnode)` is the panel's own top-level call).
+  - **A discovery this feature's own verification bar forced**: this
+    app's ImGui init (`main.cpp`) never sets
+    `ImGuiConfigFlags_NavEnableKeyboard` (only `DockingEnable` is set).
+    Reading `imgui.cpp` (not assuming) showed two consequences that
+    would otherwise have made this feature silently misbehave:
+    - `io.WantCaptureKeyboard` only goes true for an active widget
+      (`g.ActiveId != 0`) or a *modal* window (`imgui.cpp`'s
+      `UpdateInputEvents()`) — an ordinary `BeginPopup()`, like
+      `ui_main.cpp`'s right-click context menu, sets neither. Gating
+      this feature on `io.WantCaptureKeyboard` alone would have let
+      Escape fall straight through to the collapse logic *while the
+      context menu was open* — the opposite of the required "Esc
+      closes the menu, scene unchanged" behavior. Fixed by additionally
+      checking `ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId |
+      ImGuiPopupFlags_AnyPopupLevel)` before acting.
+    - ImGui's own built-in Escape-closes-popup behavior
+      (`NavUpdateCancelRequest()`) is itself gated on that same
+      `NavEnableKeyboard` flag, so — with the flag off — nothing in
+      ImGui would have closed that popup on Escape either, leaving it
+      stuck open with no way to dismiss it via keyboard at all. Fixed
+      in `ui_main.cpp`'s `draw_context_menu()`, inside its own
+      `BeginPopup()`/`EndPopup()` scope: an explicit
+      `if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+      ImGui::CloseCurrentPopup();` — `IsKeyPressed()` works regardless
+      of `NavEnableKeyboard`, unlike the nav-cancel path. This runs in
+      the same frame `input.cpp`'s own check sees the popup as open, so
+      the two never both act on the same keypress: one closes the
+      menu, the other declines to touch the scene.
+    - Turning on `ImGuiConfigFlags_NavEnableKeyboard` globally instead
+      (which would have made both of the above "just work" via ImGui's
+      own nav system) was rejected as disproportionate to a single
+      keyboard shortcut: it also enables full Tab/arrow-key widget
+      navigation throughout every ImGui window in the app, an
+      unrelated, unrequested behavior change with its own surface to
+      verify.
+  - **The same disclosed `colexp()`-already-re-pans quirk applies
+    here too**, and for the same underlying reason as the double-click
+    addition's `curnode_is_equal` case above: when the current node is
+    a descendant of the parent being collapsed, `colexp()` (in
+    `colexp.c`) already calls `camera_look_at_full(parent, ...)` on its
+    own — but only `if (!camera->manual_control)`. The explicit
+    `camera_look_at(parent)` this feature adds right after `colexp()`
+    is therefore not always redundant: it is what makes "Esc steps out"
+    reliable when the camera *is* under manual control (the user has
+    been dragging it), and it is a harmless same-target re-pan when
+    `colexp()` already handled it. Not patched inside `colexp.c` itself
+    for the same reason given above — shared core, also built by the
+    GTK frontend, out of scope for an SDL-only addition.
+  - Held-key auto-repeat (`ev->key.repeat`) is explicitly ignored: SDL
+    keeps sending `SDL_EVENT_KEY_DOWN` for a held key after the
+    platform's repeat delay, and letting that flood into this logic
+    would silently walk multiple directory levels up the tree from one
+    physical keypress the user never intended to hold for that purpose.
+  - Documented in `README.md`'s Controls table and the in-app
+    Help → Controls window (`src/sdl/ui_main.cpp`), both marked as an
+    addition the same way the scroll-wheel and double-click rows
+    already are.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`

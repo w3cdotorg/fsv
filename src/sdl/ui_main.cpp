@@ -98,6 +98,7 @@ draw_controls_window(bool *open)
 				{ "Left click (release)", "Fly camera to selected node" },
 				{ "Double-click a directory", "Toggle expand/collapse (addition -- see docs/PORTING.md)" },
 				{ "Right click", "Context menu for node under cursor" },
+				{ "Escape", "Collapse current directory, or step out and collapse its parent (addition -- see docs/PORTING.md)" },
 			};
 			for (const auto &row : rows) {
 				ImGui::TableNextRow();
@@ -140,6 +141,20 @@ draw_context_menu(void)
 	}
 
 	if (ImGui::BeginPopup("node_context_menu")) {
+		// Addition, not upstream ImGui behavior here: this app never sets
+		// ImGuiConfigFlags_NavEnableKeyboard (see main.cpp's ImGui init),
+		// and ImGui's own nav-cancel Escape handling that would otherwise
+		// close this popup (imgui.cpp's NavUpdateCancelRequest()) is
+		// itself gated on that same flag -- confirmed by reading
+		// imgui.cpp, not assumed. Without this, Escape would silently do
+		// nothing to this popup at all. IsKeyPressed() (unlike
+		// io.WantCaptureKeyboard) works regardless of NavEnableKeyboard,
+		// so this closes the popup explicitly instead. src/sdl/input.cpp's
+		// own Escape-to-collapse addition checks IsPopupOpen() before
+		// acting, so the two never both fire for the same keypress.
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+			ImGui::CloseCurrentPopup();
+
 		GNode *node = static_cast<GNode *>(g_context_menu_node);
 		if (node != nullptr) {
 			ImGui::TextDisabled("%s", node_absname(node));

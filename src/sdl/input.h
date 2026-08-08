@@ -4,6 +4,9 @@
 // Port of src/viewport.c's viewport_cb() (GTK's GdkEvent switch) onto
 // SDL3's SDL_Event. The GTK arm (src/viewport.c) is untouched; this is
 // the SDL-only counterpart, wired into src/sdl/main.cpp's event loop.
+// Also owns one keyboard shortcut with no viewport.c counterpart at all
+// (Escape-to-collapse, a post-port addition -- see input.cpp's header
+// comment and docs/PORTING.md's "Post-port additions").
 //
 // See docs/PORTING.md's Task 4.1 section for the full GTK -> SDL gesture
 // mapping table and the deviations from viewport.c's exact math.
@@ -12,12 +15,13 @@
 #include <SDL3/SDL.h>
 
 // Call once per polled SDL_Event, after ImGui_ImplSDL3_ProcessEvent() so
-// ImGui's io.WantCaptureMouse already reflects this event. Does nothing
-// for a mouse event that starts over an ImGui window; a drag already in
-// progress (SDL_CaptureMouse()-held: middle-button dolly, or Ctrl+left
-// revolve) keeps running regardless of what the cursor is over, mirroring
-// how GTK's implicit pointer grab kept viewport.c's own drags alive past
-// the widget's bounds.
+// ImGui's io.WantCaptureMouse/io.WantCaptureKeyboard already reflect this
+// event. Does nothing for a mouse event that starts over an ImGui window,
+// nor for the Escape keyboard shortcut while ImGui owns the keyboard or has
+// a popup open. A drag already in progress (SDL_CaptureMouse()-held:
+// middle-button dolly, or Ctrl+left revolve) keeps running regardless of
+// what the cursor is over, mirroring how GTK's implicit pointer grab kept
+// viewport.c's own drags alive past the widget's bounds.
 //
 // The camera side needs no per-frame tick: viewport.c only ever moves the
 // camera from GDK_MOTION_NOTIFY's own delta, never from a timer or the
