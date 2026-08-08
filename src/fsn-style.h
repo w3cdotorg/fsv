@@ -216,6 +216,54 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
 #define FSN_WIRE_B 1.0f
 #define FSN_WIRE_WIDTH 1.0f
 
+/**** Flight navigation (fsn-mode Task B2, src/camera.c) ****/
+
+/* fsn's signature gesture: hold the middle button and the pointer's
+ * offset from the press point becomes a *velocity*, not a position --
+ * push forward to fly forward, sideways to turn, Shift to climb/dive.
+ * (README.txt; SGI patent US5555354 describes the same velocity model.)
+ * Nothing here decelerates on approach to a target: that is the
+ * click-to-fly half of the patent, which fsv already has in the form of
+ * camera_look_at( )'s MORPH_SIGMOID pan.
+ *
+ * OFFSETS ARE IN FRAMEBUFFER PIXELS, not logical window points --
+ * src/sdl/input.cpp works in pixel space throughout (its pixel_scale( )
+ * helper), and its two existing gestures (MOUSE_SENSITIVITY-scaled dolly
+ * and revolve) are already expressed there. So is this, for consistency;
+ * the cost is that a given physical drag distance flies twice as fast on
+ * a 2x display as on a 1x one, exactly as it already dollies twice as
+ * fast today. Worth revisiting for all three gestures at once, not for
+ * this one alone.
+ *
+ * All values eyeballed, then checked against this repo's own src/ tree
+ * (see docs/PORTING.md's Task B2 note for the measured landscape size
+ * and the resulting traversal time). */
+
+/* Offset magnitude, in pixels, below which the axis reads as zero. A
+ * click is never perfectly still -- without this, pressing the middle
+ * button and letting go a moment later leaves the camera visibly
+ * drifting. Small enough that a deliberate nudge still registers. */
+#define FSN_FLIGHT_DEAD_ZONE_PX     6.0
+
+/* Rate per pixel of offset past the dead zone, and the ceiling each rate
+ * is clamped to. The ceilings are the numbers that matter (they set how
+ * fast a full-deflection drag flies); the scales just say how far you
+ * have to drag to get there -- e.g. 640/4.0 = 160px past the dead zone
+ * for full speed, a comfortable drag inside any viewport. */
+#define FSN_FLIGHT_SPEED_SCALE      4.0    /* world units/s per pixel */
+#define FSN_FLIGHT_SPEED_MAX      640.0    /* world units/s */
+#define FSN_FLIGHT_YAW_SCALE        0.45   /* degrees/s per pixel */
+#define FSN_FLIGHT_YAW_MAX         72.0    /* degrees/s (5s for a full turn) */
+#define FSN_FLIGHT_ALT_SCALE        2.0    /* world units/s per pixel */
+#define FSN_FLIGHT_ALT_MAX        320.0    /* world units/s */
+
+/* Longest time step a single flight tick will integrate over, in
+ * seconds. The frame loop is not the only thing that can stall between
+ * two ticks (a filesystem scan, a modal folder dialog, a debugger); an
+ * unclamped dt would then teleport the viewer clear across the
+ * landscape in one frame. ~4 frames at 60Hz. */
+#define FSN_FLIGHT_MAX_STEP         0.0667
+
 /* Text. The reference screenshot puts the current path on the ground in
  * front of the root pedestal in large outlined white letters; node name
  * labels are small and dark, like MapV's. Both are drawn flat (in the

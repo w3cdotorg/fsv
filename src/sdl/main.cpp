@@ -1234,6 +1234,22 @@ main(int argc, char **argv)
 		// frame this iteration renders rather than the next one.
 		input_flush_hover_pick();
 
+		// fsn-mode Task B2: fsn's middle-drag flight is a velocity,
+		// not a morph -- there is no end value and no duration for
+		// the morph queue to interpolate toward, so it is integrated
+		// here, per iteration, against real elapsed time. See the
+		// "fsn flight navigation" block in src/camera.c for why that
+		// is cheaper and more honest than re-arming a one-frame morph
+		// every frame. A cheap no-op when nothing is flying, and it
+		// runs before fsv_animation_tick() so the redraw() it asks for
+		// is serviced by this same iteration rather than the next.
+		//
+		// Not added to run_record_mode()'s loop: that loop never calls
+		// input_handle_event(), so no flight can ever be in progress
+		// there (see its own block comment -- its camera motion is
+		// scripted camera_dolly()/camera_revolve() calls).
+		camera_flight_tick();
+
 		bool animating = fsv_animation_tick() != 0;
 
 		if (!animating && !g_frame_requested) {

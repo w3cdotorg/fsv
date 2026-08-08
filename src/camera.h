@@ -92,5 +92,40 @@ void camera_birdseye_view( boolean going_up );
 void camera_dolly( double dk );
 void camera_revolve( double dtheta, double dphi );
 
+/**** fsn flight navigation (FSV_FSN only -- see camera.c) ****
+ *
+ * A velocity model, not a morph: there is no destination and no fixed
+ * duration, so the camera keeps moving for exactly as long as the user
+ * holds the button. The frontend drives it in three parts --
+ *
+ *   camera_flight_begin( )   on the middle-button press;
+ *   camera_flight_update( )  on every motion event while it is held,
+ *                            with the pointer's offset FROM THE PRESS
+ *                            POINT (not a per-event delta), in the same
+ *                            pixel space the frontend's other gestures
+ *                            use; `vertical` (Shift) remaps the y offset
+ *                            from forward speed to climb rate;
+ *   camera_flight_end( )     on release, and on anything else that takes
+ *                            the camera away from the user.
+ *
+ * -- plus camera_flight_tick( ), which the frontend's main loop calls
+ * once per iteration (next to fsv_animation_tick( )) to integrate the
+ * current rates over real elapsed time. It is a cheap no-op when no
+ * flight is in progress, so it is safe to call unconditionally.
+ *
+ * Deviation from the task brief's sketched interface: begin( ) takes no
+ * press coordinates. The frontend already owns "where the pointer is"
+ * (src/sdl/input.cpp's g_prev_x/g_prev_y and friends) and passes an
+ * offset to update( ) anyway, so a second copy of the press point in
+ * here would be state that can only ever disagree.
+ *
+ * All four are safe to call from any mode: begin( ) declines outside
+ * FSV_FSN and the rest are then no-ops. */
+void camera_flight_begin( void );
+void camera_flight_update( double dx_from_press, double dy_from_press, boolean vertical );
+void camera_flight_end( void );
+void camera_flight_tick( void );
+boolean camera_flight_active( void );
+
 
 /* end camera.h */

@@ -135,6 +135,10 @@ camera_init( FsvMode mode, boolean initial_view )
 	RTvec ext_c1;
 	double d, d1, d2;
 
+	/* A mode switch, a rescan or a Reset re-poses the camera outright;
+	 * whatever the user was flying toward is gone with it */
+	camera_flight_end( );
+
 	camera->fov = 60.0;
 	camera->pan_part = 1.0;
 	switch (mode) {
@@ -731,6 +735,246 @@ camera_pan_break( void )
 }
 
 
+/**** fsn flight navigation ****
+ *
+ * The one piece of camera motion in fsv that is NOT a morph. A morph has
+ * a start value, an end value and a duration; flight has a velocity and
+ * runs until the user lets go of the button. Expressing it as a morph
+ * would mean either re-arming a fresh one-frame morph on every tick (a
+ * malloc, a queue insert, a queue removal and an end callback per frame,
+ * to interpolate between two values a frame apart) or morphing toward a
+ * fictitious far-away target and breaking it on release -- which would
+ * make the pointer's offset control *acceleration* rather than speed,
+ * since the morph's own easing would still be shaping the motion.
+ *
+ * So the rates live here and the frontend's main loop calls
+ * camera_flight_tick( ) once per iteration, next to fsv_animation_tick( ).
+ * The animation subsystem still drives the actual drawing: each tick
+ * that moves the camera calls redraw( ), which is what keeps frames
+ * flowing (animation.c's animation_active) for exactly as long as the
+ * camera is moving and not one frame longer.
+ *
+ * Position and heading only. The viewer moves along the ground plane in
+ * the direction it is facing, turns on the spot, and (with Shift) climbs
+ * or dives; camera->phi is deliberately left alone, because fsn's flight
+ * was planar -- the pitch is part of the viewpoint, not part of the
+ * flying. FSN's target is stored in MapV's Cartesian camera struct (see
+ * the FSN_CAMERA_* note at the top of this file), so "position" here is
+ * MAPV_CAMERA(camera)->target and "heading" is camera->theta. */
+
+/* TRUE while the middle button is held in FSV_FSN mode */
+static boolean flight_active = FALSE;
+
+/* Current flight rates, all per second. Set by camera_flight_update( )
+ * from the pointer offset, integrated by camera_flight_tick( ). */
+static double flight_speed = 0.0;	/* along the horizontal view direction */
+static double flight_yaw_rate = 0.0;	/* degrees, added to camera->theta */
+static double flight_climb = 0.0;	/* world z */
+
+/* xgettime( ) at the last tick, for the time step */
+static double flight_t_prev = 0.0;
+
+
+/* Cancels an in-progress camera pan *and* performs the bookkeeping its
+ * end callback would otherwise have done.
+ *
+ * camera_pan_break( ) alone is not enough for a caller that simply
+ * stops: morph_break( ) drops a morph record without calling its
+ * end_cb, so the master pan morph's pan_end_cb( )/post_pan_end( ) never
+ * runs -- and that pair is what clears camera_currently_moving and hands
+ * the user interface back (window_set_access( TRUE )). Every other
+ * caller of camera_pan_break( ) in this file immediately arms a
+ * replacement pan, master morph included, so none of them noticed.
+ * Flight is the first one that doesn't.
+ *
+ * geometry_camera_pan_finished( ) is deliberately NOT called here: it
+ * records where the node cursor came to rest, and an interrupted pan
+ * never came to rest anywhere. (FSN's arm of it is empty in any case --
+ * the mode draws no cursor.) */
+static void
+cancel_pan_for_manual_control( void )
+{
+	if (!camera_currently_moving)
+		return;
+
+	camera_pan_break( );
+	camera_currently_moving = FALSE;
+	camera->pan_part = 1.0;
+	window_set_access( TRUE );
+}
+
+
+/* Maps one axis of the pointer's offset from the press point onto a
+ * rate: zero inside the dead zone, then linear in the offset past it,
+ * clamped at max_rate. Sign is carried through. */
+static double
+flight_axis_rate( double offset_px, double scale, double max_rate )
+{
+	double magnitude;
+
+	magnitude = ABS(offset_px);
+	if (magnitude <= FSN_FLIGHT_DEAD_ZONE_PX)
+		return 0.0;
+
+	magnitude = MIN((magnitude - FSN_FLIGHT_DEAD_ZONE_PX) * scale, max_rate);
+
+	return (offset_px < 0.0) ? -magnitude : magnitude;
+}
+
+
+/* Starts a flight. No-op outside FSV_FSN, so the frontend's per-mode
+ * gesture dispatch is backed up by the invariant living here too. */
+void
+camera_flight_begin( void )
+{
+	if (globals.fsv_mode != FSV_FSN)
+		return;
+
+	/* Flight and a camera pan are two things moving the same variables;
+	 * the user wins. (The converse -- a look_at during a flight -- is
+	 * handled by camera_look_at_full( ) calling camera_flight_end( ).) */
+	cancel_pan_for_manual_control( );
+
+	flight_active = TRUE;
+	flight_speed = 0.0;
+	flight_yaw_rate = 0.0;
+	flight_climb = 0.0;
+	flight_t_prev = xgettime( );
+
+	/* Exactly what camera_dolly( )/camera_revolve( ) do, and for the
+	 * same reason: this is the user steering, so colexp.c must not
+	 * re-aim the camera underneath them (colexp.c's !manual_control
+	 * branch). Note what is NOT done here -- window_set_access( FALSE ).
+	 * That call means "an animation owns the camera, keep the user off
+	 * the controls"; flight is the opposite of that. */
+	camera->manual_control = TRUE;
+}
+
+
+/* Feeds the pointer's current offset from the press point (in the
+ * frontend's pixel space -- see fsn-style.h) into the flight rates.
+ * y grows downward in that space, so a negative dy (pointer above the
+ * press point) is forward, and up. */
+void
+camera_flight_update( double dx_from_press, double dy_from_press, boolean vertical )
+{
+	if (!flight_active)
+		return;
+
+	/* Yaw: pointer to the right of the press point turns right. theta
+	 * is a counterclockwise heading, so turning right decreases it --
+	 * the same sign camera_revolve( ) gives a rightward drag. */
+	flight_yaw_rate = -flight_axis_rate( dx_from_press,
+	    FSN_FLIGHT_YAW_SCALE, FSN_FLIGHT_YAW_MAX );
+
+	if (vertical) {
+		/* Shift: the y offset is altitude instead of speed. Not "as
+		 * well as": holding Shift stops the viewer moving forward, so
+		 * the gesture is a pure ascent/descent. */
+		flight_speed = 0.0;
+		flight_climb = flight_axis_rate( -dy_from_press,
+		    FSN_FLIGHT_ALT_SCALE, FSN_FLIGHT_ALT_MAX );
+	}
+	else {
+		flight_speed = flight_axis_rate( -dy_from_press,
+		    FSN_FLIGHT_SPEED_SCALE, FSN_FLIGHT_SPEED_MAX );
+		flight_climb = 0.0;
+	}
+}
+
+
+/* Stops a flight. Idempotent, and safe in any mode: this is what
+ * input_reset( ), the Escape key and every camera_look_at( ) call
+ * reach for, none of which can know whether a flight is in progress. */
+void
+camera_flight_end( void )
+{
+	if (!flight_active)
+		return;
+
+	flight_active = FALSE;
+	flight_speed = 0.0;
+	flight_yaw_rate = 0.0;
+	flight_climb = 0.0;
+
+	camera_update_scrollbars( TRUE );
+}
+
+
+boolean
+camera_flight_active( void )
+{
+	return flight_active;
+}
+
+
+/* Integrates the current flight rates over the time elapsed since the
+ * last call. Called once per frontend main-loop iteration. */
+void
+camera_flight_tick( void )
+{
+	double t_now, dt;
+	double sin_theta, cos_theta;
+
+	if (!flight_active)
+		return;
+
+	t_now = xgettime( );
+	dt = t_now - flight_t_prev;
+	flight_t_prev = t_now;
+	dt = CLAMP(dt, 0.0, FSN_FLIGHT_MAX_STEP);
+
+	if ((flight_speed == 0.0) && (flight_yaw_rate == 0.0) && (flight_climb == 0.0))
+		/* Button held, pointer inside the dead zone: nothing moves, so
+		 * deliberately no redraw( ) either. Holding still costs the
+		 * same as not flying at all. */
+		return;
+
+	/* Heading first, so this step's travel uses the heading the viewer
+	 * ends the step facing -- a turn and a translation in the same
+	 * frame then read as one curved move rather than a sideways skid */
+	camera->theta += flight_yaw_rate * dt;
+	while (camera->theta < 0.0)
+		camera->theta += 360.0;
+	while (camera->theta > 360.0)
+		camera->theta -= 360.0;
+
+	/* The camera sits at target + distance * (cos(theta)cos(phi),
+	 * sin(theta)cos(phi), sin(phi)) and looks back down that vector at
+	 * the target (mapv_get_camera_position( ) above), so the direction
+	 * the viewer faces, projected onto the ground, is
+	 * -(cos(theta), sin(theta)). Moving the target along it carries the
+	 * whole rig -- viewpoint and all -- forward.
+	 *
+	 * Sanity check on the signs: at the initial FSN_CAMERA_THETA of
+	 * 270 degrees that comes out as -(0, -1) == +y, which is the
+	 * direction the landscape grows away from the camera (the "z" axis
+	 * of geometry-fsn.h's FsnPedestal). Pushing forward flies into the
+	 * tree, which is the point of the mode. */
+	cos_theta = cos( RAD(camera->theta) );
+	sin_theta = sin( RAD(camera->theta) );
+	MAPV_CAMERA(camera)->target.x -= flight_speed * dt * cos_theta;
+	MAPV_CAMERA(camera)->target.y -= flight_speed * dt * sin_theta;
+
+	/* No ceiling on the climb: flying up is self-limiting (the whole
+	 * landscape comes into frame and there is nothing further to see),
+	 * and a cap would have to be recomputed on every rescan. The floor
+	 * is real, though -- below the ground plane the viewer is looking
+	 * up at the underside of a landscape drawn as if lit from above. */
+	MAPV_CAMERA(camera)->target.z =
+	    MAX(0.0, MAPV_CAMERA(camera)->target.z + flight_climb * dt);
+
+	/* Same pair the scrollbar and dolly paths use: push the new camera
+	 * state out to the frontend's scroll widgets, then ask for a frame.
+	 * FALSE (soft) rather than TRUE because this fires every frame --
+	 * and because camera_moving( ) is false during a flight, so
+	 * camera_update_scrollbars( ) takes its non-interpolating path
+	 * either way. */
+	camera_update_scrollbars( FALSE );
+	redraw( );
+}
+
+
 /* Helper function for camera_look_at_full( ) */
 static double
 discv_look_at( GNode *node, MorphType mtype, double pan_time_override )
@@ -1162,6 +1406,13 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 		g_assert( dirtree_entry_expanded( node->parent ) );
 #endif
 
+	/* An automatic pan and a flight are two things driving the same
+	 * camera variables. The pan wins here, because the user asked for
+	 * it (a click on a pedestal, a tree row, Go Back...) with the same
+	 * hands that would otherwise be flying -- the reverse case, a
+	 * flight started during a pan, is camera_flight_begin( )'s. */
+	camera_flight_end( );
+
 	/* Temporarily disable part of the user interface */
 	window_set_access( FALSE );
 
@@ -1359,6 +1610,12 @@ camera_birdseye_view( boolean going_up )
 
 	new_cam = CAMERA(&new_anycam);
 	pre_cam = CAMERA(&pre_birdseye_view_camera);
+
+	/* As in camera_look_at_full( ): an explicit request to re-pose the
+	 * camera ends any flight in progress. Doubly so going up, since the
+	 * pose saved here as "where the user was" would otherwise keep
+	 * drifting after it was saved. */
+	camera_flight_end( );
 
 	/* Neutralize user interface */
 	window_set_access( FALSE );

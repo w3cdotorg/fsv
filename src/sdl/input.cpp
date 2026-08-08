@@ -152,6 +152,25 @@ static double g_prev_y = 0.0;
 static bool g_mouse_captured = false;
 static Uint8 g_capture_button = 0;
 
+// fsn-mode Task B2: middle-drag flight. TRUE between the middle-button
+// press that started a flight and whatever ended it (release, Escape,
+// input_reset()). This file keeps its own flag rather than asking
+// camera_flight_active() every time because the two can legitimately
+// disagree for the rest of a drag: camera.c ends the flight on its own
+// when something else claims the camera (a camera_look_at() from a
+// left-click, the rail's Bird's Eye), and the middle button may still be
+// physically held at that point -- this flag is what stops the motion
+// handler from silently resurrecting the flight on the next event.
+//
+// g_flight_press_* is the press point the offsets are measured from, in
+// the same PIXEL space as g_prev_x/g_prev_y (see pixel_scale() above).
+// It is an anchor, not a running position: camera_flight_update() takes
+// an absolute offset from the press point, not a per-event delta, which
+// is exactly what makes the gesture a velocity control.
+static bool g_flying = false;
+static double g_flight_press_x = 0.0;
+static double g_flight_press_y = 0.0;
+
 // Deferred hover pick -- see input_flush_hover_pick() below. Coordinates
 // are PIXEL space (pixel_scale()-multiplied), the space node_at_cursor()
 // wants.
@@ -235,6 +254,49 @@ update_highlight(bool btn1_down)
 			geometry_highlight_node(NULL, FALSE);
 		window_statusbar(SB_RIGHT, node_absname_display(g_indicated_node));
 	}
+}
+
+// Per-mode gesture dispatch -- the first in this file, and the pattern
+// any later one should follow.
+//
+// viewport.c's gestures were all mode-agnostic: it drove camera.c's
+// mode-agnostic entry points (camera_dolly(), camera_revolve()) and let
+// camera.c's own per-mode switches sort out what they meant. fsn's
+// flight is the first gesture that is not the same gesture in every
+// mode -- middle-drag means "fly" in FSV_FSN and "dolly" everywhere
+// else -- so the branch has to be here, where the button is known.
+//
+// Written as a switch with every enumerator spelled out and no
+// `default:`, deliberately: -Wswitch then makes the next mode added to
+// FsvMode a compile error in this file rather than a silently-inherited
+// behavior. That is the same discipline camera.c's SWITCH_FAIL arms
+// enforce at runtime, done at compile time because this one has a
+// meaningful answer for every mode and so needs no failure arm.
+static bool
+middle_drag_is_flight(void)
+{
+	switch (globals.fsv_mode) {
+	case FSV_FSN:
+		return true;
+
+	case FSV_DISCV:
+	case FSV_MAPV:
+	case FSV_TREEV:
+	case FSV_SPLASH:
+	case FSV_NONE:
+		// Dolly, exactly as before this task.
+		return false;
+	}
+	return false; // unreachable; keeps compilers without -Wswitch quiet
+}
+
+// Ends a flight from this file's side: drops the local flag and tells
+// camera.c. Safe to call when no flight is in progress.
+static void
+stop_flight(void)
+{
+	g_flying = false;
+	camera_flight_end();
 }
 
 static void
@@ -387,6 +449,20 @@ input_handle_event(const SDL_Event *ev)
 		if (btn2 || (ctrl_key && btn1))
 			begin_capture(ev->button.button);
 
+		// fsn-mode Task B2: in FSV_FSN, the middle press starts a
+		// flight rather than arming a dolly drag. Deliberately after
+		// the camera_pan_finish() block above -- an intro pan or a
+		// look_at that is still running when the user grabs the
+		// controls is over, and camera_flight_begin() finishes the
+		// job (camera_pan_finish() only *asks* the morphs to end on
+		// the next tick, so camera_moving() is still true right here).
+		if (btn2 && middle_drag_is_flight()) {
+			g_flying = true;
+			g_flight_press_x = x;
+			g_flight_press_y = y;
+			camera_flight_begin();
+		}
+
 		g_prev_x = x;
 		g_prev_y = y;
 		break;
@@ -441,6 +517,14 @@ input_handle_event(const SDL_Event *ev)
 			}
 		}
 
+		// fsn-mode Task B2: releasing the middle button stops the
+		// flight. Not gated on middle_drag_is_flight(): the mode could
+		// in principle have changed since the press (a menu item is
+		// still reachable with a button held), and a flight that
+		// outlived its own button would never stop.
+		if (ev->button.button == SDL_BUTTON_MIDDLE && g_flying)
+			stop_flight();
+
 		end_capture(ev->button.button);
 		break;
 	}
@@ -478,7 +562,30 @@ input_handle_event(const SDL_Event *ev)
 			// g_indicated_node themselves.
 			g_hover_pending = false;
 
-			if (btn2) {
+			if (btn2 && g_flying) {
+				// fsn-mode Task B2: fly. Offsets are measured
+				// from the press point, not from the previous
+				// event -- holding the pointer still keeps
+				// flying at the same speed, which is the whole
+				// difference between a velocity control and a
+				// drag. Shift is read live (not latched at the
+				// press) so it can be pressed and released
+				// mid-flight to switch between speed and
+				// altitude without letting go of the button.
+				const bool shift_key =
+				    (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+				camera_flight_update(x - g_flight_press_x,
+				    y - g_flight_press_y, shift_key ? TRUE : FALSE);
+				// No camera_flight_tick() here: a motion event
+				// only sets the rates. The main loop integrates
+				// them, so the camera keeps moving between
+				// events (a held-still pointer generates none
+				// at all) and the distance travelled depends on
+				// elapsed time rather than on how many motion
+				// events the OS happened to deliver.
+				g_indicated_node = NULL;
+				update_highlight(btn1);
+			} else if (btn2) {
 				// Dolly the camera.
 				const double dy = MOUSE_SENSITIVITY * (y - g_prev_y);
 				camera_dolly(-dy);
@@ -586,6 +693,18 @@ input_handle_event(const SDL_Event *ev)
 			// comment above and ui_dialogs_handle_escape()'s own doc
 			// comment. Consumed; leave the scene alone.
 			break;
+
+		// fsn-mode Task B2: Escape stops a flight, and does nothing
+		// else on that press -- deliberately BEFORE the collapse
+		// logic below, so the keystroke that pulls the user out of a
+		// flight does not also close the directory they just flew
+		// into. (A second press then collapses, as always.) The
+		// middle button may still be held; g_flying going false is
+		// what keeps the motion handler from resuming.
+		if (g_flying) {
+			stop_flight();
+			break;
+		}
 
 		GNode *node = globals.current_node;
 		if (node == NULL)
@@ -705,6 +824,17 @@ input_reset(void)
 	g_capture_button = 0;
 	g_prev_x = 0.0;
 	g_prev_y = 0.0;
+
+	// fsn-mode Task B2: same reasoning as the capture grab above -- a
+	// middle button held when the scan started is very likely released
+	// (with no event delivered) by the time it finishes, and a flight
+	// nothing can stop would keep the camera moving through a landscape
+	// that is being relaid out underneath it. camera_init() ends it too
+	// once the new tree is up, but that runs later and only in the
+	// paths that re-pose the camera; this is the unconditional one.
+	stop_flight();
+	g_flight_press_x = 0.0;
+	g_flight_press_y = 0.0;
 }
 
 ContextMenuRequest
