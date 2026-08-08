@@ -60,6 +60,18 @@ static bool g_quit_requested = false;
 // is exactly when this frontend needs to drive one itself.
 static bool g_scanning = false;
 
+// Set for the duration of run_record_mode() (--record). The recording
+// loop draws the real menu bar -- that is the point, the menus are meant
+// to be visible in the demo video -- and pumps real SDL events, so its
+// File menu items are genuinely clickable by whoever is at the keyboard.
+// But that loop never calls app_apply_pending_root_change(), so a Rescan
+// or Change Root queued there would sit in g_pending_root_change and be
+// discarded at exit: a menu item that silently does nothing. Rather than
+// teach the recording loop to run scanfs() mid-capture (which would tear
+// down the tree the script's cues hold GNode * into), ui_main.cpp greys
+// those two items out while recording -- see app_is_recording().
+static bool g_recording = false;
+
 // Root directory last (successfully) handed to scanfs() -- app_root_dir(),
 // Rescan's implicit target, the window title, and the Change Root dialog's
 // default location. Owned here; xstrdup()'d/xfree()'d, never a borrowed
@@ -339,6 +351,12 @@ bool
 app_is_scanning(void)
 {
 	return g_scanning;
+}
+
+bool
+app_is_recording(void)
+{
+	return g_recording;
 }
 
 const char *
@@ -630,6 +648,12 @@ run_record_mode(const char *outdir, double duration_seconds)
 		return false;
 	}
 
+	// Set here, past the two early returns above and immediately before
+	// the first frame ui_main_draw() can run for: greys out File ->
+	// Change Root.../Rescan for the whole recording. See g_recording's
+	// declaration for why.
+	g_recording = true;
+
 	g_record_sdl_dir = record_find_node("sdl");
 	g_record_gpu_cpp = record_find_node("sdl/gpu.cpp");
 	g_record_geometry_c = record_find_node("geometry.c");
@@ -734,6 +758,8 @@ run_record_mode(const char *outdir, double duration_seconds)
 			ok = false; // report it, but keep recording the rest
 		}
 	}
+
+	g_recording = false;
 
 	SDL_Log("fsv: --record: wrote %d frame(s) to \"%s\" (%dx%d @ %gfps)",
 	    frame, outdir, width, height, fps);

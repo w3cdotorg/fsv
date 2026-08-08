@@ -52,6 +52,15 @@ void app_apply_pending_root_change(void);
 // otherwise start a second, overlapping scan.
 bool app_is_scanning(void);
 
+// True for the duration of --record's capture loop. That loop draws the
+// real menu bar and pumps real events, but never calls
+// app_apply_pending_root_change() -- so a Rescan/Change Root queued from
+// it would silently never run. ui_main.cpp greys those two items out on
+// this flag for the same reason it does on app_is_scanning(): a menu item
+// that cannot do its job should not look like it can. Always false in the
+// normal main loop.
+bool app_is_recording(void);
+
 // The directory last (successfully) passed to scanfs() -- window-title
 // text, Rescan's implicit target, and the folder dialog's default
 // location. Never NULL once the first scan has completed.

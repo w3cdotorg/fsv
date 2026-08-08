@@ -190,6 +190,11 @@ ui_main_draw(void)
 	static bool show_controls = false;
 
 	const bool scanning = app_is_scanning();
+	// Change Root.../Rescan are additionally unavailable during --record:
+	// the recording loop never applies a queued root change, so leaving
+	// them enabled there would offer an action that silently does
+	// nothing. See app.h's app_is_recording().
+	const bool root_change_ok = !scanning && !app_is_recording();
 	const FsvMode mode = globals.fsv_mode;
 	// Vis menu items need real geometry to switch onto; mode is FSV_NONE
 	// only during the brief window between load_filesystem()'s "wipe"
@@ -199,9 +204,9 @@ ui_main_draw(void)
 
 	if (ImGui::BeginMainMenuBar()) {
 		if (ImGui::BeginMenu("File")) {
-			if (ImGui::MenuItem("Change Root...", nullptr, false, !scanning))
+			if (ImGui::MenuItem("Change Root...", nullptr, false, root_change_ok))
 				app_show_change_root_dialog();
-			if (ImGui::MenuItem("Rescan", nullptr, false, !scanning))
+			if (ImGui::MenuItem("Rescan", nullptr, false, root_change_ok))
 				app_request_rescan();
 			ImGui::Separator();
 			if (ImGui::MenuItem("Quit")) {
