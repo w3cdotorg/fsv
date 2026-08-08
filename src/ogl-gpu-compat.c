@@ -90,6 +90,33 @@ gpu_set_depth_test( FsvDepthTest test )
 		glDepthFunc( GL_GREATER );
 		break;
 
+		/* Unreachable on this frontend today: only fsn-mode's
+		 * draw_landscape() (src/sdl/gpu.cpp) ever passes this, and this
+		 * frontend's gpu_set_landscape() below is a no-op that never
+		 * calls it. Mapped correctly anyway (GL_ALWAYS -- glDepthMask()
+		 * is never toggled by this file at all, matching every other
+		 * depth test here, so "no write" isn't expressible without a
+		 * broader change this frontend doesn't need yet) so a future
+		 * GTK landscape implementation doesn't inherit a silent GL_LESS
+		 * mismatch from this switch's old default. */
+		case FSV_DEPTH_ALWAYS_NOWRITE:
+		glDepthFunc( GL_ALWAYS );
+		break;
+
+		/* Unreachable on this frontend today, same story as
+		 * FSV_DEPTH_ALWAYS_NOWRITE just above: only fsn-mode's
+		 * selection spotlight (src/geometry-fsn-draw.c, Task B3) ever
+		 * passes this, and FSN mode has no menu entry point on this
+		 * frontend (see docs/PORTING.md). The depth-test half is
+		 * mapped correctly (GL_LESS); the "no write" half is not
+		 * expressible here any more than FSV_DEPTH_ALWAYS_NOWRITE's
+		 * is -- glDepthMask( ) is never toggled by this file at all --
+		 * documented rather than left to fall into the default: case
+		 * below by coincidence. */
+		case FSV_DEPTH_LESS_NOWRITE:
+		glDepthFunc( GL_LESS );
+		break;
+
 		default:
 		glDepthFunc( GL_LESS );
 		break;
@@ -101,6 +128,25 @@ void
 gpu_set_line_width( float width )
 {
 	glLineWidth( width );
+}
+
+
+/* No-op: the GTK frontend keeps its pre-fsn-mode flat clear (ogl.c's own
+ * glClearColor(), untouched by Task A1) regardless of which landscape
+ * preset is stored in ~/.fsvrc. Porting the sky/ground quads to GL would
+ * mean either a second small shader program (this frontend's programs
+ * are GLSL, not the SDL_GPU/gpu.cpp path's compiled MSL/SPIR-V) or
+ * reusing the existing lit/textured program with lighting forced off --
+ * both real work for a frontend the fsn-mode plan doesn't otherwise
+ * touch. src/color.c still reads/writes the `landscape` nvstore key on
+ * this frontend too (so a config file shared with the SDL build round-
+ * trips the user's choice unchanged); this function is the only place
+ * that choice is silently dropped. See docs/PORTING.md's "fsn mode"
+ * section. */
+void
+gpu_set_landscape( int index )
+{
+	(void)index;
 }
 
 

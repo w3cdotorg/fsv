@@ -290,6 +290,10 @@ setup_modelview_matrix( void )
 						   0.f});
 		break;
 
+		/* fsn-mode Task B1: FSN's camera target is Cartesian and
+		 * lives in the same MapVCamera storage (see the FSN_CAMERA_*
+		 * note in camera.c), so the transform is identical */
+		case FSV_FSN:
 		case FSV_MAPV:
 		glm_translate(gpu_mat.modelview, (vec3){-camera->distance, 0.f, 0.f});
 		glm_rotate_y(gpu_mat.modelview, camera->phi * M_PI / 180, gpu_mat.modelview);

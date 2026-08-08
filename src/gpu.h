@@ -150,11 +150,43 @@ void gpu_set_lighting(int enabled);
  * with FSV_DEPTH_LESS — GL's default — except the node cursor, which
  * draws its occluded half with FSV_DEPTH_GREATER and its visible half
  * with FSV_DEPTH_LEQUAL (src/geometry.c, cursor_hidden_part( ) /
- * cursor_visible_part( )). */
+ * cursor_visible_part( )), and the fsn-mode landscape sky (Task A1,
+ * src/sdl/gpu.cpp's draw_landscape( )), which uses FSV_DEPTH_ALWAYS_NOWRITE
+ * below.
+ *
+ * FSV_DEPTH_ALWAYS_NOWRITE: the depth test always passes *and* nothing is
+ * written to the depth buffer -- the standard "background/skybox" depth
+ * mode. A fixed NDC-depth trick (park the backdrop just under the far
+ * clip value) was tried first and rejected: MapV/TreeV's near:far ratio
+ * is 128:1, and glm_frustum_rh_zo's projection is non-linear enough in Z
+ * that any fixed NDC depth close to 1.0 also falls within the *linear*
+ * (world-space) depth range real geometry can legitimately occupy near
+ * the far clip plane -- which would make the backdrop wrongly occlude
+ * that geometry instead of always losing to it. Disabling the test
+ * outright has no such failure mode regardless of the projection's
+ * shape, and needs no per-scene tuning.
+ *
+ * FSV_DEPTH_LESS_NOWRITE (fsn-mode Task B3, src/geometry-fsn-draw.c's
+ * selection spotlight): the opposite trade-off from
+ * FSV_DEPTH_ALWAYS_NOWRITE above -- a translucent decal that DOES want
+ * to respect the depth buffer (so it loses to real geometry standing
+ * between it and the camera, the same as any opaque draw) but must
+ * never leave a depth value behind, both so it never occludes anything
+ * drawn after it in the same frame and so several overlapping decal
+ * layers blend against each other by draw order rather than fighting
+ * each other's depth. This is also the one FsvDepthTest value that pairs
+ * with alpha blending: src/sdl/gpu.cpp's pipeline_for() enables blending
+ * (SRC_ALPHA / ONE_MINUS_SRC_ALPHA, the same factors as the text
+ * pipeline) only for this variant, since the spotlight is currently its
+ * only caller and gpu_draw()'s contract has no separate knob for blend
+ * state -- see that function's own comment for why tying the two
+ * together here was chosen over adding one. */
 typedef enum {
 	FSV_DEPTH_LESS = 0,
 	FSV_DEPTH_LEQUAL,
-	FSV_DEPTH_GREATER
+	FSV_DEPTH_GREATER,
+	FSV_DEPTH_ALWAYS_NOWRITE,
+	FSV_DEPTH_LESS_NOWRITE
 } FsvDepthTest;
 
 void gpu_set_depth_test(FsvDepthTest test);
@@ -163,6 +195,26 @@ void gpu_set_depth_test(FsvDepthTest test);
  * shim; ignored by the SDL_GPU backend, which rasterizes every line one
  * pixel wide and has no equivalent knob — see docs/PORTING.md. */
 void gpu_set_line_width(float width);
+
+/**** Landscape (fsn-mode Task A1: sky/ground presets) ****************/
+
+/* Selects a landscape preset by index into fsn_landscapes[] (src/
+ * fsn-style.h), or FSN_LANDSCAPE_OFF (-1) to disable landscape drawing
+ * entirely (today's plain flat clear, unchanged from Task 2.2). The
+ * caller (src/color.c's landscape_set()/landscape_init()) is also the
+ * one that persists the choice via nvstore, by preset name rather than
+ * this raw index -- see fsn-style.h's FsnLandscape::name.
+ *
+ *   SDL/Metal (src/sdl/gpu.cpp): draws a screen-filling sky gradient and
+ *   a large ground quad in the scene pass, before geometry_draw()'s own
+ *   draws, and skips both entirely in FSV_RENDER_SELECT mode -- the sky
+ *   and ground are not pickable, so clicking on either must resolve to
+ *   node id 0 ("nothing there"), exactly like today's empty background.
+ *
+ *   GTK/OpenGL (src/ogl-gpu-compat.c): no-op. The GTK frontend keeps its
+ *   pre-A1 flat clear regardless of the stored preference -- see
+ *   docs/PORTING.md's "fsn mode" section for why. */
+void gpu_set_landscape(int index);
 
 /**** Camera matrices ****************/
 

@@ -22,9 +22,21 @@
 #include "dirtree.h"
 #include "filelist.h"
 #include "geometry.h"
+#include "gpu.h" /* gpu_set_landscape( ) -- see color.c's landscape_set()/_init() */
 #include "gui.h"
 #include "viewport.h"
 #include "window.h"
+
+/* gpu.h -- color.c (Task A1, fsn-mode) calls this the same way it calls
+ * window_set_color_mode() below: a frontend-notification hook, now with
+ * a real implementation in both src/sdl/gpu.cpp and
+ * src/ogl-gpu-compat.c, neither of which is linked into this headless
+ * build (see the file header above). */
+void
+gpu_set_landscape(int index)
+{
+	(void)index;
+}
 
 /* gui.h */
 void

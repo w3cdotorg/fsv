@@ -18,6 +18,8 @@
 #include "filelist.h"
 #include "fsv-platform.h"
 #include "geometry.h"
+#include "fsn-style.h" /* FSN_GENERATION_GAP (FSV_FSN framing), FSN_FLIGHT_* (flight navigation) */
+#include "geometry-fsn.h" /* FSV_FSN layout accessors */
 #include "window.h"
 
 
@@ -28,6 +30,29 @@
 #define MAPV_CAMERA_MAX_PAN_TIME	4.0
 #define TREEV_CAMERA_MIN_PAN_TIME	1.0
 #define TREEV_CAMERA_MAX_PAN_TIME	4.0
+#define FSN_CAMERA_MIN_PAN_TIME		0.5
+#define FSN_CAMERA_MAX_PAN_TIME		4.0
+
+/* FSV_FSN camera, Task B1 PLACEHOLDER.
+ *
+ * FSN reuses MapV's *camera storage* -- a Cartesian XYZ target plus the
+ * base Camera's theta/phi/distance, i.e. MAPV_CAMERA(camera) and the
+ * FSV_MAPV arm of both frontends' setup_modelview_matrix( ). What it
+ * does NOT reuse is MapV's camera *math*: every mapv_* helper below
+ * reads MAPV_GEOM_PARAMS, which in FSN mode holds an FsnPedestal instead
+ * (the two modes share NodeDesc::geomparams), so delegating outright
+ * would feed the camera another mode's numbers reinterpreted as its own.
+ * The fsn_* helpers below are therefore thin equivalents that read the
+ * FSN layout (src/geometry-fsn.h) and are otherwise shaped exactly like
+ * their MapV counterparts.
+ *
+ * Task B2 replaces all of this with the real fsn flight model
+ * (approach-deceleration, ground-level travel). Until then these values
+ * only have to produce a sane, non-degenerate view. */
+#define FSN_CAMERA_PHI			15.0	/* low, near-ground pitch, as in
+						 * the reference screenshot */
+#define FSN_CAMERA_THETA		270.0	/* looking along +y, the
+						 * direction the tree grows */
 
 #define TREEV_CAMERA_AVG_VELOCITY	1024.0
 
@@ -105,8 +130,17 @@ field_distance( double fov, double diameter )
 void
 camera_init( FsvMode mode, boolean initial_view )
 {
+	const FsnPedestal *fsn_ped;
+	XYZvec fsn_ext;
 	RTvec ext_c1;
 	double d, d1, d2;
+
+	/* A mode switch, a rescan or a Reset re-poses the camera outright;
+	 * whatever the user was flying toward is gone with it. Safe this
+	 * early -- fsv_set_mode( ) has not assigned globals.fsv_mode yet at
+	 * this point, and camera_flight_end( ) deliberately does not read
+	 * it (see the note on its definition). */
+	camera_flight_end( );
 
 	camera->fov = 60.0;
 	camera->pan_part = 1.0;
@@ -180,6 +214,31 @@ camera_init( FsvMode mode, boolean initial_view )
 			TREEV_CAMERA(camera)->target.theta = 90.0;
 			TREEV_CAMERA(camera)->target.z = 0.0;
 		}
+		camera->near_clip = NEAR_TO_DISTANCE_RATIO * camera->distance;
+		camera->far_clip = FAR_TO_NEAR_RATIO * camera->near_clip;
+		break;
+
+		case FSV_FSN:
+		/* Frame the whole landscape from behind the root pedestal,
+		 * looking down the depth axis the tree grows along. See the
+		 * FSN_CAMERA_* note at the top of this file -- placeholder,
+		 * Task B2 replaces it. */
+		fsn_layout_extents( &fsn_ext.x, &fsn_ext.y, &fsn_ext.z );
+		fsn_ped = fsn_layout_get( root_dnode );
+		/* MAX(1.0, ...): an empty or not-yet-laid-out landscape would
+		 * otherwise give distance == near_clip == far_clip == 0, and
+		 * a frustum with near == far is a division by zero */
+		d = field_distance( camera->fov,
+		    MAX(1.0, MAX(fsn_ext.x, fsn_ext.y)) );
+		camera->theta = FSN_CAMERA_THETA;
+		camera->phi = FSN_CAMERA_PHI;
+		/* Far enough back that the root pedestal -- which sits at the
+		 * near end of the landscape, not at its center -- still
+		 * clears NEAR_TO_DISTANCE_RATIO's near plane */
+		camera->distance = (initial_view ? 2.0 : 1.25) * d;
+		MAPV_CAMERA(camera)->target.x = (fsn_ped != NULL) ? fsn_ped->x : 0.0;
+		MAPV_CAMERA(camera)->target.y = 0.5 * fsn_ext.y;
+		MAPV_CAMERA(camera)->target.z = 0.5 * fsn_ext.z;
 		camera->near_clip = NEAR_TO_DISTANCE_RATIO * camera->distance;
 		camera->far_clip = FAR_TO_NEAR_RATIO * camera->near_clip;
 		break;
@@ -295,6 +354,29 @@ treev_scrollbar_move( double value, int axis )
 }
 
 
+/* Helper function for camera_scrollbar_moved( ).
+ * FSN's ground plane is Cartesian like MapV's, but deliberately without
+ * MapV's coupled yaw/pitch adjustment: mapv_camera_theta( )/_phi( ) are
+ * expressed in MAPV_GEOM_PARAMS, which hold FSN geometry in this mode.
+ * Panning only, therefore -- and no FSN scrollbar can be dragged today
+ * anyway (see fsn_get_scrollbar_state( ) below). Task B2 replaces this. */
+static void
+fsn_scrollbar_move( double value, int axis )
+{
+	switch (axis) {
+		case X_AXIS:
+		MAPV_CAMERA(camera)->target.x = value;
+		break;
+
+		case Y_AXIS:
+		MAPV_CAMERA(camera)->target.y = - value;
+		break;
+
+		SWITCH_FAIL
+	}
+}
+
+
 /* Called by the frontend whenever the user manually moves one of the
  * viewport scrollbars (i.e. drags the slider). Reads the new scrollbar
  * position via fsv_platform.get_scroll( ) and updates the camera target
@@ -320,6 +402,10 @@ camera_scrollbar_moved( int axis )
 
 		case FSV_TREEV:
 		treev_scrollbar_move( value, axis );
+		break;
+
+		case FSV_FSN:
+		fsn_scrollbar_move( value, axis );
 		break;
 
 		SWITCH_FAIL
@@ -540,6 +626,17 @@ camera_update_scrollbars( boolean hard_update )
 		mapv_get_scrollbar_state(&x, &y);
 		break;
 
+		case FSV_FSN:
+		/* No scroll model yet -- Task B2 is what gives FSN its own
+		 * navigation. Deliberately the *null* state rather than
+		 * MapV's: mapv_get_scrollbar_state( ) is written entirely in
+		 * MAPV_GEOM_PARAMS, which carry FSN pedestals in this mode,
+		 * so it would report ranges computed from a reinterpreted
+		 * FsnPedestal. src/sdl/ui_rail.cpp keeps its Tilt/Height
+		 * sliders disabled in FSN mode to match. */
+		null_get_scrollbar_state(&x, &y);
+		break;
+
 		case FSV_TREEV:
 		treev_get_scrollbar_state(&x, &y);
 		break;
@@ -582,6 +679,10 @@ camera_pan_finish( void )
 		morph_finish( &DISCV_CAMERA(camera)->target.y );
 		break;
 
+		case FSV_FSN:
+		/* FSN stores its target in MapV's Cartesian camera struct
+		 * (see the FSN_CAMERA_* note at the top of this file), so the
+		 * same three variables are the ones to settle */
 		case FSV_MAPV:
 		morph_finish( &MAPV_CAMERA(camera)->target.x );
 		morph_finish( &MAPV_CAMERA(camera)->target.y );
@@ -618,6 +719,8 @@ camera_pan_break( void )
 		morph_break( &DISCV_CAMERA(camera)->target.y );
 		break;
 
+		case FSV_FSN:
+		/* Shares MapV's Cartesian target storage -- as above */
 		case FSV_MAPV:
 		morph_break( &MAPV_CAMERA(camera)->target.x );
 		morph_break( &MAPV_CAMERA(camera)->target.y );
@@ -632,6 +735,304 @@ camera_pan_break( void )
 
 		SWITCH_FAIL
 	}
+}
+
+
+/**** fsn flight navigation ****
+ *
+ * The one piece of camera motion in fsv that is NOT a morph. A morph has
+ * a start value, an end value and a duration; flight has a velocity and
+ * runs until the user lets go of the button. Expressing it as a morph
+ * would mean either re-arming a fresh one-frame morph on every tick (a
+ * malloc, a queue insert, a queue removal and an end callback per frame,
+ * to interpolate between two values a frame apart) or morphing toward a
+ * fictitious far-away target and breaking it on release -- which would
+ * make the pointer's offset control *acceleration* rather than speed,
+ * since the morph's own easing would still be shaping the motion.
+ *
+ * So the rates live here and the frontend's main loop calls
+ * camera_flight_tick( ) once per iteration, next to fsv_animation_tick( ).
+ * The animation subsystem still drives the actual drawing: each tick
+ * that moves the camera calls redraw( ), which is what keeps frames
+ * flowing (animation.c's animation_active) for exactly as long as the
+ * camera is moving and not one frame longer.
+ *
+ * Position and heading only. The viewer moves along the ground plane in
+ * the direction it is facing, turns on the spot, and (with Shift) climbs
+ * or dives; camera->phi is deliberately left alone, because fsn's flight
+ * was planar -- the pitch is part of the viewpoint, not part of the
+ * flying. FSN's target is stored in MapV's Cartesian camera struct (see
+ * the FSN_CAMERA_* note at the top of this file), so "position" here is
+ * MAPV_CAMERA(camera)->target and "heading" is camera->theta. */
+
+/* TRUE while the middle button is held in FSV_FSN mode */
+static boolean flight_active = FALSE;
+
+/* Current flight rates, all per second. Set by camera_flight_update( )
+ * from the pointer offset, integrated by camera_flight_tick( ). */
+static double flight_speed = 0.0;	/* along the horizontal view direction */
+static double flight_yaw_rate = 0.0;	/* degrees, added to camera->theta */
+static double flight_climb = 0.0;	/* world z */
+
+/* xgettime( ) at the last tick, for the time step */
+static double flight_t_prev = 0.0;
+
+
+/* Cancels an in-progress camera pan *and* performs the bookkeeping its
+ * end callback would otherwise have done.
+ *
+ * camera_pan_break( ) alone is not enough for a caller that simply
+ * stops: morph_break( ) drops a morph record without calling its
+ * end_cb, so the master pan morph's pan_end_cb( )/post_pan_end( ) never
+ * runs -- and that pair is what clears camera_currently_moving and hands
+ * the user interface back (window_set_access( TRUE )). Every other
+ * caller of camera_pan_break( ) in this file immediately arms a
+ * replacement pan, master morph included, so none of them noticed.
+ * Flight is the first one that doesn't.
+ *
+ * Two of post_pan_end( )'s four actions are deliberately NOT reproduced:
+ *
+ *   - geometry_camera_pan_finished( ): it records where the node cursor
+ *     came to rest, and an interrupted pan came to rest nowhere. (FSN's
+ *     arm of it is empty in any case -- the mode draws no cursor.)
+ *   - filelist_show_entry( node ): it scrolls the file list to the node
+ *     the pan was *heading for*, which is precisely the node the user
+ *     just decided not to go to. A no-op in the SDL frontend today
+ *     (src/sdl/stubs.c) but real in the GTK one and a candidate to
+ *     become real here, so this is a decision, not an oversight: the
+ *     pan's destination never became the current node, so nothing should
+ *     select it.
+ *
+ * The other two -- window_set_access( TRUE ) and the
+ * camera_currently_moving clear -- are what this function exists for. */
+static void
+cancel_pan_for_manual_control( void )
+{
+	if (!camera_currently_moving)
+		return;
+
+	camera_pan_break( );
+	camera_currently_moving = FALSE;
+	camera->pan_part = 1.0;
+	window_set_access( TRUE );
+}
+
+
+/* Shifts camera->theta by whole turns until it is within 180 degrees of
+ * target_theta, so that a morph between the two takes the short way
+ * round. Call immediately before arming such a morph.
+ *
+ * Why it is needed: morph( ) interpolates linearly between two
+ * *numbers*, and theta is an angle -- two headings a few degrees apart
+ * on the compass can be most of a turn apart numerically. Flight makes
+ * that routine, because camera_flight_tick( ) normalizes theta into
+ * [0, 360] on every tick: a viewer who has turned slightly past the
+ * wrap point leaves theta at, say, 3 degrees, and a pan to
+ * FSN_CAMERA_THETA (270) would then spin the long way round (267
+ * degrees, over a second of gratuitous yaw) instead of taking the
+ * 93-degree short arc.
+ *
+ * Why it is free: every other consumer of theta takes its sine or
+ * cosine, so theta and theta +/- 360 are the same heading everywhere
+ * (mapv_get_camera_position( ) included). Only the morph, which does
+ * arithmetic on the number itself, can tell them apart -- which is
+ * exactly the bug.
+ *
+ * Applied to the two FSN pans that can follow a flight (fsn_look_at( )
+ * and camera_birdseye_view( )'s going-up arm) and deliberately nowhere
+ * else. camera_revolve( ) normalizes theta the same way, so DiscV, MapV
+ * and TreeV have the same long-way-round pan after a manual revolve --
+ * pre-existing upstream behavior in three modes this task is not
+ * touching, recorded in docs/PORTING.md rather than changed under cover
+ * of an fsn task. */
+static void
+unwrap_theta_toward( double target_theta )
+{
+	while ((target_theta - camera->theta) > 180.0)
+		camera->theta += 360.0;
+	while ((camera->theta - target_theta) > 180.0)
+		camera->theta -= 360.0;
+}
+
+
+/* Maps one axis of the pointer's offset from the press point onto a
+ * rate: zero inside the dead zone, then linear in the offset past it,
+ * clamped at max_rate. Sign is carried through. */
+static double
+flight_axis_rate( double offset_px, double scale, double max_rate )
+{
+	double magnitude;
+
+	magnitude = ABS(offset_px);
+	if (magnitude <= FSN_FLIGHT_DEAD_ZONE_PX)
+		return 0.0;
+
+	magnitude = MIN((magnitude - FSN_FLIGHT_DEAD_ZONE_PX) * scale, max_rate);
+
+	return (offset_px < 0.0) ? -magnitude : magnitude;
+}
+
+
+/* Starts a flight. No-op outside FSV_FSN, so the frontend's per-mode
+ * gesture dispatch is backed up by the invariant living here too. */
+void
+camera_flight_begin( void )
+{
+	if (globals.fsv_mode != FSV_FSN)
+		return;
+
+	/* Flight and a camera pan are two things moving the same variables;
+	 * the user wins. (The converse -- a look_at during a flight -- is
+	 * handled by camera_look_at_full( ) calling camera_flight_end( ).) */
+	cancel_pan_for_manual_control( );
+
+	flight_active = TRUE;
+	flight_speed = 0.0;
+	flight_yaw_rate = 0.0;
+	flight_climb = 0.0;
+	flight_t_prev = xgettime( );
+
+	/* Exactly what camera_dolly( )/camera_revolve( ) do, and for the
+	 * same reason: this is the user steering, so colexp.c must not
+	 * re-aim the camera underneath them (colexp.c's !manual_control
+	 * branch). Note what is NOT done here -- window_set_access( FALSE ).
+	 * That call means "an animation owns the camera, keep the user off
+	 * the controls"; flight is the opposite of that. */
+	camera->manual_control = TRUE;
+}
+
+
+/* Feeds the pointer's current offset from the press point (in the
+ * frontend's pixel space -- see fsn-style.h) into the flight rates.
+ * y grows downward in that space, so a negative dy (pointer above the
+ * press point) is forward, and up. */
+void
+camera_flight_update( double dx_from_press, double dy_from_press, boolean vertical )
+{
+	if (!flight_active)
+		return;
+
+	/* Yaw: pointer to the right of the press point turns right. theta
+	 * is a counterclockwise heading, so turning right decreases it --
+	 * the same sign camera_revolve( ) gives a rightward drag. */
+	flight_yaw_rate = -flight_axis_rate( dx_from_press,
+	    FSN_FLIGHT_YAW_SCALE, FSN_FLIGHT_YAW_MAX );
+
+	if (vertical) {
+		/* Shift: the y offset is altitude instead of speed. Not "as
+		 * well as": holding Shift stops the viewer moving forward, so
+		 * the gesture is a pure ascent/descent. */
+		flight_speed = 0.0;
+		flight_climb = flight_axis_rate( -dy_from_press,
+		    FSN_FLIGHT_ALT_SCALE, FSN_FLIGHT_ALT_MAX );
+	}
+	else {
+		flight_speed = flight_axis_rate( -dy_from_press,
+		    FSN_FLIGHT_SPEED_SCALE, FSN_FLIGHT_SPEED_MAX );
+		flight_climb = 0.0;
+	}
+}
+
+
+/* Stops a flight. Idempotent, and safe in any mode: this is what
+ * input_reset( ), the Escape key and every camera_look_at( ) call
+ * reach for, none of which can know whether a flight is in progress.
+ *
+ * Deliberately does NOT push scrollbar state. The last tick that moved
+ * the camera already did (camera_flight_tick( )'s
+ * camera_update_scrollbars( FALSE )), and a flight that never moved the
+ * camera has nothing to push -- so the call would be redundant in both
+ * cases. Leaving it out also keeps this function free of any dependency
+ * on globals.fsv_mode, which matters because two of its callers run at
+ * moments when that variable does not describe the world:
+ * camera_init( ), which fsv_set_mode( ) calls after the NEW mode's
+ * geometry_init( ) but BEFORE assigning globals.fsv_mode; and
+ * src/sdl/input.cpp's input_reset( ), which runs around a rescan.
+ * camera_update_scrollbars( ) ends in SWITCH_FAIL for FSV_NONE. */
+void
+camera_flight_end( void )
+{
+	if (!flight_active)
+		return;
+
+	flight_active = FALSE;
+	flight_speed = 0.0;
+	flight_yaw_rate = 0.0;
+	flight_climb = 0.0;
+}
+
+
+boolean
+camera_flight_active( void )
+{
+	return flight_active;
+}
+
+
+/* Integrates the current flight rates over the time elapsed since the
+ * last call. Called once per frontend main-loop iteration. */
+void
+camera_flight_tick( void )
+{
+	double t_now, dt;
+	double sin_theta, cos_theta;
+
+	if (!flight_active)
+		return;
+
+	t_now = xgettime( );
+	dt = t_now - flight_t_prev;
+	flight_t_prev = t_now;
+	dt = CLAMP(dt, 0.0, FSN_FLIGHT_MAX_STEP);
+
+	if ((flight_speed == 0.0) && (flight_yaw_rate == 0.0) && (flight_climb == 0.0))
+		/* Button held, pointer inside the dead zone: nothing moves, so
+		 * deliberately no redraw( ) either. Holding still costs the
+		 * same as not flying at all. */
+		return;
+
+	/* Heading first, so this step's travel uses the heading the viewer
+	 * ends the step facing -- a turn and a translation in the same
+	 * frame then read as one curved move rather than a sideways skid */
+	camera->theta += flight_yaw_rate * dt;
+	while (camera->theta < 0.0)
+		camera->theta += 360.0;
+	while (camera->theta > 360.0)
+		camera->theta -= 360.0;
+
+	/* The camera sits at target + distance * (cos(theta)cos(phi),
+	 * sin(theta)cos(phi), sin(phi)) and looks back down that vector at
+	 * the target (mapv_get_camera_position( ) above), so the direction
+	 * the viewer faces, projected onto the ground, is
+	 * -(cos(theta), sin(theta)). Moving the target along it carries the
+	 * whole rig -- viewpoint and all -- forward.
+	 *
+	 * Sanity check on the signs: at the initial FSN_CAMERA_THETA of
+	 * 270 degrees that comes out as -(0, -1) == +y, which is the
+	 * direction the landscape grows away from the camera (the "z" axis
+	 * of geometry-fsn.h's FsnPedestal). Pushing forward flies into the
+	 * tree, which is the point of the mode. */
+	cos_theta = cos( RAD(camera->theta) );
+	sin_theta = sin( RAD(camera->theta) );
+	MAPV_CAMERA(camera)->target.x -= flight_speed * dt * cos_theta;
+	MAPV_CAMERA(camera)->target.y -= flight_speed * dt * sin_theta;
+
+	/* No ceiling on the climb: flying up is self-limiting (the whole
+	 * landscape comes into frame and there is nothing further to see),
+	 * and a cap would have to be recomputed on every rescan. The floor
+	 * is real, though -- below the ground plane the viewer is looking
+	 * up at the underside of a landscape drawn as if lit from above. */
+	MAPV_CAMERA(camera)->target.z =
+	    MAX(0.0, MAPV_CAMERA(camera)->target.z + flight_climb * dt);
+
+	/* Same pair the scrollbar and dolly paths use: push the new camera
+	 * state out to the frontend's scroll widgets, then ask for a frame.
+	 * FALSE (soft) rather than TRUE because this fires every frame --
+	 * and because camera_moving( ) is false during a flight, so
+	 * camera_update_scrollbars( ) takes its non-interpolating path
+	 * either way. */
+	camera_update_scrollbars( FALSE );
+	redraw( );
 }
 
 
@@ -795,6 +1196,90 @@ mapv_look_at( GNode *node, MorphType mtype, double pan_time_override )
 		morph( &camera->near_clip, mtype, new_cam->near_clip, pan_time );
 		morph( &camera->far_clip, mtype, new_cam->far_clip, pan_time );
 	}
+	morph( &MAPV_CAMERA(camera)->target.x, mtype, MAPV_CAMERA(new_cam)->target.x, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.y, mtype, MAPV_CAMERA(new_cam)->target.y, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.z, mtype, MAPV_CAMERA(new_cam)->target.z, pan_time );
+
+	return pan_time;
+}
+
+
+/* Helper function for camera_look_at_full( ), FSV_FSN mode.
+ *
+ * Task B1 PLACEHOLDER -- the real fsn flight (a low, ground-hugging
+ * travel with approach-deceleration, and the wire-following path between
+ * pedestals) is Task B2's whole subject. What this has to do until then
+ * is put the target node in frame from a sane angle without ever
+ * producing a degenerate frustum. Shaped like mapv_look_at( ) above,
+ * with the same morph set, but reading the FSN layout instead of
+ * MAPV_GEOM_PARAMS (see the FSN_CAMERA_* note at the top of this file). */
+static double
+fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
+{
+	MapVCamera new_mcam;
+	Camera *new_cam;
+	const FsnPedestal *ped;
+	XYZvec camera_pos, new_cam_pos, delta;
+	XYZvec ext;
+	double diameter, pan_time, k;
+
+	new_cam = CAMERA(&new_mcam);
+
+	/* A file's box stands on its parent's pedestal, so its own `h` is
+	 * measured from there, not from the ground */
+	ped = fsn_layout_get( node );
+	if (ped == NULL) {
+		/* No FSN geometry for this node (should not happen: the mode
+		 * lays out the whole tree). Stay where we are. */
+		return FSN_CAMERA_MIN_PAN_TIME;
+	}
+
+	MAPV_CAMERA(new_cam)->target.x = ped->x;
+	MAPV_CAMERA(new_cam)->target.y = ped->z;
+	MAPV_CAMERA(new_cam)->target.z = ped->h;
+	if (!NODE_IS_DIR(node) && node->parent != NULL &&
+	    NODE_IS_DIR(node->parent))
+		MAPV_CAMERA(new_cam)->target.z += fsn_layout_get( node->parent )->h;
+
+	new_cam->theta = FSN_CAMERA_THETA;
+	new_cam->phi = FSN_CAMERA_PHI;
+
+	/* Enough of the object in frame to make it identifiable -- and, for
+	 * an expanded directory, enough to take in the wires leaving it and
+	 * the near edge of the generation they lead to, which is the whole
+	 * point of the mode */
+	diameter = SQRT_2 * MAX(ped->w, ped->d);
+	if (NODE_IS_DIR(node) && dirtree_entry_expanded( node ))
+		diameter = MAX(diameter, ped->d + 2.0 * FSN_GENERATION_GAP);
+	new_cam->distance = field_distance( camera->fov, MAX(1.0, diameter) );
+	new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
+	new_cam->far_clip = FAR_TO_NEAR_RATIO * new_cam->near_clip;
+
+	/* Duration: proportional to how far the viewer actually travels,
+	 * measured against the size of the whole landscape -- MapV's rule,
+	 * with its root-node footprint swapped for the FSN extents */
+	if (pan_time_override > 0.0)
+		pan_time = pan_time_override;
+	else {
+		mapv_get_camera_position( camera, &camera_pos );
+		mapv_get_camera_position( new_cam, &new_cam_pos );
+		delta.x = new_cam_pos.x - camera_pos.x;
+		delta.y = new_cam_pos.y - camera_pos.y;
+		delta.z = new_cam_pos.z - camera_pos.z;
+
+		fsn_layout_extents( &ext.x, &ext.y, NULL );
+		k = sqrt( XYZ_LEN(delta) / MAX(1.0, hypot( ext.x, ext.y )) );
+		pan_time = MAX(FSN_CAMERA_MIN_PAN_TIME,
+		    MIN(1.0, k) * FSN_CAMERA_MAX_PAN_TIME);
+	}
+
+	unwrap_theta_toward( new_cam->theta );
+
+	morph( &camera->theta, mtype, new_cam->theta, pan_time );
+	morph( &camera->phi, mtype, new_cam->phi, pan_time );
+	morph( &camera->distance, mtype, new_cam->distance, pan_time );
+	morph( &camera->near_clip, mtype, new_cam->near_clip, pan_time );
+	morph( &camera->far_clip, mtype, new_cam->far_clip, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.x, mtype, MAPV_CAMERA(new_cam)->target.x, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.y, mtype, MAPV_CAMERA(new_cam)->target.y, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.z, mtype, MAPV_CAMERA(new_cam)->target.z, pan_time );
@@ -984,6 +1469,13 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 		g_assert( dirtree_entry_expanded( node->parent ) );
 #endif
 
+	/* An automatic pan and a flight are two things driving the same
+	 * camera variables. The pan wins here, because the user asked for
+	 * it (a click on a pedestal, a tree row, Go Back...) with the same
+	 * hands that would otherwise be flying -- the reverse case, a
+	 * flight started during a pan, is camera_flight_begin( )'s. */
+	camera_flight_end( );
+
 	/* Temporarily disable part of the user interface */
 	window_set_access( FALSE );
 
@@ -1011,6 +1503,10 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 
 		case FSV_TREEV:
 		pan_time = treev_look_at( node, mtype, pan_time_override );
+		break;
+
+		case FSV_FSN:
+		pan_time = fsn_look_at( node, mtype, pan_time_override );
 		break;
 
 		SWITCH_FAIL
@@ -1171,11 +1667,18 @@ camera_birdseye_view( boolean going_up )
 {
 	union AnyCamera new_anycam;
 	Camera *new_cam, *pre_cam;
+	XYZvec fsn_ext;
 	RTvec ext_c1;
 	double pan_time = 0.0;
 
 	new_cam = CAMERA(&new_anycam);
 	pre_cam = CAMERA(&pre_birdseye_view_camera);
+
+	/* As in camera_look_at_full( ): an explicit request to re-pose the
+	 * camera ends any flight in progress. Doubly so going up, since the
+	 * pose saved here as "where the user was" would otherwise keep
+	 * drifting after it was saved. */
+	camera_flight_end( );
 
 	/* Neutralize user interface */
 	window_set_access( FALSE );
@@ -1199,6 +1702,10 @@ camera_birdseye_view( boolean going_up )
 
 		case FSV_TREEV:
 		pan_time = TREEV_CAMERA_MAX_PAN_TIME;
+		break;
+
+		case FSV_FSN:
+		pan_time = FSN_CAMERA_MAX_PAN_TIME;
 		break;
 
 		SWITCH_FAIL
@@ -1230,6 +1737,20 @@ camera_birdseye_view( boolean going_up )
 				new_cam->distance = 4.0 * camera->distance;
 			break;
 
+			case FSV_FSN:
+			/* Straight down over the whole landscape. Its extents
+			 * come from the FSN layout rather than from
+			 * MAPV_NODE_WIDTH( ) as the MapV arm above does -- see
+			 * the FSN_CAMERA_* note at the top of this file. */
+			new_cam->theta = FSN_CAMERA_THETA;
+			fsn_layout_extents( &fsn_ext.x, &fsn_ext.y, NULL );
+			new_cam->distance = field_distance( camera->fov,
+			    MAX(1.0, MAX(fsn_ext.x, fsn_ext.y)) );
+			/* Same reason as fsn_look_at( )'s: this is the other
+			 * pan a flight can hand a wrapped heading to */
+			unwrap_theta_toward( new_cam->theta );
+			break;
+
 			SWITCH_FAIL
 		}
 		new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
@@ -1245,6 +1766,21 @@ camera_birdseye_view( boolean going_up )
 	}
 	else {
 		/* Restore pre-bird's-eye-view camera state */
+
+		/* Third consumer of the same whip fix as fsn_look_at( ) and the
+		 * going-up arm above (task-B2-report.md's fix round, item 2):
+		 * a flight can leave camera->theta unwrapped past a multiple of
+		 * 360, and morph( ) interpolates that raw number rather than
+		 * the angle it represents, so restoring straight to
+		 * pre_cam->theta can spin most of the way around instead of
+		 * taking the short arc back to where the user was before going
+		 * up. FSN-only, like the going-up arm's call: DiscV/MapV/TreeV
+		 * never wrap theta the way a flight does, so their own
+		 * pre-existing "long way round" behavior after a manual
+		 * revolve (documented in the same fix-round note) is left
+		 * alone here too. */
+		if (globals.fsv_mode == FSV_FSN)
+			unwrap_theta_toward( pre_cam->theta );
 		morph( &camera->theta, MORPH_SIGMOID, pre_cam->theta, pan_time );
 		morph( &camera->phi, MORPH_SIGMOID, pre_cam->phi, pan_time );
 		morph( &camera->distance, MORPH_SIGMOID, pre_cam->distance, pan_time );
@@ -1257,6 +1793,9 @@ camera_birdseye_view( boolean going_up )
 			morph( &DISCV_CAMERA(camera)->target.y, MORPH_SIGMOID, DISCV_CAMERA(pre_cam)->target.y, pan_time );
 			break;
 
+			case FSV_FSN:
+			/* Shares MapV's Cartesian target storage -- see the
+			 * FSN_CAMERA_* note at the top of this file */
 			case FSV_MAPV:
 			morph( &MAPV_CAMERA(camera)->target.x, MORPH_SIGMOID, MAPV_CAMERA(pre_cam)->target.x, pan_time );
 			morph( &MAPV_CAMERA(camera)->target.y, MORPH_SIGMOID, MAPV_CAMERA(pre_cam)->target.y, pan_time );

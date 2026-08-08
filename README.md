@@ -100,7 +100,7 @@ handling — see [`src/sdl/input.cpp`](src/sdl/input.cpp)):
 |---|---|
 | Hover (no button held) | Highlight the node under the cursor; show its path in the status bar |
 | Left-click, release | Select the node under the cursor and fly the camera to it ("look at") |
-| Middle-drag | Dolly (zoom) the camera in/out |
+| Middle-drag | Dolly (zoom) the camera in/out — **in FSN mode: flight** (vertical deflection = forward/backward speed, horizontal = turn, Shift = climb/descend, release to stop) |
 | Ctrl + left-drag | Revolve the camera around the current target |
 | Scroll wheel | Dolly (zoom) — an addition in this port; upstream fsv has no wheel gesture, only the middle-drag |
 | Double-click a directory | Toggle expand/collapse of that directory — an addition in this port; upstream fsv (and this port, before this addition) treats a double-click as just two ordinary left-clicks in a row, with no directory-activation gesture in the 3D view at all |
@@ -122,6 +122,23 @@ Menu highlights (menu bar at the top of the window):
 | **Help** | Controls (this table, in-app), About fsv… |
 
 ## What's been done
+
+### The FSN mode (v0.2)
+
+A fourth visualization mode (`--fsn`, or Vis → FSN) recreating the original
+SGI fsn's look and interaction from screenshots, the 1992 README, and two
+SGI patents (US5555354 flight navigation, US5861885 selection spotlight) —
+the original source code was never released:
+
+- The classic landscape: gradient sky over a green ground plane
+  (Display → Landscape presets), directory pedestals whose height tracks
+  subtree size, file boxes colored by age, and white wires connecting
+  parent to child directories.
+- fsn's 7-bucket age color scheme (1 wk → > 1 yr) with the bottom legend
+  bar, calibrated against period screenshots.
+- Flight navigation on middle-drag, a camera control rail
+  (Reset / Go back / Birds eye / Front view + Tilt/Height sliders), and
+  the selection spotlight — a soft pool of light under the selected node.
 
 ### The macOS / Metal port (this branch)
 

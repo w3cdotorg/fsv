@@ -127,6 +127,14 @@ typedef enum {
 	FSV_DISCV,
 	FSV_MAPV,
 	FSV_TREEV,
+	/* fsn-mode Task B1: the original fsn's pedestal-and-wire landscape
+	 * (src/geometry-fsn.c). Deliberately inserted *before* FSV_SPLASH
+	 * rather than appended after FSV_NONE, so it lands among the real
+	 * visualization modes and every `switch` on FsvMode that ends in
+	 * SWITCH_FAIL has to account for it -- a missed switch aborts at
+	 * runtime (g_assert_not_reached), which is exactly the failure mode
+	 * wanted while this mode is being built out. */
+	FSV_FSN,
 	FSV_SPLASH,
 	FSV_NONE
 } FsvMode;

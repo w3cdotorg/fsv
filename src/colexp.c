@@ -24,6 +24,10 @@
 #define DISCV_COLEXP_TIME	1.5
 #define MAPV_COLEXP_TIME	0.375
 #define TREEV_COLEXP_TIME	0.5
+/* fsn-mode Task B1. Between MapV's and TreeV's: an FSN subtree grows up
+ * out of the ground plane, a shorter distance than a TreeV platform
+ * sweeps but a more conspicuous one than a MapV node's stack. */
+#define FSN_COLEXP_TIME		0.5
 
 
 /* TRUE whenever the collapse/expand process affects the viewport's
@@ -171,6 +175,10 @@ colexp( GNode *dnode, ColExpMesg mesg )
 
 			case FSV_TREEV:
 			colexp_time = TREEV_COLEXP_TIME;
+			break;
+
+			case FSV_FSN:
+			colexp_time = FSN_COLEXP_TIME;
 			break;
 
                         SWITCH_FAIL

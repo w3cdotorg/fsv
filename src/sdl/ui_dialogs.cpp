@@ -152,6 +152,9 @@ cs_spectrum_sample(double x)
 		boundary[1] = &g_cs.scratch.by_timestamp.new_color;
 		data = boundary;
 	}
+	// SPECTRUM_FSN_BUCKETS needs no boundary data (see
+	// color_spectrum_color()'s own case in src/color.c): this preview
+	// just ends up stepping through the 7 bucket colors in order.
 	return color_spectrum_color(g_cs.scratch.by_timestamp.spectrum_type, x, data);
 }
 
@@ -202,9 +205,13 @@ draw_color_setup_timestamp_tab(void)
 	draw_spectrum_preview();
 	ImGui::Spacing();
 
-	static const char *spectrum_labels[] = { "Rainbow", "Heat", "Gradient" };
+	// "fsn buckets" (fsn-mode Task A2): the original fsn's 7-bucket
+	// absolute-age coloring (src/fsn-style.h's fsn_age_buckets[]) plus
+	// the bottom-center ages legend (src/sdl/ui_rail.cpp) -- distinct
+	// from the three continuous, old/new-windowed spectrums above it.
+	static const char *spectrum_labels[] = { "Rainbow", "Heat", "Gradient", "fsn buckets" };
 	int sp = (int)g_cs.scratch.by_timestamp.spectrum_type;
-	if (ImGui::Combo("Spectrum type", &sp, spectrum_labels, 3))
+	if (ImGui::Combo("Spectrum type", &sp, spectrum_labels, 4))
 		g_cs.scratch.by_timestamp.spectrum_type = (SpectrumType)sp;
 
 	// Port of csdialog_time_color_picker_set_access(): the gradient

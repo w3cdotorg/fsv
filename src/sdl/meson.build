@@ -17,8 +17,13 @@
 # Neither file is folded into libfsvcore: both now call gpu.h, which each
 # frontend implements, and libfsvcore's other consumers (fsv-scan,
 # test_scanfs) have no renderer to link against.
-core_gl_src = files('stubs.c', '../geometry.c', '../tmaptext.c',
-                    '../fontatlas.c')
+# geometry-fsn-draw.c (fsn-mode Task B1) rides along with geometry.c for
+# exactly the same reason: it is FSV_FSN's share of the same per-mode
+# geometry surface, split into its own file only because geometry.c is
+# already ~2.9k lines. Its *layout* counterpart, geometry-fsn.c, is
+# gpu-free and lives in libfsvcore instead (see src/meson.build).
+core_gl_src = files('stubs.c', '../geometry.c', '../geometry-fsn-draw.c',
+                    '../tmaptext.c', '../fontatlas.c')
 
 # The compiled shader artifacts (Task 3.1) are baked into the binary as
 # byte arrays rather than loaded from disk — see the rationale at the top
@@ -40,7 +45,7 @@ shaders_embedded_h = custom_target('shaders_embedded.h',
 
 fsv_sdl = executable('fsv',
   ['main.cpp', 'gpu.cpp', 'input.cpp', 'ui_main.cpp', 'ui_panels.cpp',
-   'ui_dialogs.cpp', shaders_embedded_h, core_gl_src],
+   'ui_dialogs.cpp', 'ui_rail.cpp', shaders_embedded_h, core_gl_src],
   link_with: libfsvcore,
   dependencies: [sdl3dep, imgui_dep, glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   # include_directories('.') resolves to *both* src/sdl and its build

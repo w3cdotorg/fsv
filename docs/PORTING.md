@@ -3387,6 +3387,1450 @@ shipped as part of a task rather than afterward.
     allocation per label per draw (the cell array, alongside the vertex
     array `text_draw_*()` already allocated).
 
+## fsn mode
+
+Work recreating the look and feel of the original SGI `fsn` (landscape
+sky/ground, wire connectors, spotlight, control rail) on top of the
+completed Metal port above. Tracked in
+`.superpowers/sdd/2026-08-08-fsn-mode/` (plan + per-task briefs/reports);
+this section carries the same per-task verification notes the
+milestone-A/B/C task list above does, one `###` per task.
+
+### Task A1 verification (landscape sky/ground presets)
+
+**Files:** `src/fsn-style.h` (new — `FsnLandscape`, `fsn_landscapes[]`,
+`FSN_LANDSCAPE_COUNT`, `FSN_LANDSCAPE_OFF`); `src/gpu.h`
+(`gpu_set_landscape()` declaration); `src/sdl/gpu.cpp` (real
+implementation + `draw_landscape()`); `src/ogl-gpu-compat.c` (no-op);
+`src/color.h`/`.c` (`landscape_get()`/`_set()`/`_init()`, nvstore key
+`landscape`); `src/sdl/main.cpp` + `src/window.c` (call `landscape_init()`
+alongside `color_init()`); `src/sdl/ui_main.cpp` (Display → Landscape
+menu); `tools/fsv-headless-stubs.c` (link-only stub, see below).
+
+**Colors: eyeballed, not upstream-verified.** Neither reference
+screenshot ships with the repo's own assets — they're the two jpgs named
+in the task brief (`3060c037-...jpg`, an overview + main "fsn" window;
+`35037135976_...jpg`, inside-a-directory with the spotlight). Both were
+sampled pixel-by-pixel with Python/PIL along a geometry-free vertical
+strip of the 3D viewport (`x=480,y=252..322` in the first; `x=180,
+y=170..238` in the second) to get real RGB values instead of guessing
+from a thumbnail. Both read a **vivid, saturated sky blue** (~RGB
+2,138,211) at the top of the visible viewport fading to a **pale
+cyan-white** (~RGB 140,250,248) at the horizon, over a **medium green**
+ground (~RGB 65,140,90) — not the near-black navy top the plan's own
+first draft guessed at. That guess undersold the brightness because it
+assumed the visible sky band reaches toward the zenith; in both
+references the camera is pitched down enough that the visible sky is a
+shallow band well above the horizon, nowhere near dark. "night" has no
+reference screenshot at all (both captures are daylight) and keeps the
+plan's original guess, flagged in `fsn-style.h` for correction once real
+reference material turns up. "slate" is not a guess — it is
+`src/sdl/gpu.cpp`'s existing Task 2.2 clear color
+(`{0.08, 0.10, 0.12}`), copied byte-for-byte so it reproduces today's
+look exactly (confirmed below, not just visually).
+
+**Two implementation departures from the brief's own sketch**, both
+because the actual `gpu.h` contract doesn't have the primitives the
+sketch assumed — documented in full at `draw_landscape()`'s definition
+in `src/sdl/gpu.cpp`, summarized here:
+
+1. *"vertex-colored gradient quad"* isn't expressible: `FsvVertex` is
+   `{pos, normal}` only, and the scene fragment shader takes its fill
+   color from a uniform (`gpu_set_color()`), never a vertex attribute.
+   Adding a per-vertex-color path would mean a new vertex format, a new
+   pipeline, and a new compiled shader pair (MSL + SPIR-V, the whole
+   Task 3.1 offline toolchain) for a two-triangle effect. Instead the
+   sky is 32 flat-colored horizontal strips (`SKY_BANDS`), each an
+   ordinary `gpu_draw()` call with a CPU-lerped color between
+   `sky_top`/`sky_horizon` — smaller surface, no shader work, and the
+   banding is not visible in a screenshot at that band count.
+2. *"depth-write off"* is `FSV_DEPTH_ALWAYS_NOWRITE` (new `gpu.h` enum
+   value), not a per-draw knob on the existing modes — `pipeline_for()`
+   always set `enable_depth_write = true` for every (primitive,
+   depth-test, target) combination the existing scene pipeline could
+   express. **This went through a wrong first attempt, corrected in the
+   Task A1 fix round below**: the original version drew the sky through
+   an identity projection/modelview at a fixed NDC `z = 0.999`, reasoning
+   that every real draw would be nearer and win `FSV_DEPTH_LESS`. That
+   reasoning silently assumed linear depth; it is not linear (see the
+   fix round). The shipped version disables the depth test outright for
+   the sky's draws (`enable_depth_test = false`, which SDL_GPU/Vulkan/
+   Metal guarantee also disables the write, regardless of
+   `enable_depth_write`), so it can never occlude anything and is never
+   occluded by anything drawn before it, independent of the projection's
+   shape.
+
+**Ground plane placement.** `geometry_mapv_node_z0()` (`src/geometry.c`)
+puts the *bottom* of the root MapV node at world `z=0` and stacks every
+directory upward from there (`+z` is world "up" — see
+`g_base_modelview`'s own comment in `gpu.cpp`); a ground quad at exactly
+`z=0` would sit in the same plane as that bottom face. The ground is
+drawn at `z = -6` (`GROUND_Z_OFFSET`) instead — under 5% of
+`mapv_leaf_height` (128), so not visually distinguishable at any of
+MapV's own scales, and confirmed by screenshot (below) to show no
+z-fighting at the box/ground seam. This is one global ground plane for
+MapV and TreeV, not yet scoped to `FSV_FSN` (Task B3's job) — **DiscV is
+explicitly excluded, not merely undertested; see the Task A1 fix round
+below for why an earlier version of this section's claim about DiscV was
+wrong.**
+
+**Select-pass discipline.** `gpu_scene_begin()` checks
+`g_render_mode == FSV_RENDER_NORMAL` before calling `draw_landscape()` at
+all — `g_render_mode` is already correct at that point because
+`gpu_pick()` sets `FSV_RENDER_SELECT` *before* it calls
+`gpu_scene_begin()`. So in a pick pass neither the sky nor the ground
+draws a single pixel, id-colored or otherwise; the select target stays
+at its `(0,0,0,0)` clear for any pixel over either one, which
+`viewport_node_for_id()` reads back as id 0 ("nothing there") — exactly
+like clicking on empty background before this task. Verified directly
+(not just by code reading): a temporary debug hook called `gpu_pick()`
+at a known-sky pixel and a known-node pixel in the same `--screenshot`
+run. DiscV, "classic" landscape on: pick at the top of the frame (pure
+sky in the corresponding visible screenshot) → id `0`; pick at the
+center (the large disc visible in the same shot) → id `1`. MapV on a
+real directory, "classic" landscape on: sky/ground pixel → id `0`; a
+node box → id `17`. Re-running the same two picks with "slate" instead
+of "classic" returned the identical ids, confirming the landscape
+preset has zero effect on picking, as intended. The hook was removed
+before committing — it is not part of this task's shipped diff.
+
+**Persistence.** Same nvstore pattern `color_write_config()`/
+`color_read_config()` already established, alongside it in
+`src/color.c`: `landscape_set()` calls `gpu_set_landscape()` immediately
+and writes the `landscape` key (int token by preset name — `"classic"` /
+`"night"` / `"slate"`) via `nvs_write_int_token()`; `landscape_init()`
+(called once at startup, right after `color_init()`, in both
+`src/sdl/main.cpp` and `src/window.c`) reads it back the same way
+`color_init()`/`color_read_config()` do, defaulting to `"slate"` (index
+2) when the key is absent — i.e. every `~/.fsvrc` written before this
+task keeps today's exact look with no migration needed. Verified with a
+standalone harness linked against `libfsvcore` the same way
+`tests/test_color_persistence.c` is (not added to `tests/meson.build` —
+the task's own verification bar pins the suite at "3/3", so this stayed
+a one-off, not a fourth test): `landscape_init()` with no config file →
+`landscape_get() == 2`; `landscape_set(0)` → `~/.fsvrc` gains a
+plain-text `landscape classic` line; a second `landscape_init()` call in
+the same process (the same "simulate a relaunch" trick
+`test_color_persistence.c` uses) → `landscape_get() == 0`. Confirms both
+directions: on-disk format and reload.
+
+**Headless-link fix required.** `src/color.c` is part of `libfsvcore`
+(built for both frontends' unit tests and `tools/fsv-scan`, with no GTK
+or SDL_GPU present), and now calls `gpu_set_landscape()` — a symbol
+neither `src/sdl/gpu.cpp` nor `src/ogl-gpu-compat.c` contributes to that
+build. `tools/fsv-headless-stubs.c` gained a one-line no-op stub for it,
+the same shape as its existing `window_set_color_mode()` stub; without
+this, `tests/test_scanfs`, `tests/test_color_persistence` and
+`tools/fsv-scan` would all fail to link the moment `color.c` grew the
+new call. Caught by actually rebuilding and running `meson test` rather
+than assuming the change was additive.
+
+**Screenshot verification** (`tests/fixture` and a real directory —
+this repo's own `src/`), all read back with PIL, not just eyeballed in a
+terminal:
+
+- **Sky gradient**: `--discv` on `src/` gives a full-frame, clean
+  vivid-blue-to-pale-cyan gradient with no visible banding at 32 bands,
+  and (post-fix-round) no ground wall behind it — see the fix round for
+  what DiscV's camera actually does and why an earlier draft of this
+  note mischaracterized it as "phi=0, a level camera".
+- **Ground + no z-fighting**: `--mapv` and `--treev` on `tests/fixture`
+  and on `src/` both render solid, correctly-colored green ground filling
+  the frame around the scene geometry; a 4x pixel-zoomed crop of the
+  MapV box/ground seam and the TreeV platform/ground seam both show a
+  clean edge, no mottling/dithering artifact.
+- **Combined horizon shot**: MapV's and TreeV's *resting* default camera
+  elevation (`mapv_camera_phi()` returns a fixed 52.5°; TreeV's
+  equivalent settles at 30°) points the *entire* vertical FOV below
+  horizontal at this app's fixed 60° FOV/1280×800 aspect, so neither
+  mode's out-of-the-box `--screenshot` ever shows both sky and ground in
+  the same frame — this is a pre-existing, fixed camera characteristic
+  of this port (there is no "front view" camera reset implemented at
+  all, dormant or otherwise), not something this task changed. Confirmed
+  the sky+ground+horizon composition the reference screenshots show by
+  temporarily forcing a shallower elevation (`camera->phi = 15`,
+  test-only, not shipped): the resulting shot shows a crisp horizon line
+  with the vivid-blue-to-pale sky above and green ground below for
+  "classic", the same composition darker for "night", and no visible
+  horizon at all for "slate" (uniform flat color, as intended).
+- **"slate" byte-exact regression check**: stashed this task's changes,
+  rebuilt, took a `--mapv` screenshot of `tests/fixture` with no
+  `~/.fsvrc` present (pre-A1 binary); restored the changes, rebuilt, took
+  the same screenshot with the default (`landscape` key absent → "slate")
+  config. Diffed the two BMPs with PIL/numpy: **zero differing pixels**.
+  "slate" is not merely similar to the pre-change look, it is pixel-for-
+  pixel identical.
+
+**Both arms build clean.** SDL/macOS: `ninja -C builddir-sdl`, 3/3 tests.
+GTK: fresh `debian:bookworm` container, the CI job's own package list
+(`meson ninja-build libglib2.0-dev libcglm-dev libgtk-3-dev libepoxy-dev
+gettext file libglu1-mesa-dev`), `meson setup -Dfrontend=gtk`, `ninja`
+(47/47 targets, `src/fsv` links, only pre-existing unrelated
+`G_LOG_DOMAIN` redefinition warnings), `meson test` → 3/3.
+
+### Task A2 verification (7-bucket age spectrum + ages legend)
+
+**Files:** `src/color.h` (`SPECTRUM_FSN_BUCKETS`, inserted before
+`SPECTRUM_NONE`; `color_timestamp_spectrum_type()` accessor);
+`src/color.c` (`fsn_bucket_color()`, the `time_color()`/
+`color_spectrum_color()` branches, `tokens_timestamp_spectrum_type[]`'s
+new `"fsnbuckets"` token); `src/fsn-style.h` (`FsnAgeBucket`,
+`fsn_age_buckets[7]`, `FSN_AGE_BUCKET_COUNT`); `src/sdl/ui_rail.cpp`/`.h`
+(new — `ui_legend_draw()`), registered in `src/sdl/meson.build`;
+`src/sdl/main.cpp` (calls `ui_legend_draw()` alongside
+`ui_dialogs_draw()`, both loop sites); `src/sdl/ui_dialogs.cpp` (Color
+Setup timestamp tab's spectrum `Combo` gains a fourth choice);
+`src/dialog.c` (GTK's own combo gains the same fourth choice — trivial,
+see below); `tests/test_color_persistence.c` (extended).
+
+**Enum insertion safety, actually checked, not assumed.** The brief
+asked to verify that inserting `SPECTRUM_FSN_BUCKETS` before
+`SPECTRUM_NONE` is safe on disk. It is: `lib/nvstore.c`'s
+`nvs_write_int_token()`/`nvs_read_int_token_default()` persist a
+`SpectrumType` as the matching **string** in
+`tokens_timestamp_spectrum_type[]` (`"rainbow"`/`"heat"`/`"gradient"`),
+never the raw enum integer — confirmed by reading both functions, not
+just inferred from the array's shape. An existing `~/.fsvrc` with (say)
+`spectrumtype gradient` resolves by string match regardless of where
+`SPECTRUM_FSN_BUCKETS` lands numerically; the new `"fsnbuckets"` token
+was added at the matching array position (index 3, same as the
+enumerator's position), the same hand-kept-in-sync convention every
+other token array in `color.c` already relies on.
+
+**Colors: sampled, not eyeballed — and the brief's own guess for the
+7th bucket was wrong.** The reference screenshot's "ages:" bar
+(`35037135976_0d90f4a3d5_z.jpg`, approx. `x=148..284, y=497..506`) was
+cropped and, for each of the 7 swatches, given a per-channel **median**
+pixel value in Python/PIL (robust against the bold white label text and
+JPEG ringing sitting on top of each flat fill) — the same
+sample-real-pixels approach Task A1 used for the sky/ground colors. Six
+of the seven read cleanly as distinct hues (maroon-red, orange-brown,
+olive-yellow, dark teal-green, deep blue, purple). The 7th ("> 1 yr"),
+which the brief's own first-pass description called "grey", does not
+survive a close look: median ≈ `(87, 44, 68)`, and an 8x crop of just
+that swatch (checked directly, not inferred) shows a visibly dark
+plum/wine color with a clear reddish-purple hue, not a neutral
+grey — corrected in `fsn-style.h` to the sampled value, with the
+before/after reasoning documented right next to the table.
+
+**Bucket semantics.** `fsn_bucket_color()` (`src/color.c`) steps a
+file's age (`now - node's chosen timestamp`, real wall-clock `time(
+NULL)`, computed inside `time_color()`) through `fsn_age_buckets[]`'s
+`max_age_s` cutoffs (7d/14d/30d/91d/182d/365d, catch-all beyond) and
+returns that bucket's color; deliberately **ignores**
+`color_config.by_timestamp.old_time`/`new_time` — fsn's buckets are
+fixed, absolute ages, not the continuous, user-adjustable windowed
+spectrum the rainbow/heat/gradient path uses. Directories are
+unaffected: `time_color()`'s existing `NODE_IS_DIR` early-return (node
+type color, not a timestamp color) sits before the new branch and was
+not touched. `color_spectrum_color()` also gained a
+`SPECTRUM_FSN_BUCKETS` case — not for real node coloring (that always
+goes through `fsn_bucket_color()` instead), but because
+`generate_spectrum_colors()`'s 1024-shade table build and
+`ui_dialogs.cpp`'s Color Setup preview strip both unconditionally
+sample `color_spectrum_color()` across `x=[0,1]` and would otherwise hit
+`SWITCH_FAIL`; the added case steps through the 7 bucket colors in `x`
+order, which incidentally makes the preview strip show a legible
+7-band swatch of the bucket palette.
+
+**Select-pass discipline unaffected.** `node_set_color()`
+(`src/geometry.c`) already branches on `gpu_render_mode()` before ever
+reading `NODE_DESC(node)->color` — in `FSV_RENDER_SELECT` it paints the
+node's id-derived color unconditionally and never looks at the color
+this task's spectrum choice feeds into `color_assign_recursive()`. So
+`SPECTRUM_FSN_BUCKETS` changes only what `NORMAL`-pass pixels show, with
+zero effect on picking; verified by reading the function (unchanged by
+this task) rather than by re-running the Task A1 pick-hook exercise,
+since nothing this task touched is anywhere near that code path.
+
+**The legend bar and the `--screenshot`/ImGui gap.** `--screenshot`'s
+offscreen capture (`gpu_screenshot_begin/end`) renders only the 3D scene
+pass and has never composited ImGui (Task 6.4's own investigation, cited
+in this file's `--record` section, established why: the ImGui pipeline
+is built once against the swapchain's own pixel format, and
+`--screenshot`'s texture uses a different, fixed one). `ui_legend_draw()`
+is a plain ImGui window, so proving it draws correctly needed the one
+mechanism in this codebase that *does* composite ImGui into a real,
+GPU-rendered frame without a visible display: `--record`. Used
+end-to-end for this task's headed verification rather than a live
+screen capture (this sandbox has no display to capture from — a gap
+already disclosed in the Task 5.2 fix-round section above):
+
+1. A throwaway harness (same shape as `tests/test_color_persistence.c`
+   — `color_init()`, `color_get_config()`, flip `spectrum_type`,
+   `color_set_config()`+`color_write_config()`, never committed to the
+   repo) wrote a real `~/.fsvrc` with `colormode time` /
+   `spectrumtype fsnbuckets` under a scratch `$HOME`.
+2. A fixture directory got 7 files, each `touch -t`-ed to a distinct
+   age (3d/10d/20d/60d/120d/200d/500d — one per bucket, all with
+   non-trivial size so MapV's layout gives each a real, distinct box
+   instead of degenerating into a zero-area sliver) and non-zero
+   content.
+3. `fsv --record OUTDIR SECONDS FIXTURE_DIR` with that `$HOME` produced
+   30fps BMP frames; `--record`'s scripted camera cues target this
+   repo's own `src/` paths and log-and-skip when they don't resolve
+   under the fixture root (by design, per Task 6.4), so this just
+   recorded the ordinary automatic fly-to-root pan with no crash.
+4. The final frame (read back with PIL, not eyeballed) shows: the
+   bottom-center "ages:" bar with all 7 correctly-labeled, correctly-
+   colored swatches in the reference's own order, **and** all 7 fixture
+   files rendered as 7 visibly distinct box colors. Per-pixel sampling
+   of each box's lit top face confirms exact correspondence to
+   `fsn_age_buckets[]`: every one of the 7 sampled colors is that
+   bucket's defined RGB scaled by the same ~0.80 lighting factor (e.g.
+   "1 wk" red `(144,60,53)` defined → `(116,48,43)` sampled, ratio
+   0.80/0.80/0.81; "> 1 yr" plum `(87,44,68)` defined → `(70,36,55)`
+   sampled at its lit face, ratio 0.80/0.82/0.81) — the same uniform
+   attenuation across all 7, which is exactly what one shared diffuse
+   lighting term applied to 7 different flat input colors should look
+   like, not 7 independent coincidences.
+5. **Toggling to rainbow hides the legend**: re-wrote the same
+   `~/.fsvrc` with `spectrumtype rainbow` (mode left at
+   `COLOR_BY_TIMESTAMP`) and re-ran `--record` on the same fixture — the
+   resulting frame shows the expected continuous rainbow coloring on the
+   3D nodes and **no legend bar at all**, confirming
+   `ui_legend_draw()`'s `color_get_mode()`/
+   `color_timestamp_spectrum_type()` gate actually gates.
+6. Color Setup dialog round-trip: covered structurally (the "fsn
+   buckets" `Combo` entry feeds the same, unchanged
+   `color_set_config()`/`color_write_config()`/Apply-button path every
+   other spectrum choice already uses) and end-to-end by
+   `tests/test_color_persistence.c`'s new assertions (below) — not
+   separately re-verified by driving the live ImGui widget, since
+   nothing about *how* the widget commits its value changed, only which
+   values it offers.
+
+**TDD.** Extended `tests/test_color_persistence.c` with a `set
+SPECTRUM_FSN_BUCKETS → color_write_config() → color_init() (simulated
+relaunch) → assert` block, same shape as the file's existing
+by_wpattern regression case. Confirmed RED first — not just by
+inspection — via `git stash push -- src/color.h src/color.c` (reverting
+only the enum/logic, keeping the new test), which failed to compile
+with `use of undeclared identifier 'SPECTRUM_FSN_BUCKETS'`; `git stash
+pop` restored the implementation and the suite went GREEN.
+
+**GTK arm.** `color.c` is shared, so GTK gets the 7 bucket colors for
+real node coloring for free. `src/dialog.c`'s own spectrum combo (a
+plain `GtkComboBoxText`, not a structural widget) needed only a fourth
+`gtk_combo_box_text_append_text()` string and one more `strcmp()`
+branch in its "changed" callback — genuinely trivial, done rather than
+skipped. The ages legend bar itself is **not** ported to GTK: it is a
+plain ImGui window with no GTK equivalent, and the plan scopes it as
+SDL-only. Verified in a fresh `debian:bookworm` container (this port's
+macOS host has no GTK, matching CI, same package list as Task A1's own
+GTK verification): the real `fsv` executable — including `dialog.c` —
+builds clean, `meson test` → 3/3.
+
+**Both arms build clean, tests 3/3.** SDL/macOS: `ninja -C
+builddir-sdl`, `meson test -C builddir-sdl` → 3/3 (including the new
+bucket-persistence assertions inside `test_color_persistence`). GTK:
+`debian:bookworm` container as above, 3/3 (this arm's test binaries link
+`libfsvcore` and don't depend on `gtkdep`, so the same 3 tests run
+regardless of whether the full GTK `fsv` executable also happens to
+build on that host — it did here).
+
+### Task A3 verification (fsn-style camera control rail)
+
+**Files:** `src/window.h` (`window_access_enabled()`, `window_birdseye_active()`/
+`window_birdseye_set_active()` — SDL-frontend-only accessors, doc-commented as
+such); `src/sdl/stubs.c` (real storage behind `window_set_access()`/
+`window_birdseye_view_off()`, previously no-ops); `src/sdl/app.h`/`main.cpp`
+(`app_reset_camera()`; `app_get_scroll_range()`/`app_scrollbar_dragged()`;
+`ScrollAxisState` replaces the old value-only `g_scroll[2]` so lower/upper/page
+survive `fsv_platform.set_scroll()` instead of being discarded; `app_switch_mode()`
+refactored to share a `run_mode_entry()` helper with the new `app_reset_camera()`);
+`src/sdl/ui_rail.h`/`.cpp` (`ui_rail_draw()`, `ui_rail_get_visible()`/
+`ui_rail_set_visible()` — extends the file Task A2 started); `src/sdl/ui_main.cpp`
+(View menu gains "Camera Rail", same toggle pattern as "Directory Tree && Files").
+
+**Pre-reading, as the brief required.** Read `camera_look_at_previous()`
+(history is a `GList` of previously-visited nodes; backtracking marks the
+head `NULL` rather than popping, so `camera_look_at_full()` can tell "went
+back" apart from "went forward" and skip re-pushing); `camera_birdseye_view(
+boolean going_up)` (`going_up` TRUE enters the overhead pose and snapshots
+the pre-birdseye camera into a static `union AnyCamera`; FALSE morphs back to
+that snapshot — confirmed `camera_init()` never itself clears
+`birdseye_view_active`, see the Reset note below); `camera_scrollbar_moved(
+axis)` and the `ScrollState`/`*_get_scrollbar_state()` family (`mapv_
+get_scrollbar_state()`/`treev_get_scrollbar_state()` are real; `discv_
+get_scrollbar_state()` is a `/* TODO */` stub that just echoes back whatever
+`scroll_state[]` already held); `src/window.c`'s GTK impl (`gtk_set_scroll()`/
+`gtk_get_scroll()`/`on_scrollbar_value_changed()`) to mirror its contract:
+the camera *pushes* lower/upper/page/value via `set_scroll()`, and a user
+drag both updates the widget's own value *and* triggers `camera_scrollbar_
+moved()`, which reads that new value back via `get_scroll()`. This port's
+`sdl_set_scroll()` used to discard lower/upper/page (`(void)`-cast) since
+nothing read them back; they are now kept in a small `ScrollAxisState`
+struct so the rail's sliders can render a real range.
+
+**Axis-to-label mapping, verified not guessed.** `task-A3-brief.md` asked to
+confirm what each scrollbar axis actually drives per mode before slapping
+"Tilt"/"Height" on them. Read `mapv_scrollbar_move()`/`treev_scrollbar_move()`
+directly: in MapV, axis 0 (X) pans `target.x` sideways and yaws `theta` to
+compensate; axis 1 (Y) pans `target.y` forward/back *and* pitches `phi` — the
+felt effect of axis 1 is closer to "flying up/down over the map" than axis 0
+is, so the upstream "Tilt"/"Height" labels land closer to right for Y than
+X. In TreeV, axis 0 rotates `target.theta` around the tree's own axis (a
+spin, not a pan) and axis 1 moves `target.r` (radial distance — closer to a
+dolly than a height change). Kept the upstream labels for continuity with
+the reference screenshot rather than inventing new ones, and documented the
+imperfect fit in `ui_rail.cpp`'s file header rather than silently relabeling,
+per the brief.
+
+**Reset semantics.** `app_switch_mode()`'s body (`geometry_init()` +
+`camera_init(mode, FALSE)` + a short `""`-message intro pan) was extracted
+into `run_mode_entry()` so `app_reset_camera()` can call the identical
+sequence for the *current* mode — `app_switch_mode()`'s own `mode ==
+globals.fsv_mode` guard exists specifically to reject exactly what Reset
+needs to do. One addition beyond a bare `run_mode_entry()` call: if
+bird's-eye view is active, `app_reset_camera()` first calls
+`camera_birdseye_view(FALSE)` and `window_birdseye_set_active(FALSE)` — read
+in isolation, `camera_init()` never touches `birdseye_view_active`, so a
+Reset while airborne would otherwise leave that static flag TRUE behind a
+non-birdseye camera pose, desyncing the rail's own "Birds eye" toggle
+highlight and any *subsequent* toggle click's `going_up` polarity from
+reality. No new camera math — both calls already exist in `camera.h`.
+
+**`window_set_access`/`window_birdseye_view_off` are no longer no-ops.**
+`src/sdl/stubs.c` now stores what real widgets would otherwise carry:
+`window_set_access(enabled)` sets a flag `window_access_enabled()` reads
+back (buttons/sliders wrap `ImGui::BeginDisabled(!access_ok)`, `access_ok =
+!app_is_scanning() && window_access_enabled()`); `window_birdseye_view_off()`
+(the core's "you were in bird's-eye view, you no longer are" notification —
+fires from `camera_look_at_full()` when the user picks a new node while
+airborne) clears a second flag `window_birdseye_active()` reads for the
+"Birds eye" button's highlighted/pressed look, kept in sync from *both*
+directions (this button's own clicks, and the core silently exiting
+bird's-eye view on its own).
+
+**Sliders gated to MapV/TreeV, per the brief.** `discv_get_scrollbar_state()`
+being a stub with no real per-node math is why DiscV's Tilt/Height sliders
+are disabled with a "MapV/TreeV only" label rather than merely displaying a
+meaningless range — `sliders_ok = access_ok && (mode == FSV_MAPV || mode ==
+FSV_TREEV)` gates the pair independent of the buttons' own `access_ok`.
+
+**"Front view" is the brief's own named approximation, not a port.**
+`camera.h` has no pose-specific front-view entry point (upstream fsn's exact
+pose is not reproduced — no new camera math per the plan), so this button
+re-runs `camera_look_at()` on `globals.current_node`, documented inline as
+an approximation.
+
+**Headed, direct-state verification (not pixel-accurate ImGui click
+simulation).** Following the brief's explicit "SDL_PushEvent / direct state
+where cleaner" allowance: simulating a mouse click at a button's exact
+screen rect would test ImGui's own hit-testing, not this task's wiring. A
+temporary, never-committed set of `--record` cues (same throwaway-harness
+convention Task A2 used) called the exact app.h/camera.h entry points each
+rail control invokes, gated behind an env var, with `SDL_Log` proof of the
+resulting state, then was deleted before the commit below. On `tests/
+fixture` in `--mapv`:
+- **Go back after two look_ats**: `camera_look_at(dir-a)` then `camera_look_at(
+  dir-a/dir-b)` (current node confirmed via pointer identity at each step),
+  then `camera_look_at_previous()` — logged `current_node` back to `dir-a`'s
+  pointer, matching `camera_look_at_full()`'s backtracking-vs-forward logic
+  read during pre-work.
+- **Birds eye**: `camera_birdseye_view(TRUE)` — `window_access_enabled()`
+  flips to 0 in the very same call (`window_set_access(FALSE)` is the second
+  statement of `camera_birdseye_view()`); ~4s later (the fixed `MAPV_CAMERA_
+  MAX_PAN_TIME`), settled state logged `phi=90.00` (the overhead pose) and
+  `window_access_enabled()` back to 1 (`post_pan_end()`'s scheduled
+  re-enable). `camera_birdseye_view(FALSE)` afterward restored the
+  pre-birdseye `phi`/`theta`/`distance`.
+- **Reset**: `app_reset_camera()` logged an *immediate* jump to `camera_init()`'s
+  fresh MapV pose (`theta=270 phi=90 distance=1728 target=(0,0)`), settling
+  ~1s later into the same intro-pan-derived framing `enter_mode()` itself
+  produces.
+- **Sliders in MapV**: `app_get_scroll_range()`/`app_scrollbar_dragged()` on
+  both axes, mid-session (with `dir-a` already expanded from the go-back
+  test above): axis 0 drag moved `target.x` 6.21 → 4.65 and `theta` 279.60 →
+  277.20; axis 1 drag moved `target.y` 3.12 → 0.78 and `phi` 54.43 → 52.98 —
+  both instantaneous (no morph involved in `mapv_scrollbar_move()`), matching
+  the direct assignment read during pre-work.
+- **Access flag during a pan, checked at every rail-drawn frame, not just
+  cue boundaries**: a second temporary probe logged `window_access_enabled()`
+  and `camera_moving()` together on a frame-sampled cadence throughout a
+  birds-eye pan and confirmed `access=0`/`moving=1` for the pan's full
+  duration, `access=1` only once `camera_moving()` had already gone false.
+
+**Visual dimming: a documented gap, not a false claim.** `ImGui::
+BeginDisabled(!access_ok)` wraps the four buttons exactly like `ui_panels.cpp`'s
+own established use of the same call (its file-list table), and a forced
+`PushStyleVar(ImGuiStyleVar_Alpha, 0.05f)` sanity check confirmed this
+backend's alpha blending itself works (pixels dropped to near-black at that
+extreme). But a paired-frame screenshot comparison at the *default*
+`DisabledAlpha` (0.60) between a confirmed-idle and a confirmed-disabled
+moment showed only a 1–2/255 per-channel difference — likely swamped by
+ImGui's own per-window focus-alpha variance in this floating (non-docked)
+window, which shifted brightness by more than that between otherwise
+identical idle frames in the same test. The flag and the `BeginDisabled`
+call are both proven correct by direct-state logging (above); the *visual*
+greying is real per ImGui's documented contract but was not independently,
+unambiguously confirmed by pixel inspection. Flagged here rather than
+asserted as seen. The DiscV sliders' "MapV/TreeV only" label is unambiguous
+in a screenshot regardless (see below) and is not affected by this caveat.
+
+**Screenshots** (`--record` on `tests/fixture`, ImGui composited for real —
+`--screenshot` does not composite ImGui, per Task 6.4's own note): MapV, rail
+idle — left-anchored "Camera Rail" window with Reset/Go back/Birds eye/Front
+view stacked buttons, a separator, then Tilt/Height vertical sliders
+side-by-side, matching the reference image's left-rail layout (it overlaps
+the Directory Tree panel's own default top-left placement until a user
+drags either window — both default to the same corner; a cosmetic overlap
+this task did not attempt to resolve, since neither panel is force-docked
+into a fixed split, see `ui_rail.h`'s "ordinary dockable window" design
+note). DiscV, same rail: Tilt/Height sliders visibly inert with a
+"MapV/TreeV only" label directly beneath them, buttons still active (Reset/
+Go back/Front view/Birds eye all make sense in DiscV, only scrollbar-driven
+panning does not).
+
+**Both arms build clean, tests 3/3.** SDL/macOS: `ninja -C builddir-sdl`
+clean, `meson test -C builddir-sdl` → 3/3. GTK: fresh `debian:bookworm`
+container, CI's own apt list — `window.c`'s `set_scroll`/`get_scroll`
+contract (`gtk_set_scroll()`/`gtk_get_scroll()`/`on_scrollbar_value_changed()`)
+is untouched by this task, confirmed by re-reading it during pre-work rather
+than assumed — real `fsv` executable (47/47 targets) builds clean, `meson
+test` → 3/3.
+
+**Rail visibility.** View menu gains "Camera Rail" (`ui_rail_get_visible()`/
+`ui_rail_set_visible()`), same toggle pattern as "Directory Tree && Files".
+`ui_rail_draw()` returns early during `g_scanning`/`FSV_NONE`/no-tree, same
+three guards `ui_panels_draw()` already uses for the Directory Tree panel,
+so the rail is hidden outright (not merely greyed) during a scan.
+
+### Task A1 fix round (code review)
+
+A from-source-trace review of the verification above found two real bugs
+in the first version of this task and one mischaracterization in this
+file's own wording. All three are fixed in the same commit series; this
+subsection is the honest record of what was wrong and why, left in place
+rather than silently rewriting the sections above.
+
+**Critical — the "DiscV's ground does not render at all" claim was
+false**, confirmed empirically, not just re-derived on paper.
+`setup_modelview_matrix()`'s `FSV_DISCV` case never reads
+`camera->phi`/`theta` at all (unlike MapV/TreeV) — it applies a *fixed*
+`Ry(90°)·Rz(90°)` reorientation to a translate-back-by-distance, and the
+resulting modelview's third row (`gpu_mat.modelview[i][2]` across all
+`i`, i.e. the matrix row that produces view-space Z) works out to
+`(0, 0, 1, -distance)`: view-space Z is world Z minus the camera's dolly
+distance, independent of world X/Y. In other words DiscV's camera looks
+straight down the world Z axis from `distance` units above it — a
+literal top-down "pie chart" view, not a level one — and the original
+report's "phi=0, a level camera" description was simply wrong (`phi`
+isn't consulted by this code path at all; the fact that the *value*
+happened to be 0 doesn't mean it did anything). A ground quad sitting a
+fixed 6 units below DiscV's own content plane is squarely inside that
+downward view, not off to some unused side of it, whenever it falls
+inside the near/far clip band: `camera->near_clip = 0.9375·distance`,
+`camera->far_clip = 1.0625·distance` (`camera.c:126-127`), so the ground
+(view-space depth `distance + 6`) is in range exactly when
+`distance + 6 ≤ 1.0625·distance`, i.e. `distance ≥ 96`. The task's own
+verification screenshot used `tests/fixture` (two files, `distance ≈
+52`) — comfortably under that threshold — which is exactly why it never
+caught this. Re-run on this repo's own `src/` (≈1MB, `distance ≈
+1750`+, far over the threshold): confirmed, a full-frame green wall
+filling the entire view behind the disc, sky nowhere visible. **Fix**:
+`draw_landscape()` now switches on `globals.fsv_mode` and only draws the
+ground for `FSV_MAPV`/`FSV_TREEV`; `FSV_DISCV` (and `FSV_SPLASH`/
+`FSV_NONE`) get the sky only. The switch lists every `FsvMode` value
+explicitly and ends in `SWITCH_FAIL` (no silent `default:`), so `FSV_FSN`
+landing in this enum (Task B1) forces a deliberate choice here instead of
+inheriting one. Re-verified: the same `--discv --screenshot` on `src/`
+now shows the sky gradient with no ground wall.
+
+**Important — the sky's depth-write value could occlude real geometry.**
+The original `SKY_NDC_DEPTH = 0.999` trick assumed every real draw's
+depth would be nearer, which assumed *linear* depth. It isn't:
+`glm_frustum_rh_zo`'s zero-to-one depth is a `1/z`-shaped curve, and
+MapV/TreeV's near:far ratio is 128:1 (`camera.h`'s
+`NEAR_TO_DISTANCE_RATIO * FAR_TO_NEAR_RATIO` = `0.5 * 128`). Solving
+`d(z) = far·(z-near) / (z·(far-near)) = 0.999` for `z` at that ratio
+gives `z ≈ 0.887·far` — meaning any real geometry in roughly the outer
+11% of the frustum's world-space depth range (closer to camera than the
+far clip plane, still legitimately visible) would have its own NDC depth
+*greater* than 0.999 and lose `FSV_DEPTH_LESS` to the sky's already-
+written value, vanishing behind a background that was supposed to be
+infinitely far away. **Fix**: new `gpu.h` enum value
+`FSV_DEPTH_ALWAYS_NOWRITE` — `pipeline_for()` builds this pipeline
+variant with `enable_depth_test = false` (not merely
+`SDL_GPU_COMPAREOP_ALWAYS` with the test still enabled: SDL_GPU mirrors
+Vulkan/Metal's rule that a depth *write* only takes effect while the
+test itself is enabled, so disabling the test is what actually
+guarantees the write never happens, on every backend, rather than
+leaning on that rule implicitly). The sky's `SKY_NDC_DEPTH` constant is
+now genuinely arbitrary (`0.5`, kept only inside the valid clip range so
+the quad isn't near/far-clipped) since depth no longer affects it at
+all. `NUM_DEPTH_TESTS` (`src/sdl/gpu.cpp`) went from 3 to 4 for the new
+pipeline dimension; `src/ogl-gpu-compat.c`'s `gpu_set_depth_test()`
+gained a matching (currently unreachable — GTK's `gpu_set_landscape()`
+is still a no-op) `GL_ALWAYS` case so a future GTK landscape
+implementation doesn't silently inherit the old `GL_LESS` default.
+Re-verified: "slate" is still byte-for-byte identical to the pre-task
+screenshot after this pipeline change (re-ran the same stash/rebuild/
+diff as the original verification); picking the sky/ground still
+resolves to id 0 on all three modes (`--discv`/`--mapv`/`--treev` on
+`src/`, sky/ground pixel → `0`, a real node → its real id, same as
+before this fix round).
+
+**Minor.** The paragraphs above and the original task report described
+DiscV as "phi=0, a level camera" — corrected throughout to "DiscV's
+camera never reads `phi`/`theta`; it looks straight down the world Z
+axis at a fixed distance", which is what the from-source trace and the
+matrix-row derivation above actually show.
+
+
+### Task B1 verification (FSV_FSN mode — pedestal/wire landscape)
+
+**Files:** `src/geometry-fsn.h` (new — `FsnPedestal`, `FsnWire`,
+`FSN_GEOM_PARAMS`, the whole FSN API); `src/geometry-fsn.c` (new —
+layout, *gpu-free*, part of `libfsvcore`); `src/geometry-fsn-draw.c`
+(new — draw pass, part of each frontend); `src/fsn-style.h` (layout,
+wire and text constants); `src/common.h` (`FSV_FSN` enum member);
+`src/geometry.c`/`.h` (dispatch arms; `node_set_color()` exported as
+`geometry_node_set_color()`); `src/camera.c` (placeholder FSN camera);
+`src/colexp.c` (`FSN_COLEXP_TIME`); `src/ogl.c` + `src/sdl/gpu.cpp`
+(modelview arm, ground plane); `src/sdl/main.cpp` (`--fsn`);
+`src/sdl/ui_main.cpp` (Vis → FSN); `src/meson.build`,
+`src/sdl/meson.build`, `tests/meson.build`; `tests/test_fsn_layout.c`
+(new).
+
+**The layout, and why it is a separate translation unit from its own
+draw pass.** `fsn_geometry_init()` is pure math over the scanned tree: it
+writes an `FsnPedestal` into every node's existing `geomparams` scratch
+(five doubles — exactly the struct's size, same trick MapV plays) and
+three more per directory into `geomparams2` (subtree span, grid
+columns/rows). It calls nothing from `gpu.h`. That is what puts
+`geometry-fsn.c` in `libfsvcore`, next to `camera.c` — which *reads* the
+layout to frame the landscape — and what lets `tests/test_fsn_layout.c`
+link exactly like `test_scanfs`, with core objects plus
+`tools/fsv-headless-stubs.c` and not one renderer stub. The invariant is
+enforced by the linker rather than by a comment: the day the layout pass
+grows a `gpu.h` call, the test stops linking. The drawing half lives in
+`geometry-fsn-draw.c`, which is frontend-side like `geometry.c` and
+appears in both frontends' source lists.
+
+An earlier arrangement had both halves in one file compiled directly
+into the test, with a block of `gpu_*`/`text_*` no-ops in the test to
+satisfy the linker. It was replaced when `fsv-scan` (which links
+`libfsvcore`, and so now links `camera.c`'s new calls into the FSN
+layout) failed to link: stubbing `fsn_layout_*` in
+`fsv-headless-stubs.c` would have collided with the real definitions in
+the test's own copy. The split removes the problem instead of working
+around it.
+
+**Coordinates.** `FsnPedestal`'s field names come from the task brief and
+follow the graphics convention (`x`/`z` on the ground, height separate).
+fsv's world does not: it is z-up, exactly as MapV and TreeV use it. So
+`FsnPedestal::z` is the ground *depth* axis and maps to **world y**, and
+`::h` is world z. `FsnWire`, which feeds `gpu_draw()` directly, is in
+world coordinates. Both are spelled out at the top of `geometry-fsn.h`;
+this is the one place in the file pair where the two conventions meet.
+
+**Layout algorithm.** Two passes, because a directory's ground width
+depends on its whole subtree and so nothing can be positioned until
+everything is measured:
+
+1. *Measure* (bottom-up): file count → a squarish row-major grid of
+   `FSN_BOX_EDGE` boxes → the pedestal's footprint (grid plus
+   `FSN_PEDESTAL_MARGIN`, floored at `FSN_PEDESTAL_MIN_EDGE`); subtree
+   bytes → the pedestal's height; and the subtree's total ground span
+   (its own width, or the sum of its children's spans plus
+   `FSN_SIBLING_GAP`, whichever is larger).
+2. *Place* (top-down): root at the ground origin; files gridded on the
+   pedestal top; subdirectories fanned out across the parent's span, one
+   `FSN_GENERATION_GAP` further along the depth axis. Because each child
+   gets a disjoint slice of ground width, sibling subtrees cannot overlap
+   at any depth.
+
+Heights (pedestals and file boxes alike) are `MIN + SCALE * log2(1 +
+bytes/1024)`, clamped. Logarithmic rather than linear or sqrt: a real
+source tree spans five or six orders of magnitude of subtree size, and
+anything gentler leaves the root towering over everything else in the
+same frame — the reference screenshot's pedestals are all within a small
+factor of each other. The clamp bounds the pathological multi-TB case
+outright. All constants are in `src/fsn-style.h` with their rationale.
+
+**Deployment.** Identical contract to MapV: a collapsed directory draws
+its pedestal and its own file boxes but neither its children nor their
+wires; a directory caught mid-morph draws its children under a z-only
+scale, so a subtree grows up out of the ground plane instead of popping
+in. Positions never move (the layout is deployment-independent), so only
+heights animate. The wire to a child is drawn in the *parent's* unscaled
+frame with the child end's height scaled by hand — putting it inside the
+scale would drag the parent end down with it.
+
+**Select-pass discipline**, per kind of geometry:
+
+- pedestals and file boxes go through `geometry_node_set_color()`, so
+  they paint node ids and are pickable — they are the only FSN geometry
+  that *is* a node;
+- wires paint **black** (id 0, "nothing there") rather than skipping the
+  draw, matching `geometry.c`'s TreeV connectors: a wire that occludes
+  something on screen has to occlude it in the pick pass too;
+- name labels and the ground path text are absent from the select pass by
+  construction — `gpu_pick()` calls `geometry_draw(FALSE)`, and the whole
+  text block is gated on `high_detail`.
+
+`geometry.c`'s `node_set_color()` became the exported
+`geometry_node_set_color()` for this: one id encoding and one highlight
+boost shared by both files, rather than a second copy that could drift
+(and `highlight_node_id` stays private to `geometry.c`).
+
+**Camera: a documented placeholder, replaced by Task B2.** FSN reuses
+MapV's camera *storage* — the Cartesian XYZ target in `MapVCamera` — so
+`camera_pan_finish()`, `camera_pan_break()` and the bird's-eye restore
+share MapV's arms outright, and both frontends' `setup_modelview_matrix()`
+fall through to the `FSV_MAPV` case. It deliberately does **not** reuse
+MapV's camera *math*: `mapv_look_at()`, `mapv_camera_theta()/_phi()`,
+`mapv_get_scrollbar_state()` and the bird's-eye distance are all written
+in `MAPV_GEOM_PARAMS`, which in FSN mode holds an `FsnPedestal` (the two
+modes share `NodeDesc::geomparams`), so delegating would feed the camera
+another mode's numbers reinterpreted as its own. `camera_init()`,
+`camera_look_at_full()` and `camera_birdseye_view()` therefore get thin
+`fsn_*` equivalents shaped like their MapV counterparts but reading the
+FSN layout; the scrollbars get the *null* state for the same reason, and
+`ui_rail.cpp` keeps Tilt/Height disabled in FSN mode to match.
+
+**Known limitations, all Task B2's subject.** The initial view is
+`camera_look_at(root)`, which frames the root pedestal plus one
+generation gap. On a wide tree (this repo's own root, ~10 subdirectories)
+the child fan is far wider than that frame, so most children sit
+off-screen with their wires running out of both edges. That is the
+layout being correct and the camera being a placeholder, not a layout
+bug — the same tree viewed from `src/` reads exactly like the reference
+screenshot. There is also no node cursor and no spotlight in FSN yet, and
+`geometry_camera_pan_finished()`'s FSN arm is deliberately empty for that
+reason.
+
+**Deviations from the reference screenshot**, deliberate and scoped out
+of B1:
+
+- No subdirectory "tower" standing on the parent's own pedestal. Every
+  subdirectory is a ground-level pedestal of its own reached by a wire,
+  which is what the brief's layout spec asks for; the reference shows
+  both idioms.
+- Directory name labels are drawn flat on the clear margin band at the
+  near edge of the pedestal top (MapV's label idiom), not upright on the
+  pedestal's front face. Upright text needs TreeV's rotated-label matrix
+  work for a cosmetic gain.
+- The ground path text is sized *relative to the root pedestal's width*
+  rather than in absolute units, because the camera frames the whole
+  landscape: a fixed cap height reads as gigantic on a small tree and as
+  a smudge on a large one.
+
+**GTK arm.** Builds and passes tests, but has no Vis → FSN menu entry:
+that menu is a GtkBuilder resource (`src/fsv-gresource.xml`) driving
+`callbacks.c`'s `on_vis_*_activate()`, and adding an entry there is out
+of this task's scope. `FSV_FSN` is reachable in the GTK build only
+programmatically. The GTK frontend also keeps its flat clear (its
+`gpu_set_landscape()` is still a no-op, Task A1), so FSN there would draw
+pedestals with no sky or ground.
+
+**Verification.**
+
+- `meson test` 4/4 on both arms (macOS/SDL and the Debian bookworm
+  container's `-Dfrontend=gtk`), including the new `fsn_layout` test. The
+  test was confirmed to actually bite by perturbing `FSN_GENERATION_GAP`
+  to a negative value (fails) and restoring it (passes).
+- Headed, `fsv src --fsn --screenshot`: gradient sky over green ground,
+  the `src` pedestal in the foreground carrying a grid of age-colored
+  file boxes, two child pedestals (`sdl`, `xmaps`) one generation back,
+  white wires from the root's far edge to each child's near edge, the
+  `src` name label on the pedestal's near margin, and the absolute path
+  written large on the ground in front.
+- Picking, via a temporary (reverted) `gpu_pick()` probe in the
+  `--screenshot` path: a file box → its file node (`camera.c`,
+  `ui_main.cpp`), a pedestal face or a gap between boxes → the directory
+  node (`src`, `xmaps`), sky → id 0, ground → id 0, a wire pixel → id 0.
+- Expand/collapse, via a temporary (reverted) `colexp()` probe:
+  collapsing the root recursively removes both child pedestals and both
+  wires, leaving the root pedestal and its file boxes. `colexp` is
+  mode-agnostic, so the double-click and context-menu paths that drive it
+  need no FSN-specific code.
+- No regression in the other modes: `--discv`/`--mapv`/`--treev`
+  screenshots still render as before the enum insertion.
+
+**Switch audit.** Every `switch` on `FsvMode` in the tree, and what it
+got:
+
+| File | Switch | Treatment |
+|---|---|---|
+| `src/geometry.c` | `geometry_init()` | arm → `fsn_geometry_init(root_dnode)` (from the root *directory*, not the metanode) |
+| `src/geometry.c` | `geometry_draw()` | arm → `fsn_geometry_draw()` |
+| `src/geometry.c` | `geometry_camera_pan_finished()` | arm, empty + comment (FSN draws no node cursor, so there is no resting position to record) |
+| `src/geometry.c` | `geometry_should_highlight()` | arm → `TRUE` (every directory has a pedestal on screen whether expanded or not, unlike MapV) |
+| `src/geometry.c` | `draw_node()` | arm, empty + comment — the function is dead code (`__attribute__((unused))`), like its `FSV_DISCV` arm |
+| `src/camera.c` | `camera_init()` | arm — frames the landscape from behind the root pedestal off `fsn_layout_extents()` |
+| `src/camera.c` | `camera_scrollbar_moved()` | arm → `fsn_scrollbar_move()` (pan only, no coupled yaw/pitch) |
+| `src/camera.c` | `camera_update_scrollbars()` | arm → `null_get_scrollbar_state()` (no FSN scroll model yet) |
+| `src/camera.c` | `camera_pan_finish()` | deliberate fall-through into `FSV_MAPV` (shared Cartesian target storage) |
+| `src/camera.c` | `camera_pan_break()` | deliberate fall-through into `FSV_MAPV` (same) |
+| `src/camera.c` | `camera_look_at_full()` | arm → `fsn_look_at()` |
+| `src/camera.c` | `camera_birdseye_view()` pan time | arm → `FSN_CAMERA_MAX_PAN_TIME` |
+| `src/camera.c` | `camera_birdseye_view()` going-up | arm — distance from `fsn_layout_extents()`, not `MAPV_NODE_WIDTH()` |
+| `src/camera.c` | `camera_birdseye_view()` coming-down | deliberate fall-through into `FSV_MAPV` (same storage) |
+| `src/colexp.c` | collapse/expand time | arm → `FSN_COLEXP_TIME` |
+| `src/ogl.c` | `setup_modelview_matrix()` | deliberate fall-through into `FSV_MAPV` (identical transform) |
+| `src/sdl/gpu.cpp` | `setup_modelview_matrix()` | deliberate fall-through into `FSV_MAPV` (same) |
+| `src/sdl/gpu.cpp` | `draw_landscape()` ground gate | arm → `draw_ground = true` (FSN is the mode the landscape exists for) |
+| `src/fsv.c` | `fsv_set_mode()` | unchanged — switches on the *previous* mode with a `default:` arm, which is the correct behavior for FSN (remember it as the next startup mode) |
+| `src/sdl/ui_dialogs.cpp` | symlink-target eligibility | unchanged — an explicit `== FSV_TREEV` guard for unbuilt TreeV geometry; FSN lays out the whole tree, so it correctly takes the general path |
+| `src/sdl/ui_rail.cpp` | Tilt/Height enable | unchanged — `mode == FSV_MAPV \|\| mode == FSV_TREEV`, deliberately excluding FSN, matching its null scrollbar state |
+| `src/sdl/main.cpp` | `initial_camera_pan()` | unchanged — an `== FSV_TREEV` guard for the L-shaped pan; FSN takes the ordinary pan |
+| `src/window.c:207` (GTK) | **not a switch at all** — `gui_radio_menu_begin(fsv_mode - 1)` depends on the enum's *ordinal* | checked, left alone. This is the class of site a `switch`/`SWITCH_FAIL` grep cannot see, so it is listed here deliberately. It maps the mode onto a radio-item index in the GTK Vis menu, whose items are MapV and TreeV (DiscV is `#if 0`'d out), so `FSV_FSN` would index past the end. It cannot get there: `initial_fsv_mode` is only ever assigned from `--discv`/`--mapv`/`--treev` (`src/fsv.c:232-244`) or from `fsv_set_mode()`'s own bookkeeping, driven by that same two-item menu; the mode is not persisted to `~/.fsvrc` either. FSN has no parser flag, no menu item and no persistence path in the GTK build, so this expression can never be handed it without a code change that would have to add the menu item anyway |
+
+Beyond `switch` statements, the tree was also swept for code that depends
+on `FsvMode`'s *numeric order* rather than its members — the failure mode
+an enum insertion causes that no switch audit can catch. There is exactly
+one such site, `src/window.c:207`, in the table above;
+`grep -rn 'fsv_mode *[-+]\|(int)globals.fsv_mode' src/ tools/` finds no
+other arithmetic on the enum, and every remaining use is an `==`/`!=`
+against a named member.
+
+Non-`FsvMode` switches that `grep SWITCH_FAIL` also matches were checked
+and left alone: `src/common.c` (HSV sextant), `src/color.c`,
+`src/window.c` (`ColorMode`, `StatusBarID`), `src/animation.c`
+(`MorphType`), `src/about.c` (`AboutMesg`), `src/dialog.c`,
+`src/colexp.c`'s own `ColExpMesg` switches, and
+`src/ogl-gpu-compat.c`/`src/camera.c`'s axis switches.
+
+
+#### Task B1 fix round (code review)
+
+**Per-frame allocation on the high-detail path (the important one).**
+`fsn_draw_path_text()` called `node_absname_display()` every frame, which
+walks the node's ancestry, allocates, UTF-8-validates and NFC-composes —
+against that function's own documented contract (`src/common.c`: for
+callers that fire "on hover/selection changes, not per node per frame").
+Now cached: the composed string is kept in the draw file, keyed on the
+`GNode *` it was composed from, and recomposed only when
+`globals.current_node` moves. It keeps its *own copy* rather than the
+returned pointer, because `node_absname_display()` hands back its own
+static buffer, which the next caller (status bar, context menu) frees.
+
+The cache is dropped whenever the layout root changes, which covers every
+mode switch and rescan. That check lives in `fsn_geometry_draw()`, not in
+`fsn_geometry_free()`, because the latter is in the layout half —
+`libfsvcore` links it and the draw file is absent there, so a call in
+that direction would not link. The key is only ever compared, never
+dereferenced.
+
+Measured, not assumed: a temporary counter in `fsn_draw_path_text()` over
+a 10-second `--record` run in FSN mode (300 high-detail frames, with the
+recording script's two scripted `camera_look_at_full()` cues) logged
+**300 draws / 3 cache misses** — one for the initial current node
+(`src`), one at frame 141 when the camera looked at `src/sdl`, one at
+frame 220 when it looked at `src/sdl/gpu.cpp`. 297 of 300 frames
+allocated and composed nothing. The rendered result was checked too: with
+the current node pointed at a child, the ground text reads
+`…/fsn/fsv/src/xmaps` instead of `…/fsn/fsv/src`, so the invalidation
+reaches the screen and not just the counter. Both probes reverted.
+
+**Unchecked nullable deref.** `fsn_draw_path_text()` dereferenced
+`fsn_layout_get()`'s documented-nullable return; guarded now, matching
+the guard two lines further down.
+
+**Test: vacuous assertions replaced, and the real coverage gap closed.**
+Two of the wire assertions could not fail (`wire.x0 == parent->x` by
+construction, and `|0| <= positive`). They are replaced by an
+`on_footprint_edge()` predicate — the endpoint must lie exactly on the
+facing edge's line *and* within that footprint's width — applied by a
+recursive walk over every directory in the tree rather than to `dir-a`
+alone. The walk returns its visit count, and the caller asserts the exact
+number, so it cannot pass vacuously on an empty loop.
+
+The genuinely untested logic was the ground-width slicing:
+`FSN_DIR_SPAN`'s "max(own width, children's total)" measuring rule and
+the placement cursor's `FSN_SIBLING_GAP` step. The test now asserts that
+sibling *subtree* bands — recomputed from the public accessor, not read
+back out of the span the layout wrote down — are pairwise disjoint at
+every depth. `tests/fixture` grew the shape needed to make both halves
+observable: `dir-c` as a second top-level directory, and `dir-d`/`dir-e`
+under `dir-a` so that `dir-a`'s subtree is several times wider than its
+own pedestal (with only one child, the max() rule has no effect and a
+broken version passes). Both halves were then broken on purpose and
+confirmed to fail:
+
+| Perturbation | Result |
+|---|---|
+| `FSN_DIR_SPAN(dnode) = ped->w` (measuring rule ignores children) | FAIL — sibling bands overlap |
+| placement cursor advances by 0 instead of `span + FSN_SIBLING_GAP` | FAIL — sibling bands overlap |
+| wire anchored at the parent's centre instead of its outward edge | FAIL — `on_footprint_edge` |
+| wire endpoint past the child's corner | FAIL — `on_footprint_edge` |
+
+`test_scanfs`'s `>= 6` node-count assertion still passes (it is a floor
+by design); its stale comment listing the fixture's exact contents was
+rewritten to say so explicitly, so the next fixture addition doesn't look
+like it needs an edit there.
+
+**Comments that were wrong or overclaimed.**
+
+- `geometry.c`'s note on the newly-exported `geometry_node_set_color()`
+  named `geometry-fsn.c` as its consumer and "size reasons alone" as the
+  motive. Both wrong, and dangerously so: the consumer is
+  `geometry-fsn-draw.c`, and `geometry-fsn.c` must *never* call it —
+  that file is in `libfsvcore` precisely because it touches no renderer
+  function, which is the property the layout test enforces at link time.
+  Rewritten to name the right file and the renderer-boundary rationale.
+- `fsn-style.h` claimed a file box "must never be tall enough to hide the
+  pedestal it stands on", which the constants do not deliver
+  (`FSN_BOX_H_MAX` 320 ≫ `FSN_PEDESTAL_H_MIN` 24). Weakened to describe
+  the tendency, with the reason no clamp was added: box height *is* file
+  size, and clamping it against its pedestal would render two equal files
+  at different heights depending on which directory they sit in.
+- "PURE" on `fsn_geometry_init()` overclaimed. Renderer-free is not
+  side-effect-free: like `mapv_init_recursive()`, it reads
+  `dirtree_entry_expanded()` and writes each directory's `deployment`.
+  Both the declaration and the definition now say what is actually
+  guaranteed (no `gpu.h`, enforced by the linker) and what is not.
+
+**Re-verified after the fixes.** Both arms build; `meson test` 4/4 on
+each (macOS/SDL and the Debian container's `-Dfrontend=gtk`) with the
+enlarged fixture, `scanfs` included; FSN, MapV, TreeV and DiscV
+screenshots all still render.
+
+### Task B2 verification (flight navigation — middle-drag velocity model)
+
+**Files:** `src/camera.c`/`.h` (the `camera_flight_*` family, plus
+`cancel_pan_for_manual_control()` and flight-end hooks in `camera_init()`,
+`camera_look_at_full()` and `camera_birdseye_view()`); `src/fsn-style.h`
+(the `FSN_FLIGHT_*` constants); `src/sdl/input.cpp` (the gesture, and this
+file's first per-mode branch); `src/sdl/main.cpp` (one `camera_flight_tick()`
+call in the main loop). Fold-in from B1's re-review:
+`src/geometry-fsn.c`/`.h` + `src/geometry-fsn-draw.c` (layout generation
+counter).
+
+**The velocity model.** While the middle button is held, the pointer's
+offset *from the press point* — not the delta since the last event — is a
+rate:
+
+| pointer offset | maps to | clamped at |
+|---|---|---|
+| up / down (y) | forward / backward speed along the horizontal view direction | `FSN_FLIGHT_SPEED_MAX` 640 u/s |
+| left / right (x) | yaw rate (`camera->theta`) | `FSN_FLIGHT_YAW_MAX` 72 °/s |
+| up / down (y) **with Shift** | climb / dive rate (`target.z`) | `FSN_FLIGHT_ALT_MAX` 320 u/s |
+
+Each axis is zero inside a `FSN_FLIGHT_DEAD_ZONE_PX` (6 px) dead zone and
+linear in the offset past it (`*_SCALE`), so full deflection is reached
+~160 px out — a comfortable drag inside any viewport. Shift *replaces*
+forward motion rather than adding to it, so the gesture is a pure
+ascent/descent, and it is read live rather than latched at the press, so
+it can be tapped mid-flight — on every motion event, and (fix round,
+item 3 below) on the Shift press/release itself, so it works with the
+pointer parked too.
+
+`camera->phi` is deliberately untouched: fsn's flight was planar, the
+pitch is part of the viewpoint rather than part of the flying, and there
+is no pitch control (YAGNI — no path-following or wire-riding either).
+Altitude has a floor at the ground plane and no ceiling: flying up is
+self-limiting (the whole landscape comes into frame), and a ceiling would
+have to be recomputed on every rescan.
+
+FSN's camera target is MapV's Cartesian `XYZvec` (B1's storage reuse), so
+"position" is `MAPV_CAMERA(camera)->target` and "heading" is
+`camera->theta`. Forward on the ground is `-(cos θ, sin θ)`: the camera
+sits at `target + distance·(cos θ cos φ, sin θ cos φ, sin φ)` and looks
+back down that vector. At B1's initial `FSN_CAMERA_THETA` of 270° that is
+`+y`, the direction the tree grows — pushing forward flies *into* the
+tree, which is the point of the mode.
+
+**Why a per-tick update and not the morph queue.** A morph has a start
+value, an end value and a duration. Flight has a velocity and runs until
+the user lets go. Expressing it as a morph would mean either re-arming a
+fresh one-frame morph every frame (a `malloc`, a queue insert, a queue
+removal and an end callback per frame, to interpolate between two values
+one frame apart) or morphing toward a fictitious far-away target and
+breaking it on release — which would make the pointer's offset control
+*acceleration*, since the morph's own easing would still be shaping the
+motion. So the rates live in `camera.c` and `src/sdl/main.cpp`'s loop
+calls `camera_flight_tick()` once per iteration, next to
+`fsv_animation_tick()`.
+
+The animation subsystem still drives the drawing: every tick that
+actually moves the camera calls `redraw()`, which sets
+`animation_active`, which is what keeps frames flowing. A tick that finds
+all three rates at zero (button held, pointer inside the dead zone)
+returns *without* `redraw()` — so holding still costs exactly what not
+flying costs. Measured: 122 fps while moving, 60 fps (the loop's idle
+`SDL_WaitEventTimeout(…, 16)` path) inside the dead zone and after
+release. `run_record_mode()`'s loop deliberately does *not* get the call:
+it never runs `input_handle_event()`, so no flight can exist there.
+
+**A latent bug this task had to fix first.** `camera_pan_break()` is not
+enough for a caller that simply *stops*: `morph_break()` drops a morph
+record without calling its `end_cb`, so the master pan morph's
+`pan_end_cb()`/`post_pan_end()` never runs — and that pair is what clears
+`camera_currently_moving` and hands the UI back
+(`window_set_access(TRUE)`). Every pre-existing caller immediately armed a
+replacement pan, master morph included, so none of them noticed. Flight is
+the first that doesn't, so it goes through
+`cancel_pan_for_manual_control()`, which does that bookkeeping itself.
+`geometry_camera_pan_finished()` is deliberately *not* called there: it
+records where the node cursor came to rest, and an interrupted pan came to
+rest nowhere.
+
+**`window_set_access` stays TRUE during flight**, matching
+`camera_dolly()`/`camera_revolve()`, which are the GTK-era precedent for
+"the user is steering". That call means "an animation owns the camera,
+keep the user off the controls"; flight is the opposite. What flight *does*
+mirror from those two is `camera->manual_control = TRUE`, so `colexp.c`
+cannot re-aim the camera underneath the user.
+
+**Interaction matrix.**
+
+| Event | Behavior |
+|---|---|
+| middle press during a pan | `camera_flight_begin()` cancels the pan (see above) and takes over; pose is continuous |
+| `camera_look_at_full()` during a flight | calls `camera_flight_end()` first, then pans normally |
+| `camera_birdseye_view()` during a flight | same — doubly so going up, since the saved "where the user was" pose would otherwise keep drifting after it was saved |
+| `camera_init()` (mode switch, Reset, rescan) | ends the flight |
+| Escape during a flight | stops the flight **and nothing else on that press** — the check is before the collapse logic, so the keystroke that pulls you out of a flight does not also close the directory you flew into |
+| `input_reset()` (rescan) | ends the flight, alongside the existing capture-grab drop |
+| middle drag in DiscV/MapV/TreeV | dolly, unchanged |
+
+**Per-mode gesture dispatch, the pattern.** `viewport.c`'s gestures were
+all mode-agnostic — they called `camera.c`'s mode-agnostic entry points
+and let *its* per-mode switches decide what they meant. Flight is the
+first gesture that is not the same gesture in every mode, so the branch
+has to be in `input.cpp`, where the button is known.
+`middle_drag_is_flight()` is a `switch` with every enumerator spelled out
+and **no `default:`**, deliberately: `-Wswitch` then makes the next member
+added to `FsvMode` a compile error in this file rather than a silently
+inherited behavior — the same discipline `camera.c`'s `SWITCH_FAIL` arms
+enforce at runtime, done at compile time because this one has a
+meaningful answer for every mode.
+
+`input.cpp` keeps its own `g_flying` flag rather than asking
+`camera_flight_active()`. The two can legitimately disagree for the rest
+of a drag: `camera.c` ends the flight on its own when something else
+claims the camera, and the button may still be physically held — the flag
+is what stops the motion handler resurrecting it on the next event.
+
+**Constants: how they were sized.** Offsets are in **framebuffer pixels**,
+not logical points, because `input.cpp` works in pixel space throughout
+and its two existing gestures already do. The cost is that a given
+physical drag flies twice as fast on a 2× display as on a 1× one — exactly
+as it already dollies twice as fast today. Worth revisiting for all three
+gestures at once, not for this one alone; recorded here rather than
+quietly fixed for flight only.
+
+This repo's own `src/` tree lays out to **1256 × 2224** world units
+(`fsn_layout_extents()`, logged during the run below). At the clamped
+640 u/s that is 3.5 s along the depth axis and 4.0 s across the diagonal —
+inside the brief's 3–5 s target.
+
+**Verification.**
+
+1. **Both arms build.** macOS/SDL (`ninja -C builddir`, clean) and the
+   Debian bookworm container's `-Dfrontend=gtk` (53/53 targets, clean).
+   `meson test` **4/4 on both** (nvstore, scanfs, color_persistence,
+   fsn_layout). `camera.c` is shared, so the GTK build is the real guard
+   here — the flight entry points link there too, they just have no
+   gesture wired to them.
+2. **Headed synthetic flight** (temporary, never-committed `--record`-style
+   harness in the main loop, gated on an env var, same throwaway convention
+   Tasks A2/A3 used; `SDL_PushEvent()` of real
+   `SDL_EVENT_MOUSE_BUTTON_DOWN`/`_MOTION`/`_UP`/`KEY_DOWN` events so they
+   go through `ImGui_ImplSDL3_ProcessEvent()` and the real
+   `input_handle_event()` path, `io.WantCaptureMouse` gate included —
+   logged as 0 at the press). On `fsv src --fsn`, press at (640, 576),
+   camera pose logged every frame:
+
+   | phase | pointer offset | measured | expected |
+   |---|---|---|---|
+   | forward, full | dy = −200 px | **640.26 u/s**, Δz = 0, Δθ = 0 | clamped at `FSN_FLIGHT_SPEED_MAX` = 640 |
+   | forward, small | dy = −20 px | **55.97 u/s** | `(20 − 6) × 4` = 56 — linear, unclamped |
+   | dead zone | dy = −2 px | **0.00 u/s**, and 60 fps not 122 | inside the 6 px dead zone; no frames requested |
+   | yaw right | dx = +200 px | **−72.05 °/s**, ΔXY = 0 | clamped at `FSN_FLIGHT_YAW_MAX`, negative = turning right |
+   | Shift + forward | dy = −200 px | **+318.99 u/s in z**, ΔXY = 0 | clamped at `FSN_FLIGHT_ALT_MAX` = 320, no forward motion |
+   | release | — | ΔXY = Δz = Δθ = 0 within one tick | motion stops |
+
+   Screenshot pair `b2_flight_start.png` / `b2_flight_end.png` (in the
+   task's `screenshots/` directory): the start frame is B1's familiar
+   head-on view of the `src` pedestal with `sdl`/`xmaps` one generation
+   back; the end frame, after ~4 s of scripted flight, has the viewer past
+   and above the two children looking back down two long wires at the root
+   pedestal now in the bottom-right corner — the landscape genuinely
+   traversed, turned and climbed.
+3. **Interaction tests**, same harness:
+   - *Press during the intro pan* — before: `flying=0 moving=1 access=0`,
+     target y 1097.23; immediately after: `flying=1 moving=0 access=1`,
+     target y 1096.35. The pan is broken, the access flag is handed back
+     (proving `cancel_pan_for_manual_control()` fires), and the pose is
+     continuous — no jump to the pan's end value, i.e. no morph corruption.
+   - *Escape during a flight* — `flying=1` → `flying=0`, and
+     `dirtree_entry_expanded(current_node)` reads **1 both before and
+     after**: the flight stopped and the directory did *not* collapse. The
+     same script in `--mapv` (no flight) shows Escape collapsing 1 → 0, so
+     the pre-existing behavior is intact where it should be.
+   - *`camera_look_at()` during a flight* — `flying=1 moving=0 access=1`
+     → in the same call `flying=0 moving=1 access=0`, and the pose then
+     morphs normally over the following second.
+   - *MapV regression* — the identical script under `--mapv` logs
+     `flying=0` throughout, no target motion at all, and `camera->distance`
+     changing on each motion event: still a dolly.
+4. **Idle CPU unchanged.** Process CPU time over a 10 s idle window in FSN
+   mode, measured on this branch and on the immediately preceding commit
+   with the same binary path: **0.11 s (new) vs 0.12 s (old)** — identical
+   within noise, as expected from `camera_flight_tick()`'s single boolean
+   test. Frame pacing during flight is reported in §2 above (122 fps
+   moving / 60 fps parked).
+
+**Fold-in from B1's re-review: the path-text cache's pointer identity.**
+`geometry-fsn-draw.c` cached the ground label keyed on the `GNode *` it
+was composed from, and `fsn_geometry_draw()` dropped the cache when the
+layout root changed. Both are pointer comparisons, and GLib's slice
+allocator reuses freed node addresses aggressively — so after a Change
+Root or a Rescan a stale key can compare equal to a live node from an
+entirely different tree, and the label would keep showing the old path.
+B1's own comment dismissed this as not worth a generation counter; that
+was wrong, because the residual it described (a rescan of the *same*
+directory, which composes the same string anyway) is not the only case.
+
+`fsn_geometry_init()` now bumps a counter exposed as
+`fsn_layout_generation()`, and the cache key is the `(node, generation)`
+pair. The root-change check is kept as well — it drops the allocation
+promptly on a mode switch — but it is explicitly no longer the
+load-bearing one, and the comment says so.
+
+Verified with a temporary draw/miss counter and a scripted
+`app_request_rescan()`: **725 high-detail draws, 2 misses** (one at
+startup, one at the rescan). To prove the generation is doing the work
+rather than riding on the pointer checks, both the root-change
+invalidation *and* the node-pointer half of the key were then
+short-circuited to `0` and the run repeated: still exactly **2 misses**,
+the second logged with the key still holding the *old* node pointer while
+`gen=2 keygen=1`, followed by 482 clean hits. Both probes reverted before
+the commit.
+
+#### Task B2 fix round (code review)
+
+Two important findings and four minors. Commits `b3e6cd2` (input.cpp) and
+`7bd76ff` (camera.c).
+
+**1. A stale `g_flying` swallowed Escape (important).** `camera.c` ends a
+flight *unilaterally* whenever something else claims the camera:
+`camera_look_at_full()` (a click on a pedestal, a tree row, Go Back, the
+rail's Look At), `camera_birdseye_view()` (the rail's Bird's Eye) and
+`camera_init()` (a mode switch, Reset, a rescan). None of those go
+through `input.cpp`, so its `g_flying` stayed true with no flight behind
+it — and every branch gated on it then misfired. The visible one:
+Escape's flight check consumed the keypress on a do-nothing
+`stop_flight()` instead of falling through to the collapse logic, so
+**Escape appeared dead for as long as the middle button stayed down**.
+The middle-drag was left inert after a mode switch for the same reason.
+
+Fixed by reconciling once at the top of `input_handle_event()`
+(`reconcile_flight_state()`: `if (g_flying && !camera_flight_active())
+g_flying = false;`), which covers every unilateral-end path at once
+rather than patching the Escape branch alone. Only that direction needs
+reconciling — `camera.c` never *starts* a flight by itself.
+
+**2. Yaw normalization made the next pan whip the long way round
+(important).** `morph()` interpolates linearly between two *numbers*, and
+theta is an angle. `camera_flight_tick()` normalizes theta into [0, 360]
+on every tick, so a viewer who has turned slightly past the wrap point
+leaves theta at ~3° — and `fsn_look_at()`'s morph to `FSN_CAMERA_THETA`
+(270) then spun **267° the long way**, over a second of gratuitous yaw,
+instead of the 93° short arc.
+
+`unwrap_theta_toward()` shifts `camera->theta` by whole turns until it is
+within 180° of the target before the morph is armed. Free, because every
+other consumer of theta takes its sine or cosine — theta and theta ± 360
+are the same heading everywhere; only the morph, which does arithmetic on
+the number itself, can tell them apart. Applied to `fsn_look_at()` and to
+`camera_birdseye_view()`'s FSN going-up arm, which is the other pan a
+flight can hand a wrapped heading to. **Not** applied to
+`camera_revolve()`, whose identical normalization gives DiscV/MapV/TreeV
+the same long-way-round pan after a manual revolve: pre-existing upstream
+behavior in three modes this task is not touching, recorded here rather
+than changed under cover of an fsn task.
+
+**3. Shift was only sampled on motion events (minor).** The rate model
+makes holding the pointer still a legitimate way to fly — and no motion
+event arrives while it is still, so pressing Shift did nothing until the
+user jiggled the mouse. The last offset handed to
+`camera_flight_update()` is now cached and re-applied from Shift
+`KEY_DOWN`/`KEY_UP`. `SDL_GetModState()` is read at apply time rather
+than derived from the event, so releasing one Shift while the other is
+held correctly stays "Shift down". The claim in this document's Task B2
+note that Shift "is read live … so it can be pressed and released
+mid-flight" was true only while the pointer was moving; it is now true
+unconditionally.
+
+**4. `camera_flight_end()` depended on `globals.fsv_mode` (minor).** It
+called `camera_update_scrollbars(TRUE)`, which switches on the current
+mode and ends in `SWITCH_FAIL` for `FSV_NONE` — and two of its callers
+run at moments when that variable does not describe the world:
+`camera_init()`, which `fsv_set_mode()` calls *after* the new mode's
+`geometry_init()` but *before* assigning `globals.fsv_mode`, and
+`input_reset()`, which runs around a rescan. It was safe only by an
+accident of ordering, which is exactly the kind of thing a later
+reordering breaks silently. Removed rather than defended: the call was
+redundant in both reachable cases (a flight that moved the camera already
+pushed state from its last tick; one that never moved it has nothing to
+push), and dropping it makes the function mode-independent by
+construction. Nothing else relied on it — the only reader of that state
+is the rail's Tilt/Height sliders, which are disabled in FSN mode
+anyway. The `camera_init()` comment added in `130dea5`, which reasoned
+about the old ordering hazard, is replaced by one that just points at the
+new invariant.
+
+**5–6. Comments (minor).** `cancel_pan_for_manual_control()` was explicit
+about skipping `geometry_camera_pan_finished()` but silent about
+`filelist_show_entry()` — a no-op in the SDL frontend today
+(`src/sdl/stubs.c`) but real in the GTK one and a candidate to become
+real here, so it now says why: the pan's destination never became the
+current node, so nothing should select it. And `camera.c`'s `fsn-style.h`
+include comment still claimed the file was included for
+`FSN_GENERATION_GAP` alone.
+
+**Fix-round verification.** Same throwaway `SDL_PushEvent()` harness as
+the Task B2 note, extended and again deleted before commit. Both arms
+rebuilt, `meson test` **4/4 on each**.
+
+- **The Escape repro, both directions.** Script: FSN, middle-press,
+  fly, `camera_look_at(root_dnode)` (ends the flight from camera.c's
+  side, middle button still down), then Escape.
+  `dirtree_entry_expanded(root_dnode)` logged either side of the
+  keypress. **With `reconcile_flight_state()` commented out: 1 → 1** —
+  the press vanished, exactly as reported. **With it: 1 → 0** — Escape
+  collapses as normal.
+- **Escape during a *genuine* flight still stops the flight and nothing
+  else** (the original B2 behavior, re-checked because the reconcile sits
+  in front of it): `flying=1 → flying=0`, `rootexp` unchanged at 1.
+- **Short-arc pan.** Flew forward, then yawed left ~90° until theta
+  wrapped to **3.673**. `camera_look_at(root_dnode)` logged immediately
+  before and after the call: theta **3.673 → 363.673**, i.e. unwrapped in
+  place, |363.673 − 270| = **93.7° ≤ 180**. The pan then swept
+  monotonically down through 328° toward 270 with no wrap-around spin.
+- **Shift while parked.** Middle-press, one motion to full forward
+  deflection, then **no further motion event at all** — just
+  `SDL_SetModState()` + a synthetic Shift `KEY_DOWN`. Altitude went
+  212.34 → 401.62 in 0.60 s = **315 u/s** (`FSN_FLIGHT_ALT_MAX` is 320)
+  while x/y froze after one frame of in-flight residual (5.6 units ≈ one
+  640 u/s frame, the queued event being drained on the next iteration).
+  A synthetic Shift `KEY_UP`, again with no motion event, resumed forward
+  travel at **628 u/s** and stopped the climb.
+- **Regressions.** Flight-during-an-intro-pan still breaks the pan with a
+  continuous pose and `access` back to 1 (target y 1097.03 → 1096.16);
+  plain forward flight still clamps at **640 u/s**; MapV middle-drag
+  still dollies (`flying=0` throughout, `distance` 1468 → 2042 → 1244,
+  `theta` and `target` untouched) and the new Shift key handling is inert
+  there; `--screenshot` renders unchanged in both FSN and MapV.
+
+### Task B3 verification (selection spotlight + FSN polish — Milestone B complete)
+
+**Files:** `src/gpu.h` (new `FSV_DEPTH_LESS_NOWRITE`), `src/sdl/gpu.cpp`
+(`pipeline_for()`'s new depth/blend branch, `NUM_DEPTH_TESTS` 4→5),
+`src/ogl-gpu-compat.c` (matching, currently-unreachable case),
+`src/fsn-style.h` (`FSN_LANDSCAPE_CLASSIC`, the `FSN_SPOTLIGHT_*`
+constants and the `fsn_spotlight_rings[]` table), `src/geometry-fsn-draw.c`
+(`fsn_node_visible()`, `fsn_gldraw_spotlight_ring()`, `fsn_draw_spotlight()`,
+wired into `fsn_geometry_draw()`), `src/color.c`/`.h`
+(`landscape_explicit()`/`landscape_set_auto()`), `src/sdl/main.cpp`
+(`enter_fsn_mode_landscape()`), `src/camera.c` (`camera_birdseye_view()`'s
+going-down arm).
+
+**The decal, and why it is stacked rings rather than a true gradient.**
+The brief's ideal is a triangle-fan radial gradient via per-vertex alpha.
+`FsvVertex` (`src/gpu.h`) has only `pos`/`normal` — no per-vertex color —
+so, exactly like Task A1's banded sky, that gradient is not expressible
+through `gpu_draw()` as it stands, and adding a new vertex format/pipeline/
+shader pair purely for a decorative ground decal would be exactly the
+contract growth the brief asks to avoid. Instead `fsn_draw_spotlight()`
+draws `FSN_SPOTLIGHT_RING_COUNT` (6) concentric filled ellipses, largest
+(faintest) first, each a flat-alpha `FSV_TRIANGLE_FAN`; standard "over"
+alpha compositing across the six accumulates a stepped approximation of
+the target falloff (composited alpha roughly 0.05/0.12/0.20/0.29/0.41/0.52
+outermost-to-innermost, against the brief's ~0.55 center target).
+
+**Where the ellipse sits.** `fsn_layout_get(node)` already carries the
+selected node's own `x`/`z` ground position (both directories' pedestals
+and files' boxes are fully positioned by `geometry-fsn.c`'s placement
+pass) — no new accessor was needed. What differs between the two node
+kinds is the *surface* the ellipse lies on: a directory stands on the
+true ground (world `z == 0`), but a file stands on its *parent's*
+pedestal top (world `z == parent_ped->h`) — read via a second
+`fsn_layout_get(node->parent)` call. `FSN_SPOTLIGHT_LIFT` (0.5, its own
+constant rather than reusing `FSN_TEXT_LIFT`) keeps the decal off
+whichever surface that is. Sizing: `FSN_SPOTLIGHT_FILE_SCALE` (2.0×
+the box footprint) for a file, `FSN_SPOTLIGHT_DIR_SCALE` (1.15×) for a
+directory — both eyeballed per the brief.
+
+**The one new pipeline variant, and why it needed no new gpu.h entry
+point.** `FSV_DEPTH_LESS_NOWRITE` extends `FsvDepthTest` (mirroring
+Task A1's `FSV_DEPTH_ALWAYS_NOWRITE` addition): depth test LESS, write
+off. Because `gpu_draw()` already picks its pipeline from whatever
+`gpu_set_depth_test()` last set, tying alpha blending (the text
+pipeline's SRC_ALPHA/ONE_MINUS_SRC_ALPHA factors) to this one enum value
+in `pipeline_for()` meant the spotlight needed nothing beyond the
+existing `gpu_set_color()`/`gpu_set_lighting()`/`gpu_set_depth_test()`/
+`gpu_draw()` contract — no `gpu_spotlight()`, no new topology flag. The
+brief flagged both options; this was the smaller one. `ogl-gpu-compat.c`
+gained a documented, currently-unreachable `GL_LESS` case for the same
+reason `FSV_DEPTH_ALWAYS_NOWRITE` did: FSN has no GTK menu entry, so
+nothing there ever passes this value, but a future GTK landscape/decal
+should not silently inherit the wrong depth func from the `default:`
+case.
+
+**A real visibility bug caught by testing the "collapse the parent" case
+literally, not just filing it as done.** The first `fsn_node_visible()`
+walked from `node->parent` up to the root, hiding the spotlight whenever
+*any* ancestor was collapsed — including the node's own immediate
+parent. That is backwards for a **file**: `fsn_draw_recursive()` draws a
+directory's own box *and* own files unconditionally, before it ever
+checks its own `collapsed` flag; that flag only gates the loop that
+recurses into the directory's *child directories*. So collapsing a
+directory hides its subdirectories (transitively) but never its own
+files, and never itself. Confirmed both directions with the real
+draw path (see below): selecting a file directly under `src/`
+(`color.c`) and collapsing `src` itself left the spotlight showing
+(`src` is `color.c`'s own directory, and `src`'s own files always draw
+once `src` itself is reached — which it always is, being the root);
+selecting a *directory* (`src/sdl`) and collapsing its parent (`src`)
+correctly hid the spotlight (and the `sdl` pedestal itself — nothing
+recurses into a collapsed directory's children at all). The fixed
+`fsn_node_visible()` starts its ancestor walk one generation higher for
+a file than for a directory, with the difference spelled out in its own
+comment.
+
+**Auto-landscape.** `color.c` gained `landscape_explicit()` (persisted
+nvstore boolean, `landscape_set()`'s one and only caller being the
+Display menu) and `landscape_set_auto()` (same apply-and-persist body,
+factored into a shared `landscape_apply()`, but leaves the explicit flag
+untouched). `src/sdl/main.cpp`'s `enter_fsn_mode_landscape()` runs on
+every entry into `FSV_FSN` (both `enter_mode()`'s and `run_mode_entry()`'s
+`globals.fsv_mode = mode;` line) and auto-selects `FSN_LANDSCAPE_CLASSIC`
+unless the flag is already set. Leaving FSN restores nothing — no
+"landscape before FSN" is saved anywhere, so whatever FSN leaves selected
+(whether auto or explicit) simply persists afterward; this asymmetry is
+intentional (YAGNI) and documented at the call site, not an oversight.
+
+**Birdseye fold-in.** `camera_birdseye_view()`'s going-down (`else`) arm
+restores `camera->theta` to `pre_cam->theta` with a plain `morph()`,
+exactly like the going-up arm's `new_cam->theta` target did before
+Task B2's fix round — and `morph()` interpolates the raw number, not the
+angle, so a flight-wrapped `camera->theta` (e.g. left at 3.673 after
+several full turns) would restore via the long way around. Fixed with
+the same `unwrap_theta_toward( pre_cam->theta )` call the going-up arm
+already makes, gated to `FSV_FSN` for the same reason that arm's call
+is: DiscV/MapV/TreeV never wrap theta the way a flight does, and their
+own pre-existing "long way round" behavior after a manual revolve
+(recorded in the Task B2 fix-round note) is out of scope here.
+
+**Verification.**
+
+1. **Both arms build clean, `meson test` 4/4 on each.** SDL/macOS
+   (`ninja -C builddir-sdl`, incremental and from-scratch). GTK: fresh
+   `debian:bookworm` container, this repo's CI apt list, `meson setup
+   -Dfrontend=gtk && ninja` (53/53 targets) `&& meson test` → 4/4, run
+   twice — once mid-task to confirm the base spotlight/pipeline work
+   didn't regress the GTK build, once at the end after the
+   `fsn_node_visible()` fix and after all throwaway debug code below was
+   removed.
+2. **Headed FSN on this repo's own `src/`.** A throwaway, env-var-gated
+   block in `src/sdl/main.cpp`'s `--screenshot` path (same convention as
+   Tasks A2/A3/B2: `FSV_TEST_SELECT`/`FSV_TEST_COLLAPSE`/`FSV_TEST_PICK`/
+   `FSV_TEST_BIRDSEYE`, resolving paths via `common.c`'s `node_named()`
+   and driving `colexp()`/`camera_look_at()`/`camera_birdseye_view()`
+   directly — never committed, removed before this task's commits) plus
+   a temporary `fprintf` in `fsn_draw_spotlight()`:
+   - **Select a file** (`src/color.c`, a root-level file): flying the
+     camera to frame `color.c`'s own tiny 64-unit footprint
+     (`fsn_look_at()`'s `SQRT_2 * max(w,d)` diameter rule) puts the
+     camera nose-first against the packed box row with no ground in
+     frame at all — an honest finding about that zoom rule on a densely
+     packed real source tree, not a spotlight bug (recorded as a
+     concern below). Framing the camera on the *parent* directory
+     instead (while leaving the actual selection on the file) gives a
+     legible shot: a soft, pale, elliptical glow pools at the base of
+     `color.c`'s box on the grey pedestal surface, brightest near the
+     box and fading outward over the six rings — cropped/zoomed
+     screenshots read exactly like the reference's "soft white
+     elliptical light pool," just smaller in an unzoomed frame because
+     this repo's own files are modest in size. Confirmed the glow moves
+     when a different file is selected (checked against the logged
+     `cx`/`cz`/`base_z` from `fsn_layout_get()`).
+   - **Select a directory** (`src/sdl`): the ellipse is only 1.15× the
+     pedestal's own footprint, and the pedestal is a fully opaque block
+     standing on exactly that footprint, so almost the entire decal is
+     self-occluded by the pedestal it surrounds — only a thin, correctly
+     visible rim peeks out at the pedestal's outward corners/edges in
+     the oblique default view. Subtler than the file case by
+     construction (a directory's own footprint dominates its ellipse far
+     more than a file's does), not a bug.
+   - **Click on nothing (sky/ground):** traced through
+     `src/sdl/input.cpp` rather than screenshotted — `g_indicated_node`
+     is set to `node_at_cursor()`'s result on press, but
+     `camera_look_at()` (the only writer of `globals.current_node`) on
+     button-up is gated on `g_indicated_node != NULL`; a click resolving
+     to id 0 leaves it NULL, so `camera_look_at()` never runs and
+     `globals.current_node` — and therefore the spotlight — is
+     unchanged. There is no deselect gesture in this port today.
+   - **Collapse the selected node's parent:** see the visibility-bug
+     writeup above — both the directory case (spotlight and pedestal
+     both vanish) and the file-under-root case (spotlight correctly
+     survives collapsing root, since root's own files always draw) were
+     exercised via `FSV_TEST_COLLAPSE` and confirmed by screenshot.
+3. **Pick-through.** `FSV_TEST_PICK="650,420"` (a pixel inside the
+   visible glow from the file screenshot above) called `gpu_pick()`
+   directly: it returned a small, ordinary node id (13 — the pedestal
+   under the decal) with **no** `fsn_draw_spotlight()` debug line
+   printed during that call's internal offscreen render (one debug line
+   total per frame, from the *normal* pass that ran afterward) —
+   confirming the decal's own `gpu_render_mode() != FSV_RENDER_NORMAL`
+   self-check keeps it out of the select pass entirely, exactly like
+   `fsn_gldraw_wire()`'s pattern elsewhere in the same file.
+4. **Auto-landscape.** A standalone harness (same isolation technique as
+   `tests/test_color_persistence.c`: `$HOME` redirected before anything
+   touches `~/.fsvrc`, linked straight against `libfsvcore`'s real
+   `color.c`, not added to `meson.build`) reproduced
+   `enter_fsn_mode_landscape()`'s one-line body (that function itself is
+   C++/SDL-only and wasn't linked) and ran the brief's exact scenario:
+   fresh config → `landscape_get()==0` (classic) after the simulated FSN
+   entry, `landscape_explicit()==FALSE`; `landscape_set(2)` (simulated
+   menu pick of "slate") → `landscape_explicit()==TRUE`; a second
+   simulated FSN entry → `landscape_get()` stays `2` (slate sticks); a
+   fresh `landscape_init()` (simulated relaunch) → both the preset and
+   the explicit flag reload correctly from `~/.fsvrc`. All four
+   assertions passed.
+5. **Birdseye fold-in.** `FSV_TEST_BIRDSEYE=1` set `camera->theta = 3.673`
+   directly (via `camera.h`'s exported `extern Camera *camera`), then
+   called `camera_birdseye_view(true)` (drained to settle at
+   `theta==270`, the going-up arm's already-proven unwrap) and
+   `camera_birdseye_view(false)`: **immediately** after the call (before
+   the restore morph has run at all) `camera->theta` read **−90.0** —
+   `unwrap_theta_toward(3.673)` applied to 270 (`|270 − 3.673| = 266.3 >
+   180`, so shifted by one turn to −90, `|−90 − 3.673| = 93.7 ≤ 180`,
+   stop) — then settled at **3.673** once the morph completed, i.e. a
+   monotonic 93.7° arc, not the 266° long way. Matches Task B2's own
+   verification style for the going-up arm and `fsn_look_at()` exactly.
+6. **All throwaway harness code removed before the commits below** —
+   confirmed by re-diffing `src/sdl/main.cpp` and
+   `src/geometry-fsn-draw.c` against the previous commit and rebuilding
+   both arms clean one final time.
+
+### Concerns / disclosed gaps
+
+- **`fsn_look_at()`'s file-zoom diameter (Task B1, not touched here)
+  makes a real click-to-fly on a file in a densely packed directory land
+  the camera nose-first against the box row**, as noted above — a real
+  UX rough edge surfaced by this task's own verification, not a
+  spotlight defect, and out of B3's scope to fix (it is `camera.c`'s
+  framing rule, not the decal).
+- **The spotlight is not deployment-aware.** If the selected node's
+  ancestor chain is mid-collapse/expand morph (`deployment` strictly
+  between 0 and 1), `fsn_draw_spotlight()` draws at the node's static
+  layout height regardless — unlike `fsn_gldraw_wire()`, which scales its
+  child endpoint by `deployment` by hand. A visible glitch only during
+  the brief animation window, and only for a node whose ancestor is
+  *also* the one currently being expanded/collapsed; accepted as YAGNI
+  for a decorative decal rather than threading deployment through
+  `fsn_draw_spotlight()`.
+- **"Night" landscape remains uncalibrated** (Task A1's own disclosed
+  gap; untouched here, and auto-landscape only ever selects "classic").
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -3461,3 +4905,24 @@ code is kept.
 | 2026-08-08 | NFC normalization cached in `NodeDesc::dname` at scan time, not applied at draw time | the 3D label path runs per visible node per frame; normalizing there would re-shape every string 60×/s. Storing it beside (never *instead of*) the byte-exact `name` keeps every filesystem call, wildcard match and sort untouched |
 | 2026-08-08 | Glyph coverage stops at Latin Extended-A (+ dashes/quotes/€) for the 3D atlas | the atlas is a fixed-cell grid sized up front; CJK would need thousands of cells and a proportional-width layout engine. Uncovered codepoints degrade to one `?` each, which is honest and cheap. The ImGui panels have no such limit (1.92 loads glyphs on demand) |
 | 2026-08-08 | `lib/stb_truetype.h` is a second, verbatim copy of ImGui's `imstb_truetype.h` rather than an include of it | `src/fontatlas.c` is plain C compiled into *both* frontends, and the GTK arm has no ImGui at all; a copy keeps the two updatable independently and the C arm free of any `subprojects/imgui/` dependency |
+| 2026-08-08 | fsn-mode Task A1: sky drawn as `SKY_BANDS` (32) flat-colored horizontal strips instead of a real vertex-colored gradient quad | `FsvVertex`/`gpu_draw()` have no per-vertex color channel — fill color is a uniform (`gpu_set_color()`) — so a true gradient would need a new vertex format, a dedicated pipeline and a new compiled shader pair (MSL+SPIR-V); 32 flat bands is invisible banding in a screenshot at zero shader-toolchain cost |
+| 2026-08-08 | fsn-mode Task A1 (superseded same day by the fix round below): sky drawn through a temporary identity projection/modelview at `z=0.999` NDC instead of a depth-write-off pipeline variant | rejected after review: `glm_frustum_rh_zo`'s non-linear zero-to-one depth means a fixed NDC depth near 1.0 still falls within the *linear* world-space depth range real geometry can legitimately occupy near the far clip plane at MapV/TreeV's 128:1 near:far ratio, which would make the sky wrongly occlude that geometry instead of always losing to it — see `FSV_DEPTH_ALWAYS_NOWRITE` below |
+| 2026-08-08 | fsn-mode Task A1 fix round: added `FSV_DEPTH_ALWAYS_NOWRITE` (`gpu.h`/`pipeline_for()`) — depth test disabled outright, not left enabled with `SDL_GPU_COMPAREOP_ALWAYS` — for the landscape sky instead of tuning the rejected NDC-depth constant | disabling the test is what SDL_GPU (mirroring Vulkan/Metal) actually ties the "no depth write" guarantee to, on every backend, regardless of the projection's shape; a compare-op tweak on the old approach would still have been exploitable at a big enough near:far ratio |
+| 2026-08-08 | fsn-mode Task A1 fix round: ground plane gated to `FSV_MAPV`/`FSV_TREEV` only (`draw_landscape()`'s explicit, `SWITCH_FAIL`-terminated switch on `globals.fsv_mode`), not drawn unconditionally in every mode | confirmed by screenshot that an unconditional ground plane produces a full-frame green wall in `FSV_DISCV` for any realistically-sized directory (camera there looks straight down the world Z axis at a fixed distance — it never reads `phi`/`theta` the way MapV/TreeV do — so the ground quad, sitting just past the disc's own content, fills the entire view once `distance ≥ 96`); a 2-file test fixture's small default distance masked this at first and the earlier claim that "DiscV's ground does not render at all" was wrong |
+| 2026-08-08 | fsn-mode Task A1: landscape persistence (`landscape_get/_set/_init`) lives in `src/color.c`/`color.h` rather than a new module | identical shape to the color config already there (nvstore-backed, read once at startup, written immediately on change) — a new file would duplicate the open/close-per-call pattern for no isolation benefit |
+| 2026-08-08 | fsn-mode Task B1: `FSV_FSN` inserted into `FsvMode` before `FSV_SPLASH`, not appended after `FSV_NONE` | it lands among the real visualization modes, so every `switch` ending in `SWITCH_FAIL` must account for it; a missed one aborts loudly (`g_assert_not_reached`) instead of silently taking a wrong arm — exactly the failure mode wanted while the mode is being built out |
+| 2026-08-08 | fsn-mode Task B1: FSN split across two translation units (`geometry-fsn.c` layout in `libfsvcore`, `geometry-fsn-draw.c` drawing per frontend) rather than one file next to `geometry.c` | the layout is pure math that `camera.c` (itself core) reads, and keeping it gpu-free is the property the headless layout test exists to protect — with the split, `tests/test_fsn_layout.c` links with zero renderer stubs, so the linker enforces the invariant. The single-file arrangement was tried first and broke `fsv-scan`'s link: stubbing `fsn_layout_*` for `libfsvcore`'s consumers would have collided with the test's own compiled-in copy |
+| 2026-08-08 | fsn-mode Task B1: FSN geometry stored in `NodeDesc::geomparams`/`DirNodeDesc::geomparams2` like every other mode, rather than a side table | `FsnPedestal` is exactly five doubles, which is `geomparams`'s exact size (MapV plays the same trick), and the three extra per-directory values the two-pass layout carries fit `geomparams2` exactly; a side table would need its own lifetime tied to a tree that `scanfs()` already frees wholesale |
+| 2026-08-08 | fsn-mode Task B1: pedestal and file-box heights are `log2` of size, clamped — not linear, not sqrt | a real source tree spans five or six orders of magnitude of subtree size; anything gentler leaves the root pedestal towering over everything else in the same frame, where the reference screenshot's pedestals are all within a small factor of each other |
+| 2026-08-08 | fsn-mode Task B1: FSN camera reuses MapV's *storage* (`MAPV_CAMERA`, the Cartesian target) but not MapV's *math* | `mapv_look_at()` and every other `mapv_*` camera helper is written in `MAPV_GEOM_PARAMS`, which holds an `FsnPedestal` in FSN mode (the modes share `NodeDesc::geomparams`) — delegating outright would feed the camera another mode's numbers reinterpreted as its own. The storage, by contrast, is genuinely the same shape, so the pan/morph arms fall through to MapV's |
+| 2026-08-08 | fsn-mode Task B1: `geometry.c`'s `node_set_color()` exported as `geometry_node_set_color()` instead of copied into `geometry-fsn-draw.c` | one select-pass id encoding and one highlight boost for both files rather than two that could drift; `highlight_node_id` is `geometry.c`'s private state, so a copy could not have shared it anyway |
+| 2026-08-08 | fsn-mode Task B1: FSN wires draw black in the select pass rather than being skipped | same reasoning as `draw_lit()`'s fixed-color path above (2026-08-07): skipping drops them from the pick pass's depth buffer, letting a click pass through to whatever sits behind; id 0 keeps the occlusion honest while correctly reporting "not a node" |
+| 2026-08-08 | fsn-mode Task B1 fix round: FSN's ground path text caches its composed string, keyed on the `GNode *` it came from, with invalidation in `fsn_geometry_draw()` rather than `fsn_geometry_free()` | `node_absname_display()`'s own contract (`src/common.c`) is "hover/selection changes, not per node per frame", and this call was per frame; the invalidation cannot live in `fsn_geometry_free()` because that is the layout half, which `libfsvcore` links and the draw file is absent from — a call in that direction would not link. Measured at 3 cache misses over 300 recorded frames with two scripted `camera_look_at_full()` cues |
+| 2026-08-08 | fsn-mode Task B1 fix round: `tests/fixture` gained `dir-c` (a second top-level directory) and `dir-a/dir-d` + `dir-a/dir-e` | the FSN layout's ground-width slicing was untestable on the old fixture: with one child, `FSN_DIR_SPAN`'s `max(own width, children's total)` rule has no effect and a broken implementation passes — confirmed by breaking it deliberately before the fixture grew and watching the test still pass. Three siblings under `dir-a` make its subtree several times wider than its own pedestal, which is what makes the rule observable. `test_scanfs`'s bound is a floor (`>= 6`), so it is unaffected by design |
+| 2026-08-08 | fsn-mode Task B1 fix round: file-box height left unclamped against its pedestal's height, with the comment corrected instead | box height *is* the file's size; clamping it against the pedestal it happens to stand on would render two identically-sized files at different heights depending on which directory they are in, which misinforms worse than a tall box on a short slab |
+| 2026-08-08 | fsn-mode Task B3: selection spotlight drawn as `FSN_SPOTLIGHT_RING_COUNT` (6) stacked flat-alpha ellipses instead of a true per-vertex alpha gradient | same root cause as Task A1's banded sky: `FsvVertex`/`gpu_draw()` carry no per-vertex color, only a uniform fill color; a real gradient would need a new vertex format, pipeline and shader pair for one decorative decal |
+| 2026-08-08 | fsn-mode Task B3: added `FSV_DEPTH_LESS_NOWRITE` (`gpu.h`) and tied alpha blending to that one depth-test value in `pipeline_for()`, rather than adding a `gpu_spotlight()` entry point or a separate blend flag on `gpu_draw()` | the spotlight is the only caller that needs depth-test-on/write-off *and* blending together; `gpu_set_depth_test()` already selects `gpu_draw()`'s pipeline per call, so no new gpu.h surface was needed at all — the smaller of the two extensions the task brief offered |
+| 2026-08-08 | fsn-mode Task B3: a file's spotlight sits on its *parent's* pedestal top (world `z == parent_ped->h`), a directory's on the true ground (`z == 0`) — both read via `fsn_layout_get()`, no new layout accessor | matches what "the ground under the selected node" actually means physically: a file's local ground is the pedestal it stands on, not the world floor several generations below it |
+| 2026-08-08 | fsn-mode Task B3: `fsn_node_visible()`'s ancestor walk starts one generation higher for a file than for a directory | `fsn_draw_recursive()` draws a directory's own box *and own files* unconditionally, before checking its own `collapsed` flag — that flag only gates recursion into *child directories* — so a file's visibility depends on its parent being *reached*, not on the parent's own collapsed state, while a directory's visibility depends on its parent not being collapsed directly. Getting this backwards (checking the immediate parent's collapsed flag for a file too) was the task's own first draft, caught by literally testing "collapse the selected node's parent" for both node kinds rather than trusting the more intuitive-sounding rule |
+| 2026-08-08 | fsn-mode Task B3: FSN auto-landscape persists a separate `landscape_explicit` nvstore boolean rather than inferring "explicit" from whether `landscape` differs from the built-in default | the built-in default ("slate") is itself a legitimate explicit choice a user could make from the menu, indistinguishable from "never chosen" by value alone; a dedicated flag is the only way to tell the two apart |
+| 2026-08-08 | fsn-mode Task B3: leaving FSN mode restores no prior landscape (no "landscape before FSN" is saved) | keeping the feature to what the brief asked for (auto-*entering* FSN) — a restore-on-exit would need its own saved-state slot and its own interaction with the explicit flag for arguably little benefit, since the landscape menu remains one click away in any mode |

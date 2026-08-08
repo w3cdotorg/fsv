@@ -3,8 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * Fixture-based unit test for the headless fsv core scanner. Asserts that
- * scanfs() on tests/fixture produces a non-null tree with at least 6 nodes
- * (metanode + fixture root + dir-a + dir-b + file1.txt + file2.bin + file3).
+ * scanfs() on tests/fixture produces a non-null tree with at least 6 nodes.
+ * The fixture holds more than that (metanode + fixture root + dir-a +
+ * dir-a/dir-b + dir-c + file1.txt + file2.bin + file3 + dir-c/file4.txt,
+ * plus whatever else lands there); the bound is deliberately a floor, so
+ * that adding fixture content for another test -- as fsn-mode Task B1 did
+ * with dir-c, to give test_fsn_layout.c a pair of sibling directories --
+ * never means editing an exact count here.
  */
 
 #include <assert.h>

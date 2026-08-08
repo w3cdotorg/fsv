@@ -65,3 +65,41 @@ bool app_is_recording(void);
 // text, Rescan's implicit target, and the folder dialog's default
 // location. Never NULL once the first scan has completed.
 const char *app_root_dir(void);
+
+// fsn-mode Task A3's camera rail (src/sdl/ui_rail.cpp) -- "Reset" button:
+// re-runs the current mode's "switch into this mode" sequence in place
+// (geometry_init() + camera_init(mode, FALSE) + the short "" pan) -- the
+// same body app_switch_mode() runs, but without its mode ==
+// globals.fsv_mode guard, which exists specifically to reject what Reset
+// wants to do (re-enter the *current* mode). No-op while a scan is
+// running or before the first filesystem has loaded. If bird's-eye view
+// is active, this backs it out first (camera_birdseye_view(FALSE)) and
+// then cancels the resulting in-flight morph with camera_pan_break() --
+// NOT equivalent to the user manually exiting bird's-eye view first (that
+// lets the restore morph run to completion over several seconds); see
+// main.cpp's implementation comment for why the cancel is required
+// before camera_init() runs.
+void app_reset_camera(void);
+
+// fsn-mode Task A3: the scroll state camera_update_scrollbars() last
+// pushed for the given axis (0=x, 1=y) via fsv_platform.set_scroll() --
+// verbatim lower/upper/page/value (see src/fsv-platform.h's doc comment).
+// src/sdl/ui_rail.cpp's Tilt/Height sliders read this every frame to
+// render a range that matches what the camera currently considers
+// scrollable; not meaningful outside MapV/TreeV (see camera.c's
+// null_get_scrollbar_state()/discv_get_scrollbar_state()).
+void app_get_scroll_range(int axis, double *lower, double *upper,
+    double *page, double *value);
+
+// fsn-mode Task A3: called by src/sdl/ui_rail.cpp when the user drags a
+// rail slider. Updates the stored scroll value (what
+// fsv_platform.set_scroll() would have pushed had the camera moved on its
+// own) and forwards to camera_scrollbar_moved(), the same two-step a real
+// GtkAdjustment "value_changed" signal produces for GTK's
+// on_scrollbar_value_changed() -- the widget updates its own value first
+// (implicitly, by the drag), *then* the signal fires and reads it back
+// via fsv_platform.get_scroll(). Order matters here for the same reason:
+// camera_scrollbar_moved() reads the new value back through
+// fsv_platform.get_scroll(), so the stored value must already be updated
+// before it is called.
+void app_scrollbar_dragged(int axis, double new_value);

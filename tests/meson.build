@@ -26,3 +26,14 @@ test_color_persistence = executable('test_color_persistence',
   dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   include_directories: incdir)
 test('color_persistence', test_color_persistence)
+
+# fsn-mode Task B1: FSV_FSN's layout pass is deliberately gpu-free, which
+# is what puts src/geometry-fsn.c in libfsvcore -- so this links exactly
+# like test_scanfs above, with no renderer stubs of any kind.
+test_fsn_layout = executable('test_fsn_layout',
+  ['test_fsn_layout.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  include_directories: incdir,
+  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+test('fsn_layout', test_fsn_layout)

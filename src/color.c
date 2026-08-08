@@ -18,7 +18,10 @@
 
 #include "animation.h" /* redraw( ) */
 #include "geometry.h"
+#include "gpu.h" /* gpu_set_landscape( ) */
 #include "window.h"
+
+#include "fsn-style.h" /* FsnLandscape, fsn_landscapes[], FSN_LANDSCAPE_COUNT */
 
 
 /* Some fnmatch headers don't define FNM_FILE_NAME */
@@ -84,6 +87,10 @@ static const char *tokens_timestamp_spectrum_type[] = {
 	"rainbow",
 	"heat",
 	"gradient",
+	"fsnbuckets", /* fsn-mode Task A2: SPECTRUM_FSN_BUCKETS -- index
+	               * must match that enumerator's position in
+	               * color.h's SpectrumType, same hand-kept-in-sync
+	               * convention as every other token array here */
 	NULL
 };
 static const char key_timestamp_timestamp_type[] = "timestamptype";
@@ -102,11 +109,44 @@ static const char key_wpattern_group_color[] = "color";
 static const char key_wpattern_group_wpattern[] = "wp";
 static const char key_wpattern_default_color[] = "defaultcolor";
 
+/* Landscape (fsn-mode Task A1). One int-token key, same shape as
+ * key_color_mode above -- tokens_landscape[]'s order must match
+ * src/fsn-style.h's fsn_landscapes[] order (index-for-index), same
+ * hand-kept-in-sync convention tokens_color_mode already relies on for
+ * ColorMode. */
+static const char key_landscape[] = "landscape";
+static const char *tokens_landscape[] = {
+	"classic",
+	"night",
+	"slate",
+	NULL
+};
+/* "slate" (index 2): matches today's pre-A1 flat clear -- see
+ * fsn-style.h -- so an existing ~/.fsvrc with no `landscape` key at all
+ * (every install before this task) keeps its exact current look. */
+static const int default_landscape = 2;
+
+/* fsn-mode Task B3: has the user ever chosen a landscape explicitly?
+ * See color.h's landscape_explicit( ) doc comment. */
+static const char key_landscape_explicit[] = "landscape_explicit";
+
 /* Color configuration */
 static struct ColorConfig color_config;
 
 /* Color assignment mode */
 static ColorMode color_mode;
+
+/* Current landscape preset (index into fsn_landscapes[], or
+ * FSN_LANDSCAPE_OFF). Mirrors what was last handed to
+ * gpu_set_landscape() -- kept here too (rather than read back from
+ * gpu.h, which has no getter) purely so landscape_write_config() and
+ * src/sdl/ui_main.cpp's menu have something to read without adding one. */
+static int landscape_current = -1;
+
+/* fsn-mode Task B3: mirrors what was last read from/written to the
+ * "landscape_explicit" nvstore key -- see color.h's landscape_explicit( )
+ * doc comment. */
+static boolean landscape_explicit_current = FALSE;
 
 /* Colors for spectrum */
 static RGBcolor spectrum_underflow_color;
@@ -187,6 +227,15 @@ color_get_mode( void )
 }
 
 
+/* fsn-mode Task A2: see color.h's doc comment -- a cheap peek at the
+ * live spectrum type for ui_legend_draw( ) to poll every frame. */
+SpectrumType
+color_timestamp_spectrum_type( void )
+{
+	return color_config.by_timestamp.spectrum_type;
+}
+
+
 /* Returns (a copy of) the current color configuration. Note: It is the
  * responsibility of the caller to call color_config_destroy( ) on the
  * returned copy when it is no longer needed */
@@ -202,6 +251,35 @@ static const RGBcolor *
 node_type_color( GNode *node )
 {
 	return &color_config.by_nodetype.colors[NODE_DESC(node)->type];
+}
+
+
+/* fsn-mode Task A2: returns the color for a file whose chosen timestamp
+ * is `age_seconds` in the past, stepping through fsn_age_buckets[]
+ * (src/fsn-style.h) in order and returning the first bucket whose
+ * max_age_s the age does not exceed; the last bucket ("> 1 yr") is the
+ * catch-all for anything older than the second-to-last cutoff. */
+static const RGBcolor *
+fsn_bucket_color( double age_seconds )
+{
+	static RGBcolor bucket_colors[FSN_AGE_BUCKET_COUNT];
+	static boolean initialized = FALSE;
+	int i;
+
+	if (!initialized) {
+		for (i = 0; i < FSN_AGE_BUCKET_COUNT; i++) {
+			bucket_colors[i].r = fsn_age_buckets[i].rgb[0];
+			bucket_colors[i].g = fsn_age_buckets[i].rgb[1];
+			bucket_colors[i].b = fsn_age_buckets[i].rgb[2];
+		}
+		initialized = TRUE;
+	}
+
+	for (i = 0; i < FSN_AGE_BUCKET_COUNT - 1; i++)
+		if (age_seconds <= fsn_age_buckets[i].max_age_s)
+			return &bucket_colors[i];
+
+	return &bucket_colors[FSN_AGE_BUCKET_COUNT - 1];
 }
 
 
@@ -233,6 +311,15 @@ time_color( GNode *node )
 
 		SWITCH_FAIL
 	}
+
+	/* fsn-mode Task A2: fsn's bucket ages are fixed, absolute cutoffs
+	 * from *now* (7d/14d/30d/91d/182d/365d), exactly what the original
+	 * fsn's "ages:" legend bar showed -- not the user-adjustable
+	 * oldest/newest window the continuous rainbow/heat/gradient
+	 * spectrums below use. Deliberately ignores
+	 * color_config.by_timestamp.old_time/new_time for that reason. */
+	if (color_config.by_timestamp.spectrum_type == SPECTRUM_FSN_BUCKETS)
+		return fsn_bucket_color( difftime( time( NULL ), node_time ) );
 
 	/* Temporal position value (0 = old, 1 = new) */
 	x = difftime( node_time, color_config.by_timestamp.old_time ) / difftime( color_config.by_timestamp.new_time, color_config.by_timestamp.old_time );
@@ -362,6 +449,29 @@ color_spectrum_color( SpectrumType type, double x, void *data )
 		color.r = zero_color->r + x * (one_color->r - zero_color->r);
 		color.g = zero_color->g + x * (one_color->g - zero_color->g);
 		color.b = zero_color->b + x * (one_color->b - zero_color->b);
+		return color;
+
+		case SPECTRUM_FSN_BUCKETS:
+		/* This function's x=[0,1] continuous-position contract has no
+		 * real meaning for fsn's buckets (absolute ages, not a
+		 * windowed spectrum -- see fsn_bucket_color( ) above); this
+		 * case exists so the two callers that unconditionally sample
+		 * color_spectrum_color( ) across x -- generate_spectrum_colors( )'s
+		 * SPECTRUM_NUM_SHADES table and src/sdl/ui_dialogs.cpp's Color
+		 * Setup preview strip -- get a real color instead of hitting
+		 * SWITCH_FAIL, by stepping through the 7 bucket colors in
+		 * order as x increases. The preview strip this actually
+		 * drives ends up showing exactly the 7 bucket colors in
+		 * order, which is a reasonable enough substitute for "preview
+		 * of what this spectrum choice looks like". */
+		{
+			int i = (int)(x * (double)FSN_AGE_BUCKET_COUNT);
+			if (i >= FSN_AGE_BUCKET_COUNT)
+				i = FSN_AGE_BUCKET_COUNT - 1;
+			color.r = fsn_age_buckets[i].rgb[0];
+			color.g = fsn_age_buckets[i].rgb[1];
+			color.b = fsn_age_buckets[i].rgb[2];
+		}
 		return color;
 
 		SWITCH_FAIL
@@ -603,6 +713,103 @@ color_init( void )
 
 	/* Generate spectrum color table */
 	generate_spectrum_colors( );
+}
+
+
+/* Returns the current landscape preset (index into fsn_landscapes[],
+ * src/fsn-style.h), for src/sdl/ui_main.cpp's Display->Landscape menu to
+ * mark the active radio item -- same shape as color_get_mode( ) above. */
+int
+landscape_get( void )
+{
+	return landscape_current;
+}
+
+
+/* Shared by landscape_set( ) and landscape_set_auto( ) below: apply the
+ * preset to the renderer, persist the raw "landscape" nvstore key, and
+ * redraw. What differs between the two public entry points is only
+ * whether the "landscape_explicit" flag is also touched -- see that
+ * pair's own doc comments (color.h) for why the distinction exists. */
+static void
+landscape_apply( int index )
+{
+	NVStore *fsvrc;
+
+	if (index < 0 || index >= FSN_LANDSCAPE_COUNT)
+		index = default_landscape;
+
+	landscape_current = index;
+	gpu_set_landscape( index );
+
+	fsvrc = nvs_open( CONFIG_FILE );
+	nvs_write_int_token( fsvrc, key_landscape, index, tokens_landscape );
+	nvs_close( fsvrc );
+
+	redraw( );
+}
+
+
+/* Changes the current landscape preset, pushes it to the renderer, and
+ * persists it immediately (nvstore key "landscape", by name -- see
+ * tokens_landscape[] above), mirroring color_set_mode( )'s "change,
+ * apply, save" shape rather than color_write_config( )'s separate
+ * apply-then-save-on-demand one: a menu click is a single, immediate
+ * action with no intervening dialog to Cancel out of.
+ *
+ * src/sdl/ui_main.cpp's Display -> Landscape menu is this function's one
+ * and only caller, which is what makes it the right place to also mark
+ * the choice "explicit" (fsn-mode Task B3, color.h's landscape_explicit( )
+ * doc comment) -- landscape_set_auto( ) below is for every other caller. */
+void
+landscape_set( int index )
+{
+	NVStore *fsvrc;
+
+	landscape_apply( index );
+
+	landscape_explicit_current = TRUE;
+	fsvrc = nvs_open( CONFIG_FILE );
+	nvs_write_boolean( fsvrc, key_landscape_explicit, TRUE );
+	nvs_close( fsvrc );
+}
+
+
+/* fsn-mode Task B3: FSN mode's own auto-default (src/sdl/main.cpp), a
+ * separate entry point from landscape_set( ) purely so it can apply and
+ * persist the very same way without also claiming to be the user's
+ * explicit choice -- see color.h's doc comment on both functions. */
+void
+landscape_set_auto( int index )
+{
+	landscape_apply( index );
+}
+
+
+boolean
+landscape_explicit( void )
+{
+	return landscape_explicit_current;
+}
+
+
+/* Reads the landscape preset from ~/.fsvrc (default: "slate", i.e.
+ * today's pre-A1 look) and pushes it to the renderer. Does not call
+ * redraw( ): this runs during startup, before the first frame, the same
+ * way color_init( ) never calls it either. */
+void
+landscape_init( void )
+{
+	NVStore *fsvrc;
+	int index;
+
+	fsvrc = nvs_open( CONFIG_FILE );
+	index = nvs_read_int_token_default( fsvrc, key_landscape, tokens_landscape, default_landscape );
+	landscape_explicit_current = nvs_read_boolean_default( fsvrc, key_landscape_explicit, FALSE );
+	nvs_close( fsvrc );
+
+	landscape_current = index;
+	gpu_set_landscape( index );
 }
 
 

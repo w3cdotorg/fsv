@@ -39,14 +39,19 @@ configure_file(output: 'config.h', configuration: conf)
 
 incdir = include_directories('../lib', '.')
 
-# Headless core: filesystem scan, coloring, animation/camera math.
-# These six files (plus geometry.c once its GL calls are gone, in M3)
-# form libfsvcore and must compile with only glib-2.0/cglm/libm cflags —
+# Headless core: filesystem scan, coloring, animation/camera math, and
+# (since fsn-mode Task B1) FSV_FSN's layout. These files form libfsvcore
+# and must compile with only glib-2.0/cglm/libm cflags —
 # no GTK, no GL/epoxy. See docs/PORTING.md for the transitive-GTK traps
 # that had to be broken in window.h for this to hold.
 # (glibdep is declared in the root meson.build, before subdir('debug').)
+# geometry-fsn.c is FSV_FSN's *layout* only (fsn-mode Task B1): pure
+# math over the scanned tree, no gpu.h, which is what makes it core and
+# not frontend -- camera.c right below it reads the layout to frame the
+# landscape. Its drawing half is src/geometry-fsn-draw.c, which does call
+# gpu.h and therefore belongs to the frontends, next to geometry.c.
 fsvcore_src = files('scanfs.c', 'colexp.c', 'color.c', 'common.c',
-                    'animation.c', 'camera.c')
+                    'animation.c', 'camera.c', 'geometry-fsn.c')
 libfsvcore = static_library('fsvcore', fsvcore_src,
   dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   include_directories: incdir)
@@ -64,7 +69,8 @@ if frontend == 'gtk' and gtkdep_found and host_machine.system() != 'darwin'
   srcs = ['about.c', 'animation.c', 'callbacks.c', 'camera.c', 'colexp.c',
     'color.c', 'common.c', 'dialog.c', 'dirtree.c', 'filelist.c',
     'fontatlas.c', 'fsv.c',
-    'geometry.c', 'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c',
+    'geometry.c', 'geometry-fsn.c', 'geometry-fsn-draw.c',
+    'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c',
     'tmaptext.c',
     'viewport.c', 'window.c']
   executable('fsv', sources: [srcs, gr],

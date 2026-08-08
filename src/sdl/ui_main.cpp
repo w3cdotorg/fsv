@@ -20,9 +20,17 @@
 //   Vis    -> DiscV/MapV/TreeV == on_vis_*_activate() -> fsv_set_mode()
 //   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
 //                                 GTK's left pane has no show/hide toggle at all
+//          -> Camera Rail       == addition (fsn-mode Task A3, src/sdl/ui_rail.cpp);
+//                                 GTK's toolbar (src/window.c) has no show/hide
+//                                 toggle either
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
 //          -> Setup...        == on_color_setup_activate() -> dialog_color_setup()
 //                                 (Task 5.3, src/sdl/ui_dialogs.cpp)
+//   Display -> Landscape      == addition (fsn-mode Task A1, src/color.c's
+//                                 landscape_set()); no GTK/upstream equivalent --
+//                                 the GTK frontend's gpu_set_landscape() is a
+//                                 no-op (src/ogl-gpu-compat.c), so this menu is
+//                                 SDL-only, same as the View menu below
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
 //          -> About fsv...    == on_help_about_fsv_activate() -> about(ABOUT_BEGIN)
 //
@@ -37,6 +45,7 @@
 #include "input.h"
 #include "ui_dialogs.h"
 #include "ui_panels.h"
+#include "ui_rail.h"
 
 extern "C" {
 #include "common.h"
@@ -44,6 +53,7 @@ extern "C" {
 #include "color.h"
 #include "colexp.h"
 #include "dirtree.h"
+#include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- Display menu */
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -247,6 +257,13 @@ ui_main_draw(void)
 				app_switch_mode(FSV_MAPV);
 			if (ImGui::MenuItem("TreeV", nullptr, mode == FSV_TREEV))
 				app_switch_mode(FSV_TREEV);
+			// fsn-mode Task B1. Not present in the GTK frontend's Vis
+			// menu, which is a GtkBuilder resource (src/fsv-gresource.
+			// xml) driving callbacks.c's on_vis_*_activate() -- adding
+			// an entry there is out of this task's scope; the GTK arm
+			// only has to keep building. See docs/PORTING.md.
+			if (ImGui::MenuItem("FSN", nullptr, mode == FSV_FSN))
+				app_switch_mode(FSV_FSN);
 			ImGui::EndMenu();
 		}
 
@@ -259,6 +276,13 @@ ui_main_draw(void)
 			if (ImGui::MenuItem("Directory Tree && Files", nullptr,
 			    panels_visible))
 				ui_panels_set_visible(!panels_visible);
+			// fsn-mode Task A3: same show/hide toggle pattern as the
+			// Directory Tree panel above -- upstream fsn's control rail
+			// had no show/hide affordance either, so this is an
+			// addition, not a port.
+			const bool rail_visible = ui_rail_get_visible();
+			if (ImGui::MenuItem("Camera Rail", nullptr, rail_visible))
+				ui_rail_set_visible(!rail_visible);
 			ImGui::EndMenu();
 		}
 
@@ -276,6 +300,25 @@ ui_main_draw(void)
 			ImGui::Separator();
 			if (ImGui::MenuItem("Setup..."))
 				ui_dialogs_open_color_setup();
+			ImGui::EndMenu();
+		}
+
+		// Addition, not a port (fsn-mode Task A1): upstream fsn had this
+		// under its own "Display" menu (task-A1-brief.md's spec sources),
+		// which this port otherwise has no equivalent of. SDL-only, like
+		// the View menu above -- the GTK frontend's gpu_set_landscape()
+		// is a no-op (src/ogl-gpu-compat.c), so exposing this menu there
+		// would offer a choice that visibly does nothing.
+		if (ImGui::BeginMenu("Display")) {
+			if (ImGui::BeginMenu("Landscape")) {
+				const int current = landscape_get();
+				for (int i = 0; i < FSN_LANDSCAPE_COUNT; i++) {
+					if (ImGui::MenuItem(fsn_landscapes[i].name, nullptr,
+					    current == i))
+						landscape_set(i);
+				}
+				ImGui::EndMenu();
+			}
 			ImGui::EndMenu();
 		}
 

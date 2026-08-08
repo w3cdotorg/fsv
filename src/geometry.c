@@ -18,6 +18,7 @@
 #include "camera.h"
 #include "color.h"
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
+#include "geometry-fsn.h" /* FSV_FSN mode lives in its own file */
 #include "gpu.h"
 #include "tmaptext.h"
 
@@ -58,9 +59,22 @@ static unsigned int highlight_node_id;
 /* Sets the fill color and lighting state for the node about to be drawn:
  * its real color when rendering, or its flat id color when the renderer
  * is resolving a pick (unlit, so the id survives the fragment shader
- * untouched). */
-static void
-node_set_color(GNode *node)
+ * untouched).
+ *
+ * Exported (it was static until fsn-mode Task B1) for FSV_FSN's draw
+ * pass, src/geometry-fsn-draw.c: it needs the *same* select-pass id
+ * encoding and the same highlight boost, and highlight_node_id above is
+ * this file's private state, so a second copy could not have shared it
+ * even if drift were acceptable.
+ *
+ * NOT src/geometry-fsn.c, which is FSN's *layout* half. That file is
+ * part of libfsvcore precisely because it touches no renderer function,
+ * a property tests/test_fsn_layout.c enforces at link time by carrying
+ * no renderer stubs at all. A call to this from there would break that
+ * invariant -- the renderer boundary, not file size, is what the FSN
+ * split is drawn along. */
+void
+geometry_node_set_color(GNode *node)
 {
 	float color[4];
 	color[3] = 1.0;	 // Alpha
@@ -138,7 +152,7 @@ draw_lit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
 	}
 	else {
 		g_assert(node != NULL);
-		node_set_color(node);
+		geometry_node_set_color(node);
 	}
 
 	gpu_draw(topology, vert, vert_cnt, NULL, 0);
@@ -916,7 +930,7 @@ mapv_gldraw_node( GNode *node )
 	    16, 17, 18, 18, 17, 19   // Top face
 	};
 
-	node_set_color(node);
+	geometry_node_set_color(node);
 	gpu_draw(FSV_TRIANGLES, vertex_data, G_N_ELEMENTS(vertex_data),
 		 elements, G_N_ELEMENTS(elements));
 }
@@ -1900,7 +1914,7 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 	g_assert(s2 + (seg_count - 1) * 4 + 3 < vert_cnt);
 	g_assert(idx_len <= vert_cnt * 2);
 
-	node_set_color(dnode);
+	geometry_node_set_color(dnode);
 	gpu_draw(FSV_TRIANGLES, vert, vert_cnt, idx, idx_len);
 
 	xfree(vert);
@@ -2016,7 +2030,7 @@ treev_gldraw_leaf( GNode *node, double r0, boolean full_node )
 	    12, 13, 14, 14, 13, 15   // Left
 	};
 
-	node_set_color(node);
+	geometry_node_set_color(node);
 	gpu_draw(FSV_TRIANGLES, vside, G_N_ELEMENTS(vside), elems,
 		 G_N_ELEMENTS(elems));
 }
@@ -2663,6 +2677,13 @@ geometry_init( FsvMode mode )
 	DIR_NODE_DESC(globals.fstree)->deployment = 1.0;
 	geometry_queue_rebuild( globals.fstree );
 
+	/* Drop any previous FSN layout up front: it holds a pointer into
+	 * the tree, and both paths that reach this function invalidate it --
+	 * a mode switch overwrites the geometry parameters it lives in, and
+	 * a rescan frees the tree outright. The FSV_FSN arm below
+	 * immediately re-establishes it. */
+	fsn_geometry_free( );
+
 	switch (mode) {
 		case FSV_DISCV:
 		discv_init( );
@@ -2674,6 +2695,13 @@ geometry_init( FsvMode mode )
 
 		case FSV_TREEV:
 		treev_init( );
+		break;
+
+		case FSV_FSN:
+		/* Unlike the three above, FSN lays out from the root
+		 * *directory*, not the metanode: it has no geometry of its
+		 * own for a node that isn't a real directory */
+		fsn_geometry_init( root_dnode );
 		break;
 
 		SWITCH_FAIL
@@ -2711,6 +2739,10 @@ geometry_draw( boolean high_detail )
 		treev_draw( high_detail );
 		break;
 
+		case FSV_FSN:
+		fsn_geometry_draw( high_detail );
+		break;
+
 		SWITCH_FAIL
 	}
 }
@@ -2731,6 +2763,13 @@ geometry_camera_pan_finished( void )
 
 		case FSV_TREEV:
 		treev_camera_pan_finished( );
+		break;
+
+		case FSV_FSN:
+		/* Nothing to save. The MapV/TreeV hooks exist to record where
+		 * the node cursor came to rest so the next one can be
+		 * interpolated from there; FSN draws no cursor (Task B1's
+		 * scope is the landscape itself). */
 		break;
 
 		SWITCH_FAIL
@@ -2790,6 +2829,12 @@ geometry_should_highlight(GNode *node)
 		case FSV_TREEV:
 		return geometry_treev_is_leaf( node );
 
+		case FSV_FSN:
+		/* Every directory has a pedestal of its own on screen at all
+		 * times, expanded or not (unlike MapV, where an expanded
+		 * directory *is* its children), so all of them highlight */
+		return TRUE;
+
 		SWITCH_FAIL
 	}
 
@@ -2826,6 +2871,13 @@ draw_node( GNode *node )
 			gpu_upload_matrices();
 			treev_gldraw_platform( node, geometry_treev_platform_r0( node ) );
 		}
+		break;
+
+		case FSV_FSN:
+		/* Not implemented, like FSV_DISCV above -- this whole
+		 * function is dead code (see the __attribute__((unused)) on
+		 * it: geometry_highlight_node( ) stopped calling it when
+		 * highlighting became a per-node color boost) */
 		break;
 
 		SWITCH_FAIL
