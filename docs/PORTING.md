@@ -4289,6 +4289,218 @@ each (macOS/SDL and the Debian container's `-Dfrontend=gtk`) with the
 enlarged fixture, `scanfs` included; FSN, MapV, TreeV and DiscV
 screenshots all still render.
 
+### Task B2 verification (flight navigation — middle-drag velocity model)
+
+**Files:** `src/camera.c`/`.h` (the `camera_flight_*` family, plus
+`cancel_pan_for_manual_control()` and flight-end hooks in `camera_init()`,
+`camera_look_at_full()` and `camera_birdseye_view()`); `src/fsn-style.h`
+(the `FSN_FLIGHT_*` constants); `src/sdl/input.cpp` (the gesture, and this
+file's first per-mode branch); `src/sdl/main.cpp` (one `camera_flight_tick()`
+call in the main loop). Fold-in from B1's re-review:
+`src/geometry-fsn.c`/`.h` + `src/geometry-fsn-draw.c` (layout generation
+counter).
+
+**The velocity model.** While the middle button is held, the pointer's
+offset *from the press point* — not the delta since the last event — is a
+rate:
+
+| pointer offset | maps to | clamped at |
+|---|---|---|
+| up / down (y) | forward / backward speed along the horizontal view direction | `FSN_FLIGHT_SPEED_MAX` 640 u/s |
+| left / right (x) | yaw rate (`camera->theta`) | `FSN_FLIGHT_YAW_MAX` 72 °/s |
+| up / down (y) **with Shift** | climb / dive rate (`target.z`) | `FSN_FLIGHT_ALT_MAX` 320 u/s |
+
+Each axis is zero inside a `FSN_FLIGHT_DEAD_ZONE_PX` (6 px) dead zone and
+linear in the offset past it (`*_SCALE`), so full deflection is reached
+~160 px out — a comfortable drag inside any viewport. Shift *replaces*
+forward motion rather than adding to it, so the gesture is a pure
+ascent/descent, and it is read live on every motion event rather than
+latched at the press, so it can be tapped mid-flight.
+
+`camera->phi` is deliberately untouched: fsn's flight was planar, the
+pitch is part of the viewpoint rather than part of the flying, and there
+is no pitch control (YAGNI — no path-following or wire-riding either).
+Altitude has a floor at the ground plane and no ceiling: flying up is
+self-limiting (the whole landscape comes into frame), and a ceiling would
+have to be recomputed on every rescan.
+
+FSN's camera target is MapV's Cartesian `XYZvec` (B1's storage reuse), so
+"position" is `MAPV_CAMERA(camera)->target` and "heading" is
+`camera->theta`. Forward on the ground is `-(cos θ, sin θ)`: the camera
+sits at `target + distance·(cos θ cos φ, sin θ cos φ, sin φ)` and looks
+back down that vector. At B1's initial `FSN_CAMERA_THETA` of 270° that is
+`+y`, the direction the tree grows — pushing forward flies *into* the
+tree, which is the point of the mode.
+
+**Why a per-tick update and not the morph queue.** A morph has a start
+value, an end value and a duration. Flight has a velocity and runs until
+the user lets go. Expressing it as a morph would mean either re-arming a
+fresh one-frame morph every frame (a `malloc`, a queue insert, a queue
+removal and an end callback per frame, to interpolate between two values
+one frame apart) or morphing toward a fictitious far-away target and
+breaking it on release — which would make the pointer's offset control
+*acceleration*, since the morph's own easing would still be shaping the
+motion. So the rates live in `camera.c` and `src/sdl/main.cpp`'s loop
+calls `camera_flight_tick()` once per iteration, next to
+`fsv_animation_tick()`.
+
+The animation subsystem still drives the drawing: every tick that
+actually moves the camera calls `redraw()`, which sets
+`animation_active`, which is what keeps frames flowing. A tick that finds
+all three rates at zero (button held, pointer inside the dead zone)
+returns *without* `redraw()` — so holding still costs exactly what not
+flying costs. Measured: 122 fps while moving, 60 fps (the loop's idle
+`SDL_WaitEventTimeout(…, 16)` path) inside the dead zone and after
+release. `run_record_mode()`'s loop deliberately does *not* get the call:
+it never runs `input_handle_event()`, so no flight can exist there.
+
+**A latent bug this task had to fix first.** `camera_pan_break()` is not
+enough for a caller that simply *stops*: `morph_break()` drops a morph
+record without calling its `end_cb`, so the master pan morph's
+`pan_end_cb()`/`post_pan_end()` never runs — and that pair is what clears
+`camera_currently_moving` and hands the UI back
+(`window_set_access(TRUE)`). Every pre-existing caller immediately armed a
+replacement pan, master morph included, so none of them noticed. Flight is
+the first that doesn't, so it goes through
+`cancel_pan_for_manual_control()`, which does that bookkeeping itself.
+`geometry_camera_pan_finished()` is deliberately *not* called there: it
+records where the node cursor came to rest, and an interrupted pan came to
+rest nowhere.
+
+**`window_set_access` stays TRUE during flight**, matching
+`camera_dolly()`/`camera_revolve()`, which are the GTK-era precedent for
+"the user is steering". That call means "an animation owns the camera,
+keep the user off the controls"; flight is the opposite. What flight *does*
+mirror from those two is `camera->manual_control = TRUE`, so `colexp.c`
+cannot re-aim the camera underneath the user.
+
+**Interaction matrix.**
+
+| Event | Behavior |
+|---|---|
+| middle press during a pan | `camera_flight_begin()` cancels the pan (see above) and takes over; pose is continuous |
+| `camera_look_at_full()` during a flight | calls `camera_flight_end()` first, then pans normally |
+| `camera_birdseye_view()` during a flight | same — doubly so going up, since the saved "where the user was" pose would otherwise keep drifting after it was saved |
+| `camera_init()` (mode switch, Reset, rescan) | ends the flight |
+| Escape during a flight | stops the flight **and nothing else on that press** — the check is before the collapse logic, so the keystroke that pulls you out of a flight does not also close the directory you flew into |
+| `input_reset()` (rescan) | ends the flight, alongside the existing capture-grab drop |
+| middle drag in DiscV/MapV/TreeV | dolly, unchanged |
+
+**Per-mode gesture dispatch, the pattern.** `viewport.c`'s gestures were
+all mode-agnostic — they called `camera.c`'s mode-agnostic entry points
+and let *its* per-mode switches decide what they meant. Flight is the
+first gesture that is not the same gesture in every mode, so the branch
+has to be in `input.cpp`, where the button is known.
+`middle_drag_is_flight()` is a `switch` with every enumerator spelled out
+and **no `default:`**, deliberately: `-Wswitch` then makes the next member
+added to `FsvMode` a compile error in this file rather than a silently
+inherited behavior — the same discipline `camera.c`'s `SWITCH_FAIL` arms
+enforce at runtime, done at compile time because this one has a
+meaningful answer for every mode.
+
+`input.cpp` keeps its own `g_flying` flag rather than asking
+`camera_flight_active()`. The two can legitimately disagree for the rest
+of a drag: `camera.c` ends the flight on its own when something else
+claims the camera, and the button may still be physically held — the flag
+is what stops the motion handler resurrecting it on the next event.
+
+**Constants: how they were sized.** Offsets are in **framebuffer pixels**,
+not logical points, because `input.cpp` works in pixel space throughout
+and its two existing gestures already do. The cost is that a given
+physical drag flies twice as fast on a 2× display as on a 1× one — exactly
+as it already dollies twice as fast today. Worth revisiting for all three
+gestures at once, not for this one alone; recorded here rather than
+quietly fixed for flight only.
+
+This repo's own `src/` tree lays out to **1256 × 2224** world units
+(`fsn_layout_extents()`, logged during the run below). At the clamped
+640 u/s that is 3.5 s along the depth axis and 4.0 s across the diagonal —
+inside the brief's 3–5 s target.
+
+**Verification.**
+
+1. **Both arms build.** macOS/SDL (`ninja -C builddir`, clean) and the
+   Debian bookworm container's `-Dfrontend=gtk` (53/53 targets, clean).
+   `meson test` **4/4 on both** (nvstore, scanfs, color_persistence,
+   fsn_layout). `camera.c` is shared, so the GTK build is the real guard
+   here — the flight entry points link there too, they just have no
+   gesture wired to them.
+2. **Headed synthetic flight** (temporary, never-committed `--record`-style
+   harness in the main loop, gated on an env var, same throwaway convention
+   Tasks A2/A3 used; `SDL_PushEvent()` of real
+   `SDL_EVENT_MOUSE_BUTTON_DOWN`/`_MOTION`/`_UP`/`KEY_DOWN` events so they
+   go through `ImGui_ImplSDL3_ProcessEvent()` and the real
+   `input_handle_event()` path, `io.WantCaptureMouse` gate included —
+   logged as 0 at the press). On `fsv src --fsn`, press at (640, 576),
+   camera pose logged every frame:
+
+   | phase | pointer offset | measured | expected |
+   |---|---|---|---|
+   | forward, full | dy = −200 px | **640.26 u/s**, Δz = 0, Δθ = 0 | clamped at `FSN_FLIGHT_SPEED_MAX` = 640 |
+   | forward, small | dy = −20 px | **55.97 u/s** | `(20 − 6) × 4` = 56 — linear, unclamped |
+   | dead zone | dy = −2 px | **0.00 u/s**, and 60 fps not 122 | inside the 6 px dead zone; no frames requested |
+   | yaw right | dx = +200 px | **−72.05 °/s**, ΔXY = 0 | clamped at `FSN_FLIGHT_YAW_MAX`, negative = turning right |
+   | Shift + forward | dy = −200 px | **+318.99 u/s in z**, ΔXY = 0 | clamped at `FSN_FLIGHT_ALT_MAX` = 320, no forward motion |
+   | release | — | ΔXY = Δz = Δθ = 0 within one tick | motion stops |
+
+   Screenshot pair `b2_flight_start.png` / `b2_flight_end.png` (in the
+   task's `screenshots/` directory): the start frame is B1's familiar
+   head-on view of the `src` pedestal with `sdl`/`xmaps` one generation
+   back; the end frame, after ~4 s of scripted flight, has the viewer past
+   and above the two children looking back down two long wires at the root
+   pedestal now in the bottom-right corner — the landscape genuinely
+   traversed, turned and climbed.
+3. **Interaction tests**, same harness:
+   - *Press during the intro pan* — before: `flying=0 moving=1 access=0`,
+     target y 1097.23; immediately after: `flying=1 moving=0 access=1`,
+     target y 1096.35. The pan is broken, the access flag is handed back
+     (proving `cancel_pan_for_manual_control()` fires), and the pose is
+     continuous — no jump to the pan's end value, i.e. no morph corruption.
+   - *Escape during a flight* — `flying=1` → `flying=0`, and
+     `dirtree_entry_expanded(current_node)` reads **1 both before and
+     after**: the flight stopped and the directory did *not* collapse. The
+     same script in `--mapv` (no flight) shows Escape collapsing 1 → 0, so
+     the pre-existing behavior is intact where it should be.
+   - *`camera_look_at()` during a flight* — `flying=1 moving=0 access=1`
+     → in the same call `flying=0 moving=1 access=0`, and the pose then
+     morphs normally over the following second.
+   - *MapV regression* — the identical script under `--mapv` logs
+     `flying=0` throughout, no target motion at all, and `camera->distance`
+     changing on each motion event: still a dolly.
+4. **Idle CPU unchanged.** Process CPU time over a 10 s idle window in FSN
+   mode, measured on this branch and on the immediately preceding commit
+   with the same binary path: **0.11 s (new) vs 0.12 s (old)** — identical
+   within noise, as expected from `camera_flight_tick()`'s single boolean
+   test. Frame pacing during flight is reported in §2 above (122 fps
+   moving / 60 fps parked).
+
+**Fold-in from B1's re-review: the path-text cache's pointer identity.**
+`geometry-fsn-draw.c` cached the ground label keyed on the `GNode *` it
+was composed from, and `fsn_geometry_draw()` dropped the cache when the
+layout root changed. Both are pointer comparisons, and GLib's slice
+allocator reuses freed node addresses aggressively — so after a Change
+Root or a Rescan a stale key can compare equal to a live node from an
+entirely different tree, and the label would keep showing the old path.
+B1's own comment dismissed this as not worth a generation counter; that
+was wrong, because the residual it described (a rescan of the *same*
+directory, which composes the same string anyway) is not the only case.
+
+`fsn_geometry_init()` now bumps a counter exposed as
+`fsn_layout_generation()`, and the cache key is the `(node, generation)`
+pair. The root-change check is kept as well — it drops the allocation
+promptly on a mode switch — but it is explicitly no longer the
+load-bearing one, and the comment says so.
+
+Verified with a temporary draw/miss counter and a scripted
+`app_request_rescan()`: **725 high-detail draws, 2 misses** (one at
+startup, one at the rescan). To prove the generation is doing the work
+rather than riding on the pointer checks, both the root-change
+invalidation *and* the node-pointer half of the key were then
+short-circuited to `0` and the run repeated: still exactly **2 misses**,
+the second logged with the key still holding the *old* node pointer while
+`gen=2 keygen=1`, followed by 482 clean hits. Both probes reverted before
+the commit.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
