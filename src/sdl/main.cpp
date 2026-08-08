@@ -204,6 +204,28 @@ app_switch_mode(int mode_int)
 static bool
 load_filesystem(const char *dir, FsvMode mode)
 {
+	// Everything that outlives a frame and points into the tree
+	// scanfs() is about to free has to be dropped first. scanfs() does
+	// the core's own share (morph_break_all() + scheduled_events_clear(),
+	// which is shared with the GTK frontend); these two are this
+	// frontend's:
+	//
+	//   - camera_pan_break() is strictly belt-and-suspenders, since
+	//     morph_break_all() inside scanfs() would take the same camera
+	//     morphs out a moment later. It runs anyway because it is the
+	//     camera module's own documented "stop panning" entry point, so
+	//     a future change to either side keeps the camera consistent
+	//     without depending on the core's teardown order.
+	//     morph_break() is silent on a variable that isn't being
+	//     morphed, so the later blanket purge finds nothing left to
+	//     free here and there is no double-free either way.
+	//     Deliberately above the FSV_NONE assignment: camera_pan_break()
+	//     switches on globals.fsv_mode and SWITCH_FAILs on FSV_NONE.
+	//   - input_reset() drops input.cpp's indicated node, pending
+	//     context-menu request and mouse grab -- see input.h.
+	camera_pan_break();
+	input_reset();
+
 	// Before scanning, not after: the scan renders progress frames (see
 	// gui_update()), and FSV_NONE is what tells draw_scene() there is no
 	// geometry to walk yet. globals.fsv_mode is zero-initialized, which

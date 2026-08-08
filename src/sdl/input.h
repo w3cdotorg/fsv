@@ -25,6 +25,15 @@
 // is the complete port of that mechanism.
 void input_handle_event(const SDL_Event *ev);
 
+// Drops every piece of state this file carries across events: the
+// indicated (highlighted) node, any pending context-menu request, and the
+// SDL_CaptureMouse() grab plus its drag origin. Call before scanfs() runs
+// -- i.e. from main.cpp's load_filesystem(), alongside the core's own
+// invalidation -- because the first two are GNode * into the filesystem
+// tree the scan is about to free. Without it, a BUTTON_UP arriving after
+// a Rescan hands the freed node straight to camera_look_at().
+void input_reset(void);
+
 // ---- Context-menu seam (Task 5.1) --------------------------------------
 //
 // input.cpp is the one place that already knows "the user right-clicked a

@@ -375,6 +375,31 @@ input_handle_event(const SDL_Event *ev)
 	}
 }
 
+void
+input_reset(void)
+{
+	// The three GNode * this file can hold across frames. All of them
+	// point into the tree scanfs() is about to destroy; nothing here
+	// dereferences them on the way out, so this is a pure "forget".
+	g_indicated_node = NULL;
+	g_context_menu_request.pending = false;
+	g_context_menu_request.node = nullptr;
+
+	// Drag/capture state. A scan blocks the main thread for as long as
+	// it takes (gui_update() pumps events, but input_handle_event() is
+	// not on that path), so any button held when the scan started is
+	// very likely released by the time it finishes -- and the release
+	// event, if it arrives at all, arrives with no matching press.
+	// Dropping the grab here keeps SDL_CaptureMouse() balanced rather
+	// than leaving the pointer captured for the rest of the session.
+	if (g_mouse_captured)
+		SDL_CaptureMouse(false);
+	g_mouse_captured = false;
+	g_capture_button = 0;
+	g_prev_x = 0.0;
+	g_prev_y = 0.0;
+}
+
 ContextMenuRequest
 input_take_context_menu_request(void)
 {
