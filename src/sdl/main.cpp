@@ -947,6 +947,12 @@ main(int argc, char **argv)
 	// equivalent of.
 	color_init();
 
+	// Same nvstore-backed pattern as color_init() just above, for the
+	// fsn-mode landscape preset (Task A1): reads ~/.fsvrc's `landscape`
+	// key (default "slate", today's pre-A1 look) and pushes it to
+	// gpu_set_landscape() before the first frame draws.
+	landscape_init();
+
 	// Before the scan, not after: scanning a large tree takes minutes,
 	// and gui_update() paints its progress overlay through these
 	// backends the whole time. --screenshot skips them (and so renders

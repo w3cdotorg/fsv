@@ -351,6 +351,11 @@ window_init(GtkApplication *app, gpointer user_data)
 	gtk_widget_show( main_window_w );
 
 	color_init();
+	/* fsn-mode Task A1: reads ~/.fsvrc's `landscape` key so it stays in
+	 * sync with the SDL build's choice, even though this frontend's
+	 * gpu_set_landscape() (src/ogl-gpu-compat.c) is a no-op and the GTK
+	 * window always keeps its pre-A1 flat clear -- see docs/PORTING.md. */
+	landscape_init();
 	fsv_load(fid->root_dir);
 	xfree(fid->root_dir);
 }

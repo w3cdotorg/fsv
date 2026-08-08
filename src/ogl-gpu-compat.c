@@ -104,6 +104,25 @@ gpu_set_line_width( float width )
 }
 
 
+/* No-op: the GTK frontend keeps its pre-fsn-mode flat clear (ogl.c's own
+ * glClearColor(), untouched by Task A1) regardless of which landscape
+ * preset is stored in ~/.fsvrc. Porting the sky/ground quads to GL would
+ * mean either a second small shader program (this frontend's programs
+ * are GLSL, not the SDL_GPU/gpu.cpp path's compiled MSL/SPIR-V) or
+ * reusing the existing lit/textured program with lighting forced off --
+ * both real work for a frontend the fsn-mode plan doesn't otherwise
+ * touch. src/color.c still reads/writes the `landscape` nvstore key on
+ * this frontend too (so a config file shared with the SDL build round-
+ * trips the user's choice unchanged); this function is the only place
+ * that choice is silently dropped. See docs/PORTING.md's "fsn mode"
+ * section. */
+void
+gpu_set_landscape( int index )
+{
+	(void)index;
+}
+
+
 FsvRenderMode
 gpu_render_mode( void )
 {

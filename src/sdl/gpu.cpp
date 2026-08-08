@@ -81,6 +81,8 @@ extern "C" {
 #include "tmaptext.h" /* text_upload_mvp( ) -- see gpu_upload_matrices() */
 }
 
+#include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- see draw_landscape() */
+
 // Byte arrays for shaders/compiled/{scene,text}.{vert,frag}.{msl,spv},
 // generated at build time by tools/embed-shaders.py.
 #include "shaders_embedded.h"
@@ -222,6 +224,12 @@ SceneFragUBO g_frag_ubo;
 
 FsvDepthTest g_depth_test;
 FsvRenderMode g_render_mode;
+
+// Current landscape preset (fsn-mode Task A1): an index into
+// fsn_landscapes[] (src/fsn-style.h), or FSN_LANDSCAPE_OFF. Set by
+// gpu_set_landscape(), consumed once per frame by gpu_scene_begin()'s
+// call to draw_landscape() below.
+int g_landscape_index = FSN_LANDSCAPE_OFF;
 
 // The base modelview matrix: right-handed, +z straight up, camera at the
 // origin looking down -x. Private, unlike gl.base_modelview in ogl.h --
@@ -1133,6 +1141,171 @@ gpu_render_mode(void)
 }
 
 void
+gpu_set_landscape(int index)
+{
+	if (index < 0 || index >= FSN_LANDSCAPE_COUNT)
+		index = FSN_LANDSCAPE_OFF; // defensive fallback -- an
+		    // out-of-range index (a stale/hand-edited ~/.fsvrc token
+		    // nvstore couldn't resolve, or a future caller's bug) draws
+		    // nothing rather than reading fsn_landscapes[] out of bounds.
+	g_landscape_index = index;
+}
+
+// ---- Landscape (fsn-mode Task A1): sky gradient + ground plane --------
+//
+// Drawn by gpu_scene_begin(), before main.cpp's geometry_draw() call, so
+// ordinary opaque z-buffering (every real gpu_draw() call already uses
+// FSV_DEPTH_LESS with depth write on) hides these behind the actual
+// scene wherever the two overlap. Two deliberate departures from the
+// task brief's own sketch, both worth explaining since nothing else in
+// the codebase does:
+//
+// 1. "vertex-colored gradient quad" isn't expressible through gpu_draw():
+//    FsvVertex is {pos, normal} only, and scene.frag reads its fill
+//    color from a *uniform* (gpu_set_color()), not a vertex attribute --
+//    there is no per-vertex color channel anywhere in this contract.
+//    Adding one would mean a second vertex format, a dedicated pipeline
+//    and a new compiled shader pair (MSL + SPIR-V, Task 3.1's whole
+//    offline toolchain) just for a two-triangle gradient. Instead the
+//    sky is SKY_BANDS flat-colored horizontal strips, each one a
+//    completely ordinary gpu_draw() call with a CPU-lerped color between
+//    sky_top and sky_horizon -- the "smallest correct choice" the brief
+//    itself invites for exactly this situation, at the cost of an
+//    (imperceptible, at 32 bands) banded gradient instead of a smooth
+//    one.
+//
+// 2. "depth-write off" isn't a per-draw knob either -- pipeline_for()
+//    always sets enable_depth_write = true, for every (primitive,
+//    depth-test, target) combination. Rather than add a pipeline
+//    variant, the sky bands are drawn at SKY_NDC_DEPTH, just under the
+//    1.0 far value gpu_scene_end() clears the depth buffer to, through
+//    an *identity* projection/modelview (so the quad's object-space x/y
+//    coordinates land directly in NDC -- a screen-space quad). Every
+//    real draw that follows is nearer than 0.999 in any normal camera
+//    configuration and FSV_DEPTH_LESS (every pipeline's compare op here)
+//    passes and overwrites whenever the new fragment is nearer -- so the
+//    sky depth-writes but never occludes anything, without a second
+//    pipeline.
+//
+// The ground, unlike the sky, is real 3D geometry drawn with the actual
+// camera matrices (restored right after the sky bands): a single large
+// quad at world z = GROUND_Z_OFFSET, participating in ordinary depth
+// test/write like any other opaque draw, so file/folder boxes correctly
+// draw over it and it correctly occludes whatever's behind it.
+
+namespace {
+
+// Enough bands that a screenshot reads as a smooth gradient (see
+// task-A1-report.md); each band costs one more gpu_draw() call, which is
+// trivial next to a typical frame's node count.
+constexpr int SKY_BANDS = 32;
+
+// Just under NDC z=1.0 (this API's zero-to-one depth range -- see
+// glm_frustum_rh_zo() in setup_projection_matrix()), which is exactly
+// what gpu_scene_end() clears the depth buffer to. Strictly less than
+// the clear value so FSV_DEPTH_LESS reliably passes for the sky's own
+// draw (a tie would be backend/driver-defined); still far enough out
+// that no real scene geometry should ever legitimately sit past it.
+constexpr float SKY_NDC_DEPTH = 0.999f;
+
+// Half-extent of the ground quad, in the same world units as MapV's own
+// node dimensions (mapv_dir_height = 384.0 etc, src/geometry.c). Large
+// enough that its projected silhouette reaches the horizon at any camera
+// distance this app allows: far_clip tops out at 64x the camera's own
+// distance from its target (camera.h's NEAR_TO_DISTANCE_RATIO *
+// FAR_TO_NEAR_RATIO = 0.5 * 128), so whenever this plane's far corners
+// *are* clipped, perspective has already shrunk them to nothing on
+// screen well before that distance -- clipping never shows up as a
+// visibly "too small" ground.
+constexpr float GROUND_HALF_EXTENT = 100000.0f;
+
+// geometry.c's MapV layout puts the *bottom* of the root node's box at
+// z=0 and stacks every directory upward from there (see
+// geometry_mapv_node_z0(), src/geometry.c); world "up" is +z here (see
+// g_base_modelview's own comment above). A ground quad at exactly z=0
+// would sit in the same plane as that bottom face -- nudging it down by
+// GROUND_Z_OFFSET avoids a z-fight with MapV's own base without being
+// visually distinguishable at any of MapV's scales (mapv_leaf_height is
+// 128; 6 units is under 5% of that). This is one shared ground plane for
+// every mode for now -- DiscV/TreeV have no equally documented z=0
+// "floor" of their own, and Task B3 is what scopes the whole landscape
+// to FSV_FSN specifically; until then this is a global toggle overlaid
+// on whichever mode is active (see task-A1-brief.md's own note on this).
+// Also assumes the camera never dips below the ground plane and looks
+// up through it: the ground's front face is wound to face +z (the
+// direction every one of this app's camera positions actually views it
+// from -- birdseye and oblique alike), so from below it would simply be
+// back-face culled, which is arguably the more correct behavior for an
+// opaque plane with no modeled thickness anyway.
+constexpr float GROUND_Z_OFFSET = -6.0f;
+
+} // namespace
+
+static void
+draw_landscape(int index)
+{
+	if (index < 0 || index >= FSN_LANDSCAPE_COUNT)
+		return;
+	const FsnLandscape &land = fsn_landscapes[index];
+
+	// ---- Sky: SKY_BANDS horizontal strips, screen-space quads ---------
+	mat4 saved_projection, saved_modelview;
+	glm_mat4_copy(gpu_mat.projection, saved_projection);
+	glm_mat4_copy(gpu_mat.modelview, saved_modelview);
+
+	glm_mat4_identity(gpu_mat.projection);
+	glm_mat4_identity(gpu_mat.modelview);
+	gpu_upload_matrices();
+
+	gpu_set_lighting(0);
+	for (int i = 0; i < SKY_BANDS; i++) {
+		const float t0 = (float)i / (float)SKY_BANDS;       // top of band
+		const float t1 = (float)(i + 1) / (float)SKY_BANDS; // bottom of band
+		// NDC y+ is up (see this file's "Clip space" note at the top),
+		// so t=0 (sky_top) is the top of the screen (y=+1).
+		const float y_top = 1.0f - 2.0f * t0;
+		const float y_bot = 1.0f - 2.0f * t1;
+
+		float c[3];
+		for (int k = 0; k < 3; k++)
+			c[k] = land.sky_top[k] +
+			    t0 * (land.sky_horizon[k] - land.sky_top[k]);
+		gpu_set_color(c[0], c[1], c[2], 1.0f);
+
+		// Counter-clockwise winding in NDC (Y-up) -- pipeline_for()
+		// culls back faces (SDL_GPU_CULLMODE_BACK, front = CCW), same as
+		// the GL frontend's defaults (see that function's own comment).
+		const FsvVertex verts[4] = {
+			{ { -1.0f, y_bot, SKY_NDC_DEPTH }, { 0.f, 0.f, 0.f } }, // bottom-left
+			{ {  1.0f, y_bot, SKY_NDC_DEPTH }, { 0.f, 0.f, 0.f } }, // bottom-right
+			{ {  1.0f, y_top, SKY_NDC_DEPTH }, { 0.f, 0.f, 0.f } }, // top-right
+			{ { -1.0f, y_top, SKY_NDC_DEPTH }, { 0.f, 0.f, 0.f } }, // top-left
+		};
+		static const unsigned int idx[6] = { 0, 1, 2, 0, 2, 3 };
+		gpu_draw(FSV_TRIANGLES, verts, 4, idx, 6);
+	}
+
+	// ---- Ground: one large quad at world z = GROUND_Z_OFFSET ----------
+	glm_mat4_copy(saved_projection, gpu_mat.projection);
+	glm_mat4_copy(saved_modelview, gpu_mat.modelview);
+	gpu_upload_matrices();
+
+	gpu_set_color(land.ground[0], land.ground[1], land.ground[2], 1.0f);
+	// gpu_set_lighting(0) from the sky loop above is still in effect --
+	// a flat plane would light uniformly across its single normal anyway.
+	const float e = GROUND_HALF_EXTENT;
+	const float z = GROUND_Z_OFFSET;
+	const FsvVertex ground_verts[4] = {
+		{ { -e, -e, z }, { 0.f, 0.f, 1.f } },
+		{ {  e, -e, z }, { 0.f, 0.f, 1.f } },
+		{ {  e,  e, z }, { 0.f, 0.f, 1.f } },
+		{ { -e,  e, z }, { 0.f, 0.f, 1.f } },
+	};
+	static const unsigned int ground_idx[6] = { 0, 1, 2, 0, 2, 3 };
+	gpu_draw(FSV_TRIANGLES, ground_verts, 4, ground_idx, 6);
+}
+
+void
 gpu_init(void *sdl_window)
 {
 	g_window = (SDL_Window *)sdl_window;
@@ -1372,6 +1545,17 @@ gpu_scene_begin(void)
 	g_text_draws.clear();
 	g_depth_test = FSV_DEPTH_LESS;
 	g_recording = true;
+
+	// fsn-mode Task A1: sky gradient + ground plane, drawn before the
+	// caller's geometry_draw() so they sit behind the real scene (see
+	// "Landscape" above draw_landscape()'s own definition). g_render_mode
+	// is already correct here -- gpu_pick() sets FSV_RENDER_SELECT
+	// *before* calling gpu_scene_begin() -- so this is where the select
+	// pass is excluded: the sky and ground must not be pickable (a click
+	// on empty sky has to resolve to node id 0, matching an empty
+	// background today), and neither one paints an id color at all.
+	if (g_render_mode == FSV_RENDER_NORMAL)
+		draw_landscape(g_landscape_index);
 }
 
 void

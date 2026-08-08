@@ -23,6 +23,11 @@
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
 //          -> Setup...        == on_color_setup_activate() -> dialog_color_setup()
 //                                 (Task 5.3, src/sdl/ui_dialogs.cpp)
+//   Display -> Landscape      == addition (fsn-mode Task A1, src/color.c's
+//                                 landscape_set()); no GTK/upstream equivalent --
+//                                 the GTK frontend's gpu_set_landscape() is a
+//                                 no-op (src/ogl-gpu-compat.c), so this menu is
+//                                 SDL-only, same as the View menu below
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
 //          -> About fsv...    == on_help_about_fsv_activate() -> about(ABOUT_BEGIN)
 //
@@ -44,6 +49,7 @@ extern "C" {
 #include "color.h"
 #include "colexp.h"
 #include "dirtree.h"
+#include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- Display menu */
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -276,6 +282,25 @@ ui_main_draw(void)
 			ImGui::Separator();
 			if (ImGui::MenuItem("Setup..."))
 				ui_dialogs_open_color_setup();
+			ImGui::EndMenu();
+		}
+
+		// Addition, not a port (fsn-mode Task A1): upstream fsn had this
+		// under its own "Display" menu (task-A1-brief.md's spec sources),
+		// which this port otherwise has no equivalent of. SDL-only, like
+		// the View menu above -- the GTK frontend's gpu_set_landscape()
+		// is a no-op (src/ogl-gpu-compat.c), so exposing this menu there
+		// would offer a choice that visibly does nothing.
+		if (ImGui::BeginMenu("Display")) {
+			if (ImGui::BeginMenu("Landscape")) {
+				const int current = landscape_get();
+				for (int i = 0; i < FSN_LANDSCAPE_COUNT; i++) {
+					if (ImGui::MenuItem(fsn_landscapes[i].name, nullptr,
+					    current == i))
+						landscape_set(i);
+				}
+				ImGui::EndMenu();
+			}
 			ImGui::EndMenu();
 		}
 

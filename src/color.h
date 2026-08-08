@@ -81,5 +81,16 @@ void color_set_config( struct ColorConfig *new_ccfg, ColorMode mode );
 void color_write_config( void );
 void color_init( void );
 
+/* Landscape (fsn-mode Task A1: sky/ground presets). Lives here rather
+ * than in a new file because it is the exact same shape as the color
+ * config above -- an nvstore-backed setting read once at startup and
+ * written immediately on change -- and reuses the same open/close-per-
+ * call pattern rather than sharing an NVStore handle across modules. See
+ * src/fsn-style.h for the preset table (FsnLandscape, fsn_landscapes[])
+ * this indexes into. */
+int landscape_get( void );
+void landscape_set( int index );
+void landscape_init( void );
+
 
 /* end color.h */

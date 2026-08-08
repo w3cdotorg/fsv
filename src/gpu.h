@@ -164,6 +164,26 @@ void gpu_set_depth_test(FsvDepthTest test);
  * pixel wide and has no equivalent knob — see docs/PORTING.md. */
 void gpu_set_line_width(float width);
 
+/**** Landscape (fsn-mode Task A1: sky/ground presets) ****************/
+
+/* Selects a landscape preset by index into fsn_landscapes[] (src/
+ * fsn-style.h), or FSN_LANDSCAPE_OFF (-1) to disable landscape drawing
+ * entirely (today's plain flat clear, unchanged from Task 2.2). The
+ * caller (src/color.c's landscape_set()/landscape_init()) is also the
+ * one that persists the choice via nvstore, by preset name rather than
+ * this raw index -- see fsn-style.h's FsnLandscape::name.
+ *
+ *   SDL/Metal (src/sdl/gpu.cpp): draws a screen-filling sky gradient and
+ *   a large ground quad in the scene pass, before geometry_draw()'s own
+ *   draws, and skips both entirely in FSV_RENDER_SELECT mode -- the sky
+ *   and ground are not pickable, so clicking on either must resolve to
+ *   node id 0 ("nothing there"), exactly like today's empty background.
+ *
+ *   GTK/OpenGL (src/ogl-gpu-compat.c): no-op. The GTK frontend keeps its
+ *   pre-A1 flat clear regardless of the stored preference -- see
+ *   docs/PORTING.md's "fsn mode" section for why. */
+void gpu_set_landscape(int index);
+
 /**** Camera matrices ****************/
 
 /* The renderer-agnostic counterpart of FsvGlState.projection /

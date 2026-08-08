@@ -18,7 +18,10 @@
 
 #include "animation.h" /* redraw( ) */
 #include "geometry.h"
+#include "gpu.h" /* gpu_set_landscape( ) */
 #include "window.h"
+
+#include "fsn-style.h" /* FsnLandscape, fsn_landscapes[], FSN_LANDSCAPE_COUNT */
 
 
 /* Some fnmatch headers don't define FNM_FILE_NAME */
@@ -102,11 +105,35 @@ static const char key_wpattern_group_color[] = "color";
 static const char key_wpattern_group_wpattern[] = "wp";
 static const char key_wpattern_default_color[] = "defaultcolor";
 
+/* Landscape (fsn-mode Task A1). One int-token key, same shape as
+ * key_color_mode above -- tokens_landscape[]'s order must match
+ * src/fsn-style.h's fsn_landscapes[] order (index-for-index), same
+ * hand-kept-in-sync convention tokens_color_mode already relies on for
+ * ColorMode. */
+static const char key_landscape[] = "landscape";
+static const char *tokens_landscape[] = {
+	"classic",
+	"night",
+	"slate",
+	NULL
+};
+/* "slate" (index 2): matches today's pre-A1 flat clear -- see
+ * fsn-style.h -- so an existing ~/.fsvrc with no `landscape` key at all
+ * (every install before this task) keeps its exact current look. */
+static const int default_landscape = 2;
+
 /* Color configuration */
 static struct ColorConfig color_config;
 
 /* Color assignment mode */
 static ColorMode color_mode;
+
+/* Current landscape preset (index into fsn_landscapes[], or
+ * FSN_LANDSCAPE_OFF). Mirrors what was last handed to
+ * gpu_set_landscape() -- kept here too (rather than read back from
+ * gpu.h, which has no getter) purely so landscape_write_config() and
+ * src/sdl/ui_main.cpp's menu have something to read without adding one. */
+static int landscape_current = -1;
 
 /* Colors for spectrum */
 static RGBcolor spectrum_underflow_color;
@@ -603,6 +630,60 @@ color_init( void )
 
 	/* Generate spectrum color table */
 	generate_spectrum_colors( );
+}
+
+
+/* Returns the current landscape preset (index into fsn_landscapes[],
+ * src/fsn-style.h), for src/sdl/ui_main.cpp's Display->Landscape menu to
+ * mark the active radio item -- same shape as color_get_mode( ) above. */
+int
+landscape_get( void )
+{
+	return landscape_current;
+}
+
+
+/* Changes the current landscape preset, pushes it to the renderer, and
+ * persists it immediately (nvstore key "landscape", by name -- see
+ * tokens_landscape[] above), mirroring color_set_mode( )'s "change,
+ * apply, save" shape rather than color_write_config( )'s separate
+ * apply-then-save-on-demand one: a menu click is a single, immediate
+ * action with no intervening dialog to Cancel out of. */
+void
+landscape_set( int index )
+{
+	NVStore *fsvrc;
+
+	if (index < 0 || index >= FSN_LANDSCAPE_COUNT)
+		index = default_landscape;
+
+	landscape_current = index;
+	gpu_set_landscape( index );
+
+	fsvrc = nvs_open( CONFIG_FILE );
+	nvs_write_int_token( fsvrc, key_landscape, index, tokens_landscape );
+	nvs_close( fsvrc );
+
+	redraw( );
+}
+
+
+/* Reads the landscape preset from ~/.fsvrc (default: "slate", i.e.
+ * today's pre-A1 look) and pushes it to the renderer. Does not call
+ * redraw( ): this runs during startup, before the first frame, the same
+ * way color_init( ) never calls it either. */
+void
+landscape_init( void )
+{
+	NVStore *fsvrc;
+	int index;
+
+	fsvrc = nvs_open( CONFIG_FILE );
+	index = nvs_read_int_token_default( fsvrc, key_landscape, tokens_landscape, default_landscape );
+	nvs_close( fsvrc );
+
+	landscape_current = index;
+	gpu_set_landscape( index );
 }
 
 
