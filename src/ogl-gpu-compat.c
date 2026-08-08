@@ -90,6 +90,19 @@ gpu_set_depth_test( FsvDepthTest test )
 		glDepthFunc( GL_GREATER );
 		break;
 
+		/* Unreachable on this frontend today: only fsn-mode's
+		 * draw_landscape() (src/sdl/gpu.cpp) ever passes this, and this
+		 * frontend's gpu_set_landscape() below is a no-op that never
+		 * calls it. Mapped correctly anyway (GL_ALWAYS -- glDepthMask()
+		 * is never toggled by this file at all, matching every other
+		 * depth test here, so "no write" isn't expressible without a
+		 * broader change this frontend doesn't need yet) so a future
+		 * GTK landscape implementation doesn't inherit a silent GL_LESS
+		 * mismatch from this switch's old default. */
+		case FSV_DEPTH_ALWAYS_NOWRITE:
+		glDepthFunc( GL_ALWAYS );
+		break;
+
 		default:
 		glDepthFunc( GL_LESS );
 		break;

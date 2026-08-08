@@ -183,7 +183,7 @@ SDL_GPUShader *g_frag_shader;
 // Only combinations actually drawn get created; a normal frame builds
 // two (triangles+LESS, lines+LESS) and adds the two cursor line variants
 // the first time a cursor is drawn.
-enum { NUM_PRIMS = 2, NUM_DEPTH_TESTS = 3, NUM_TARGETS = 2 };
+enum { NUM_PRIMS = 2, NUM_DEPTH_TESTS = 4, NUM_TARGETS = 2 };
 SDL_GPUGraphicsPipeline *g_pipelines[NUM_PRIMS][NUM_DEPTH_TESTS][NUM_TARGETS];
 
 SDL_GPUTexture *g_depth_texture;
@@ -438,20 +438,36 @@ pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 	// geometry.c's cursor switches to GL_GREATER/GL_LEQUAL around its
 	// two halves (cursor_hidden_part()/cursor_visible_part()).
 	SDL_GPUDepthStencilState depth_stencil_state = {};
-	switch (depth_test) {
-		case FSV_DEPTH_LEQUAL:
-		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
-		break;
-		case FSV_DEPTH_GREATER:
-		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER;
-		break;
-		default:
-		depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
-		break;
-	}
-	depth_stencil_state.enable_depth_test = true;
-	depth_stencil_state.enable_depth_write = true;
 	depth_stencil_state.enable_stencil_test = false;
+	if (depth_test == FSV_DEPTH_ALWAYS_NOWRITE) {
+		// fsn-mode landscape sky (Task A1): must always draw (never
+		// itself discarded) and must never leave a depth value behind
+		// for a later draw to lose to -- see gpu.h's FsvDepthTest
+		// comment for why a fixed near-1.0 NDC depth was rejected in
+		// favor of this. Disabling the test outright, rather than
+		// leaving it enabled with SDL_GPU_COMPAREOP_ALWAYS, is what
+		// actually guarantees the "never writes" half on every backend:
+		// SDL_GPU mirrors Vulkan/Metal's rule that a depth write only
+		// takes effect while the depth test itself is enabled, whatever
+		// enable_depth_write says -- so this states that rule instead
+		// of leaning on it implicitly.
+		depth_stencil_state.enable_depth_test = false;
+		depth_stencil_state.enable_depth_write = false;
+	} else {
+		switch (depth_test) {
+			case FSV_DEPTH_LEQUAL:
+			depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+			break;
+			case FSV_DEPTH_GREATER:
+			depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER;
+			break;
+			default:
+			depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+			break;
+		}
+		depth_stencil_state.enable_depth_test = true;
+		depth_stencil_state.enable_depth_write = true;
+	}
 
 	// No blending: the GL frontend sets a blend func but never enables
 	// GL_BLEND for scene geometry (only the text overlay uses it, which
@@ -1153,12 +1169,9 @@ gpu_set_landscape(int index)
 
 // ---- Landscape (fsn-mode Task A1): sky gradient + ground plane --------
 //
-// Drawn by gpu_scene_begin(), before main.cpp's geometry_draw() call, so
-// ordinary opaque z-buffering (every real gpu_draw() call already uses
-// FSV_DEPTH_LESS with depth write on) hides these behind the actual
-// scene wherever the two overlap. Two deliberate departures from the
-// task brief's own sketch, both worth explaining since nothing else in
-// the codebase does:
+// Drawn by gpu_scene_begin(), before main.cpp's geometry_draw() call.
+// Two deliberate departures from the task brief's own sketch, both worth
+// explaining since nothing else in the codebase does:
 //
 // 1. "vertex-colored gradient quad" isn't expressible through gpu_draw():
 //    FsvVertex is {pos, normal} only, and scene.frag reads its fill
@@ -1174,24 +1187,38 @@ gpu_set_landscape(int index)
 //    (imperceptible, at 32 bands) banded gradient instead of a smooth
 //    one.
 //
-// 2. "depth-write off" isn't a per-draw knob either -- pipeline_for()
-//    always sets enable_depth_write = true, for every (primitive,
-//    depth-test, target) combination. Rather than add a pipeline
-//    variant, the sky bands are drawn at SKY_NDC_DEPTH, just under the
-//    1.0 far value gpu_scene_end() clears the depth buffer to, through
-//    an *identity* projection/modelview (so the quad's object-space x/y
-//    coordinates land directly in NDC -- a screen-space quad). Every
-//    real draw that follows is nearer than 0.999 in any normal camera
-//    configuration and FSV_DEPTH_LESS (every pipeline's compare op here)
-//    passes and overwrites whenever the new fragment is nearer -- so the
-//    sky depth-writes but never occludes anything, without a second
-//    pipeline.
+// 2. "depth-write off" is FSV_DEPTH_ALWAYS_NOWRITE (gpu.h), not a fixed
+//    near-far NDC depth trick. An earlier version of this function parked
+//    the sky at NDC z=0.999 (just under gpu_scene_end()'s 1.0 depth
+//    clear) through an identity projection/modelview, reasoning that
+//    every real draw would be "nearer" and win FSV_DEPTH_LESS. That
+//    reasoning silently assumed *linear* depth: MapV/TreeV's near:far
+//    ratio is 128:1 (camera.h's NEAR_TO_DISTANCE_RATIO *
+//    FAR_TO_NEAR_RATIO), and glm_frustum_rh_zo's non-linear zero-to-one
+//    depth compresses the far portion of the frustum into a thin band
+//    just under NDC 1.0 -- so real geometry legitimately close to the far
+//    clip plane could land *behind* 0.999 and lose the depth test to the
+//    sky, which would incorrectly occlude it. FSV_DEPTH_ALWAYS_NOWRITE
+//    (disables the depth test outright, so nothing is ever written) has
+//    no such failure mode regardless of the projection's shape.
 //
 // The ground, unlike the sky, is real 3D geometry drawn with the actual
-// camera matrices (restored right after the sky bands): a single large
-// quad at world z = GROUND_Z_OFFSET, participating in ordinary depth
-// test/write like any other opaque draw, so file/folder boxes correctly
-// draw over it and it correctly occludes whatever's behind it.
+// camera matrices (restored right after the sky bands) and ordinary
+// FSV_DEPTH_LESS test/write like any other opaque draw, so file/folder
+// boxes correctly draw over it and it correctly occludes whatever's
+// behind it. It is also mode-gated (see draw_landscape() below), unlike
+// the sky: MapV/TreeV share a world z=0 "floor" convention the ground
+// plane sits just under, but DiscV's camera is not oriented the same
+// way (see setup_modelview_matrix()'s FSV_DISCV case, which applies a
+// fixed axis-swapping rotation rather than reading camera->phi/theta at
+// all) -- empirically, DiscV's camera looks straight down the world Z
+// axis, so an unconditional ground plane there is not a thin strip near
+// a horizon but a full-frame wall filling the entire view behind the
+// disc for any real (non-tiny) directory, which a small fixture-only
+// screenshot never triggers (the effect only appears once camera
+// distance clears roughly 96 world units -- see the ground/near-far math
+// in the task report). DiscV keeps the sky (a level, mode-agnostic
+// backdrop) but never draws the ground.
 
 namespace {
 
@@ -1200,13 +1227,12 @@ namespace {
 // trivial next to a typical frame's node count.
 constexpr int SKY_BANDS = 32;
 
-// Just under NDC z=1.0 (this API's zero-to-one depth range -- see
-// glm_frustum_rh_zo() in setup_projection_matrix()), which is exactly
-// what gpu_scene_end() clears the depth buffer to. Strictly less than
-// the clear value so FSV_DEPTH_LESS reliably passes for the sky's own
-// draw (a tie would be backend/driver-defined); still far enough out
-// that no real scene geometry should ever legitimately sit past it.
-constexpr float SKY_NDC_DEPTH = 0.999f;
+// Arbitrary: FSV_DEPTH_ALWAYS_NOWRITE means the depth test is disabled
+// for these draws, so this value affects neither occlusion nor z-fight
+// risk. It only has to stay within this API's zero-to-one NDC depth
+// range so the near/far clip stages (a separate pipeline stage from
+// depth *testing*) don't discard the quad.
+constexpr float SKY_NDC_DEPTH = 0.5f;
 
 // Half-extent of the ground quad, in the same world units as MapV's own
 // node dimensions (mapv_dir_height = 384.0 etc, src/geometry.c). Large
@@ -1226,11 +1252,9 @@ constexpr float GROUND_HALF_EXTENT = 100000.0f;
 // would sit in the same plane as that bottom face -- nudging it down by
 // GROUND_Z_OFFSET avoids a z-fight with MapV's own base without being
 // visually distinguishable at any of MapV's scales (mapv_leaf_height is
-// 128; 6 units is under 5% of that). This is one shared ground plane for
-// every mode for now -- DiscV/TreeV have no equally documented z=0
-// "floor" of their own, and Task B3 is what scopes the whole landscape
-// to FSV_FSN specifically; until then this is a global toggle overlaid
-// on whichever mode is active (see task-A1-brief.md's own note on this).
+// 128; 6 units is under 5% of that). One shared ground plane for MapV
+// and TreeV for now (see draw_landscape()'s mode gate); Task B3 is what
+// scopes the whole landscape to FSV_FSN specifically.
 // Also assumes the camera never dips below the ground plane and looks
 // up through it: the ground's front face is wound to face +z (the
 // direction every one of this app's camera positions actually views it
@@ -1248,6 +1272,28 @@ draw_landscape(int index)
 		return;
 	const FsnLandscape &land = fsn_landscapes[index];
 
+	// Ground is only meaningful in modes that share MapV's world z=0
+	// "floor" convention -- see the block comment above. Every FsvMode
+	// value is listed explicitly (no `default:`) so a future addition
+	// (FSV_FSN, Task B1) has to make a deliberate choice here instead of
+	// silently inheriting one; grep for this switch alongside the other
+	// FsvMode switches the fsn-mode plan tracks.
+	bool draw_ground;
+	switch (globals.fsv_mode) {
+		case FSV_MAPV:
+		case FSV_TREEV:
+		draw_ground = true;
+		break;
+
+		case FSV_DISCV:
+		case FSV_SPLASH:
+		case FSV_NONE:
+		draw_ground = false;
+		break;
+
+		SWITCH_FAIL
+	}
+
 	// ---- Sky: SKY_BANDS horizontal strips, screen-space quads ---------
 	mat4 saved_projection, saved_modelview;
 	glm_mat4_copy(gpu_mat.projection, saved_projection);
@@ -1258,6 +1304,7 @@ draw_landscape(int index)
 	gpu_upload_matrices();
 
 	gpu_set_lighting(0);
+	gpu_set_depth_test(FSV_DEPTH_ALWAYS_NOWRITE);
 	for (int i = 0; i < SKY_BANDS; i++) {
 		const float t0 = (float)i / (float)SKY_BANDS;       // top of band
 		const float t1 = (float)(i + 1) / (float)SKY_BANDS; // bottom of band
@@ -1285,11 +1332,19 @@ draw_landscape(int index)
 		gpu_draw(FSV_TRIANGLES, verts, 4, idx, 6);
 	}
 
-	// ---- Ground: one large quad at world z = GROUND_Z_OFFSET ----------
+	// Restore the real camera matrices and the default depth test before
+	// either drawing the ground (which needs both) or returning control
+	// to geometry_draw() (which assumes gpu_scene_begin()'s
+	// FSV_DEPTH_LESS baseline, same as every prior frame).
 	glm_mat4_copy(saved_projection, gpu_mat.projection);
 	glm_mat4_copy(saved_modelview, gpu_mat.modelview);
 	gpu_upload_matrices();
+	gpu_set_depth_test(FSV_DEPTH_LESS);
 
+	if (!draw_ground)
+		return;
+
+	// ---- Ground: one large quad at world z = GROUND_Z_OFFSET ----------
 	gpu_set_color(land.ground[0], land.ground[1], land.ground[2], 1.0f);
 	// gpu_set_lighting(0) from the sky loop above is still in effect --
 	// a flat plane would light uniformly across its single normal anyway.

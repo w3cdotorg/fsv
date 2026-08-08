@@ -150,11 +150,26 @@ void gpu_set_lighting(int enabled);
  * with FSV_DEPTH_LESS — GL's default — except the node cursor, which
  * draws its occluded half with FSV_DEPTH_GREATER and its visible half
  * with FSV_DEPTH_LEQUAL (src/geometry.c, cursor_hidden_part( ) /
- * cursor_visible_part( )). */
+ * cursor_visible_part( )), and the fsn-mode landscape sky (Task A1,
+ * src/sdl/gpu.cpp's draw_landscape( )), which uses FSV_DEPTH_ALWAYS_NOWRITE
+ * below.
+ *
+ * FSV_DEPTH_ALWAYS_NOWRITE: the depth test always passes *and* nothing is
+ * written to the depth buffer -- the standard "background/skybox" depth
+ * mode. A fixed NDC-depth trick (park the backdrop just under the far
+ * clip value) was tried first and rejected: MapV/TreeV's near:far ratio
+ * is 128:1, and glm_frustum_rh_zo's projection is non-linear enough in Z
+ * that any fixed NDC depth close to 1.0 also falls within the *linear*
+ * (world-space) depth range real geometry can legitimately occupy near
+ * the far clip plane -- which would make the backdrop wrongly occlude
+ * that geometry instead of always losing to it. Disabling the test
+ * outright has no such failure mode regardless of the projection's
+ * shape, and needs no per-scene tuning. */
 typedef enum {
 	FSV_DEPTH_LESS = 0,
 	FSV_DEPTH_LEQUAL,
-	FSV_DEPTH_GREATER
+	FSV_DEPTH_GREATER,
+	FSV_DEPTH_ALWAYS_NOWRITE
 } FsvDepthTest;
 
 void gpu_set_depth_test(FsvDepthTest test);
