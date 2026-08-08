@@ -126,6 +126,10 @@ static const char *tokens_landscape[] = {
  * (every install before this task) keeps its exact current look. */
 static const int default_landscape = 2;
 
+/* fsn-mode Task B3: has the user ever chosen a landscape explicitly?
+ * See color.h's landscape_explicit( ) doc comment. */
+static const char key_landscape_explicit[] = "landscape_explicit";
+
 /* Color configuration */
 static struct ColorConfig color_config;
 
@@ -138,6 +142,11 @@ static ColorMode color_mode;
  * gpu.h, which has no getter) purely so landscape_write_config() and
  * src/sdl/ui_main.cpp's menu have something to read without adding one. */
 static int landscape_current = -1;
+
+/* fsn-mode Task B3: mirrors what was last read from/written to the
+ * "landscape_explicit" nvstore key -- see color.h's landscape_explicit( )
+ * doc comment. */
+static boolean landscape_explicit_current = FALSE;
 
 /* Colors for spectrum */
 static RGBcolor spectrum_underflow_color;
@@ -717,14 +726,13 @@ landscape_get( void )
 }
 
 
-/* Changes the current landscape preset, pushes it to the renderer, and
- * persists it immediately (nvstore key "landscape", by name -- see
- * tokens_landscape[] above), mirroring color_set_mode( )'s "change,
- * apply, save" shape rather than color_write_config( )'s separate
- * apply-then-save-on-demand one: a menu click is a single, immediate
- * action with no intervening dialog to Cancel out of. */
-void
-landscape_set( int index )
+/* Shared by landscape_set( ) and landscape_set_auto( ) below: apply the
+ * preset to the renderer, persist the raw "landscape" nvstore key, and
+ * redraw. What differs between the two public entry points is only
+ * whether the "landscape_explicit" flag is also touched -- see that
+ * pair's own doc comments (color.h) for why the distinction exists. */
+static void
+landscape_apply( int index )
 {
 	NVStore *fsvrc;
 
@@ -742,6 +750,49 @@ landscape_set( int index )
 }
 
 
+/* Changes the current landscape preset, pushes it to the renderer, and
+ * persists it immediately (nvstore key "landscape", by name -- see
+ * tokens_landscape[] above), mirroring color_set_mode( )'s "change,
+ * apply, save" shape rather than color_write_config( )'s separate
+ * apply-then-save-on-demand one: a menu click is a single, immediate
+ * action with no intervening dialog to Cancel out of.
+ *
+ * src/sdl/ui_main.cpp's Display -> Landscape menu is this function's one
+ * and only caller, which is what makes it the right place to also mark
+ * the choice "explicit" (fsn-mode Task B3, color.h's landscape_explicit( )
+ * doc comment) -- landscape_set_auto( ) below is for every other caller. */
+void
+landscape_set( int index )
+{
+	NVStore *fsvrc;
+
+	landscape_apply( index );
+
+	landscape_explicit_current = TRUE;
+	fsvrc = nvs_open( CONFIG_FILE );
+	nvs_write_boolean( fsvrc, key_landscape_explicit, TRUE );
+	nvs_close( fsvrc );
+}
+
+
+/* fsn-mode Task B3: FSN mode's own auto-default (src/sdl/main.cpp), a
+ * separate entry point from landscape_set( ) purely so it can apply and
+ * persist the very same way without also claiming to be the user's
+ * explicit choice -- see color.h's doc comment on both functions. */
+void
+landscape_set_auto( int index )
+{
+	landscape_apply( index );
+}
+
+
+boolean
+landscape_explicit( void )
+{
+	return landscape_explicit_current;
+}
+
+
 /* Reads the landscape preset from ~/.fsvrc (default: "slate", i.e.
  * today's pre-A1 look) and pushes it to the renderer. Does not call
  * redraw( ): this runs during startup, before the first frame, the same
@@ -754,6 +805,7 @@ landscape_init( void )
 
 	fsvrc = nvs_open( CONFIG_FILE );
 	index = nvs_read_int_token_default( fsvrc, key_landscape, tokens_landscape, default_landscape );
+	landscape_explicit_current = nvs_read_boolean_default( fsvrc, key_landscape_explicit, FALSE );
 	nvs_close( fsvrc );
 
 	landscape_current = index;

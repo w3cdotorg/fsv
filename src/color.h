@@ -108,5 +108,22 @@ int landscape_get( void );
 void landscape_set( int index );
 void landscape_init( void );
 
+/* fsn-mode Task B3: whether the user has ever explicitly chosen a
+ * landscape from the Display menu (landscape_set( ) above, its one and
+ * only caller -- src/sdl/ui_main.cpp). Read by src/sdl/main.cpp's FSN
+ * mode entry: it auto-selects "classic" (fsn-style.h's
+ * FSN_LANDSCAPE_CLASSIC) through landscape_set_auto( ) below unless this
+ * is already true, so a user who has never made an explicit choice sees
+ * FSN's own default every time, but one who has always keeps it.
+ * Persisted (nvstore key "landscape_explicit") so the distinction
+ * survives a restart, same as the preset index itself. */
+boolean landscape_explicit( void );
+
+/* Same effect as landscape_set( ) -- applies the preset, persists the
+ * raw "landscape" nvstore key, redraws -- but leaves the explicit flag
+ * above untouched. The FSN auto-default's entry point; never called from
+ * the Display menu. */
+void landscape_set_auto( int index );
+
 
 /* end color.h */

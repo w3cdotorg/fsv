@@ -42,6 +42,8 @@ extern "C" {
 #include "window.h" /* StatusBarID, window_statusbar( ) */
 }
 
+#include "fsn-style.h" /* FSN_LANDSCAPE_CLASSIC -- see enter_fsn_mode_landscape() */
+
 // ---- Platform hook implementations -----------------------------------
 //
 // libfsvcore (animation.c) calls through fsv_platform for anything
@@ -193,6 +195,28 @@ initial_camera_pan(void *mesg)
 	}
 }
 
+// fsn-mode Task B3: entering FSN mode auto-selects "classic"
+// (fsn-style.h's FSN_LANDSCAPE_CLASSIC) unless the user has ever chosen a
+// landscape explicitly from the Display menu (color.c's
+// landscape_explicit(), set only by landscape_set(), the menu's own
+// entry point). Runs on every FSN entry, not just the first -- a session
+// that has never made an explicit choice should always land on classic
+// in FSN, regardless of what an earlier non-FSN session left as the
+// generic "landscape" nvstore value. landscape_set_auto() is the
+// non-explicit twin of landscape_set() for exactly this: it applies and
+// persists the preset without claiming to be the user's own choice, so a
+// later explicit pick still overrides it and this default keeps
+// reapplying until one is made. Leaving FSN restores nothing -- no
+// "landscape before FSN" is saved anywhere -- so whatever FSN leaves
+// selected simply stays selected afterward; keeping that asymmetry
+// simple was a deliberate call, not an oversight (see docs/PORTING.md).
+static void
+enter_fsn_mode_landscape(FsvMode mode)
+{
+	if (mode == FSV_FSN && !landscape_explicit())
+		landscape_set_auto(FSN_LANDSCAPE_CLASSIC);
+}
+
 // Port of fsv.c's fsv_set_mode(), FSV_NONE case ("filesystem's first
 // appearance"). app_switch_mode() below is the other case (switching
 // modes on an already-loaded filesystem).
@@ -202,6 +226,7 @@ enter_mode(FsvMode mode)
 	geometry_init(mode);
 	camera_init(mode, /* initial_view */ TRUE);
 	globals.fsv_mode = mode;
+	enter_fsn_mode_landscape(mode);
 	// schedule_event() is declared with an unprototyped parameter list
 	// (void (*)()), which C++ will not implicitly convert to; animation.c
 	// calls it back with one void * argument (its SchedEvent struct types
@@ -222,6 +247,7 @@ run_mode_entry(FsvMode mode)
 	geometry_init(mode);
 	camera_init(mode, /* initial_view */ FALSE);
 	globals.fsv_mode = mode;
+	enter_fsn_mode_landscape(mode);
 	schedule_event((void (*)())initial_camera_pan, (char *)"", 1);
 }
 
