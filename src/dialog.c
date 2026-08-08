@@ -172,6 +172,12 @@ static const char *time_last_change;
 static const char *spectrum_gradient;
 static const char *spectrum_rainbow;
 static const char *spectrum_heat;
+/* fsn-mode Task A2: "fsn buckets" (SPECTRUM_FSN_BUCKETS, src/color.h) --
+ * GTK gets the bucket colors themselves for free from the shared
+ * src/color.c, so this is just a fourth combo-box choice; the ages
+ * legend bar itself (src/sdl/ui_rail.cpp) is SDL/ImGui-only, per the
+ * plan (no GTK equivalent). */
+static const char *spectrum_fsnbuckets;
 
 
 /* Callback for the node type color pickers */
@@ -314,6 +320,8 @@ csdialog_time_spectrum_combobox_changed(GtkComboBox *cbox, gpointer user_data)
 		type = SPECTRUM_HEAT;
 	else if (strcmp(selected, spectrum_gradient) == 0)
 		type = SPECTRUM_GRADIENT;
+	else if (strcmp(selected, spectrum_fsnbuckets) == 0)
+		type = SPECTRUM_FSN_BUCKETS;
 	else {
 		g_assert_not_reached( );
 		return;
@@ -962,9 +970,11 @@ dialog_color_setup( void )
 	spectrum_rainbow = _("Rainbow");
 	spectrum_heat = _("Heat");
 	spectrum_gradient = _("Gradient");
+	spectrum_fsnbuckets = _("fsn buckets");
 	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(optmenu_w), spectrum_rainbow);
 	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(optmenu_w), spectrum_heat);
 	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(optmenu_w), spectrum_gradient);
+	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(optmenu_w), spectrum_fsnbuckets);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(optmenu_w), 2);
 	g_signal_connect(optmenu_w, "changed", G_CALLBACK(csdialog_time_spectrum_combobox_changed), NULL);
 	gui_set_parent_child(hbox_w, optmenu_w);
