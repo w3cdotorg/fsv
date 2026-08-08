@@ -952,7 +952,7 @@ gui_update(void)
 static void
 usage(const char *argv0)
 {
-	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev] "
+	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev|--fsn] "
 	    "[--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
 }
 
@@ -978,6 +978,8 @@ main(int argc, char **argv)
 			initial_mode = FSV_MAPV;
 		else if (strcmp(argv[i], "--treev") == 0)
 			initial_mode = FSV_TREEV;
+		else if (strcmp(argv[i], "--fsn") == 0)
+			initial_mode = FSV_FSN;
 		else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
 			screenshot_path = argv[++i];
 		else if (strcmp(argv[i], "--record") == 0 && i + 2 < argc) {

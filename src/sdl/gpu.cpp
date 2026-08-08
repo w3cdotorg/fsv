@@ -743,6 +743,10 @@ setup_modelview_matrix(void)
 		break;
 		}
 
+		// fsn-mode Task B1: FSN's camera target is Cartesian and lives
+		// in the same MapVCamera storage (see the FSN_CAMERA_* note in
+		// camera.c), so the transform is identical.
+		case FSV_FSN:
 		case FSV_MAPV: {
 		vec3 back = { dolly, 0.f, 0.f };
 		vec3 target = { -(float)MAPV_CAMERA(camera)->target.x,
@@ -1280,6 +1284,11 @@ draw_landscape(int index)
 	// FsvMode switches the fsn-mode plan tracks.
 	bool draw_ground;
 	switch (globals.fsv_mode) {
+		// FSN is the mode the landscape was built for in the first
+		// place: its pedestals stand on world z == 0, the same floor
+		// MapV and TreeV use, so the same ground quad (parked
+		// GROUND_Z_OFFSET below it) sits under all three.
+		case FSV_FSN:
 		case FSV_MAPV:
 		case FSV_TREEV:
 		draw_ground = true;

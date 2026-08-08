@@ -257,6 +257,13 @@ ui_main_draw(void)
 				app_switch_mode(FSV_MAPV);
 			if (ImGui::MenuItem("TreeV", nullptr, mode == FSV_TREEV))
 				app_switch_mode(FSV_TREEV);
+			// fsn-mode Task B1. Not present in the GTK frontend's Vis
+			// menu, which is a GtkBuilder resource (src/fsv-gresource.
+			// xml) driving callbacks.c's on_vis_*_activate() -- adding
+			// an entry there is out of this task's scope; the GTK arm
+			// only has to keep building. See docs/PORTING.md.
+			if (ImGui::MenuItem("FSN", nullptr, mode == FSV_FSN))
+				app_switch_mode(FSV_FSN);
 			ImGui::EndMenu();
 		}
 

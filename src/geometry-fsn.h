@@ -1,10 +1,12 @@
 /* geometry-fsn.h */
 
 /* FSV_FSN mode: the original fsn's pedestal-and-wire landscape.
- * Layout and rendering live in src/geometry-fsn.c rather than in
- * geometry.c's per-mode families, because geometry.c is already ~2.9k
- * lines; the two files are registered side by side in both frontends'
- * source lists (src/meson.build, src/sdl/meson.build).
+ *
+ * Two implementation files, split along the renderer boundary:
+ *   src/geometry-fsn.c       layout -- pure math, part of libfsvcore
+ *   src/geometry-fsn-draw.c  drawing -- gpu.h, part of each frontend
+ * (geometry.c's own per-mode families would have been the other home
+ * for all this, but that file is already ~2.9k lines.)
  *
  * fsv - 3D File System Visualizer
  * SPDX-License-Identifier:  LGPL-2.1-or-later
@@ -81,7 +83,10 @@ void fsn_geometry_free( void );
 
 /* Layout accessors -- the testable surface, and what camera.c reads to
  * frame the scene. fsn_layout_get( ) returns NULL if `node` has no FSN
- * geometry (no layout pass has run yet, or it is the metanode). */
+ * geometry (no layout pass has run yet, or it is the metanode);
+ * fsn_layout_root( ) returns the directory the current layout was built
+ * from, or NULL when there is none. */
+GNode *fsn_layout_root( void );
 const FsnPedestal *fsn_layout_get( GNode *node );
 
 /* Fills in the wire running from `node`'s parent directory to `node`.

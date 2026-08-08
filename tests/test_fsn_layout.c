@@ -16,16 +16,11 @@
  *      on the child's;
  *   5. file boxes stand inside their directory's pedestal top face.
  *
- * LINKING. geometry-fsn.c is compiled straight into this test (see
- * tests/meson.build) rather than reached through libfsvcore, which does
- * not carry it -- it calls gpu.h, exactly like geometry.c, and so belongs
- * to the frontends. That drags its *draw* pass's undefined references in
- * with it, hence the small block of gpu/text no-ops at the bottom of this
- * file: tools/fsv-headless-stubs.c cannot host them, because the two real
- * frontends both link that same renderer surface for real. Nothing here
- * calls them; they exist purely to satisfy the linker, and their being
- * unreachable from main( ) is itself the check that the layout pass draws
- * nothing.
+ * LINKING. src/geometry-fsn.c is gpu-free by construction and therefore
+ * part of libfsvcore, so this links exactly like test_scanfs -- core
+ * objects plus tools/fsv-headless-stubs.c, and not one renderer stub.
+ * That is the invariant, not an accident: the day the layout pass grows
+ * a gpu.h call, this test stops linking.
  */
 
 #include <assert.h>
@@ -35,9 +30,7 @@
 #include "common.h" /* pulls in glib.h, and must precede it: G_LOG_DOMAIN */
 #include "fsv.h"
 #include "geometry-fsn.h"
-#include "gpu.h"
 #include "scanfs.h"
-#include "tmaptext.h"
 
 /* Generous: every quantity checked here is O(100) world units, and the
  * layout is plain double arithmetic with no accumulation to speak of. */
@@ -141,42 +134,4 @@ main(void)
 	assert(fsn_layout_get(root) == NULL);
 
 	return 0;
-}
-
-
-/**** Link-only stubs -- see the note in this file's header ****/
-
-FsvGpuMatrices gpu_mat;
-
-void gpu_draw(FsvTopology topology, const FsvVertex *verts, int nverts,
-              const unsigned int *indices, int nindices)
-{
-	(void)topology; (void)verts; (void)nverts;
-	(void)indices; (void)nindices;
-	g_assert_not_reached();
-}
-
-void gpu_upload_matrices(void) { g_assert_not_reached(); }
-void gpu_set_color(float r, float g, float b, float a)
-{
-	(void)r; (void)g; (void)b; (void)a;
-	g_assert_not_reached();
-}
-void gpu_set_lighting(int enabled) { (void)enabled; g_assert_not_reached(); }
-void gpu_set_line_width(float width) { (void)width; g_assert_not_reached(); }
-void gpu_set_depth_test(FsvDepthTest test) { (void)test; g_assert_not_reached(); }
-FsvRenderMode gpu_render_mode(void) { g_assert_not_reached(); return FSV_RENDER_NORMAL; }
-
-void text_pre(void) { g_assert_not_reached(); }
-void text_post(void) { g_assert_not_reached(); }
-void text_set_color(float r, float g, float b)
-{
-	(void)r; (void)g; (void)b;
-	g_assert_not_reached();
-}
-void text_draw_straight(const char *text, const XYZvec *text_pos,
-                        const XYvec *text_max_dims)
-{
-	(void)text; (void)text_pos; (void)text_max_dims;
-	g_assert_not_reached();
 }

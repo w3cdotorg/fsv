@@ -18,6 +18,7 @@
 #include "camera.h"
 #include "color.h"
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
+#include "geometry-fsn.h" /* FSV_FSN mode lives in its own file */
 #include "gpu.h"
 #include "tmaptext.h"
 
@@ -2669,6 +2670,13 @@ geometry_init( FsvMode mode )
 	DIR_NODE_DESC(globals.fstree)->deployment = 1.0;
 	geometry_queue_rebuild( globals.fstree );
 
+	/* Drop any previous FSN layout up front: it holds a pointer into
+	 * the tree, and both paths that reach this function invalidate it --
+	 * a mode switch overwrites the geometry parameters it lives in, and
+	 * a rescan frees the tree outright. The FSV_FSN arm below
+	 * immediately re-establishes it. */
+	fsn_geometry_free( );
+
 	switch (mode) {
 		case FSV_DISCV:
 		discv_init( );
@@ -2680,6 +2688,13 @@ geometry_init( FsvMode mode )
 
 		case FSV_TREEV:
 		treev_init( );
+		break;
+
+		case FSV_FSN:
+		/* Unlike the three above, FSN lays out from the root
+		 * *directory*, not the metanode: it has no geometry of its
+		 * own for a node that isn't a real directory */
+		fsn_geometry_init( root_dnode );
 		break;
 
 		SWITCH_FAIL
@@ -2717,6 +2732,10 @@ geometry_draw( boolean high_detail )
 		treev_draw( high_detail );
 		break;
 
+		case FSV_FSN:
+		fsn_geometry_draw( high_detail );
+		break;
+
 		SWITCH_FAIL
 	}
 }
@@ -2737,6 +2756,13 @@ geometry_camera_pan_finished( void )
 
 		case FSV_TREEV:
 		treev_camera_pan_finished( );
+		break;
+
+		case FSV_FSN:
+		/* Nothing to save. The MapV/TreeV hooks exist to record where
+		 * the node cursor came to rest so the next one can be
+		 * interpolated from there; FSN draws no cursor (Task B1's
+		 * scope is the landscape itself). */
 		break;
 
 		SWITCH_FAIL
@@ -2796,6 +2822,12 @@ geometry_should_highlight(GNode *node)
 		case FSV_TREEV:
 		return geometry_treev_is_leaf( node );
 
+		case FSV_FSN:
+		/* Every directory has a pedestal of its own on screen at all
+		 * times, expanded or not (unlike MapV, where an expanded
+		 * directory *is* its children), so all of them highlight */
+		return TRUE;
+
 		SWITCH_FAIL
 	}
 
@@ -2832,6 +2864,13 @@ draw_node( GNode *node )
 			gpu_upload_matrices();
 			treev_gldraw_platform( node, geometry_treev_platform_r0( node ) );
 		}
+		break;
+
+		case FSV_FSN:
+		/* Not implemented, like FSV_DISCV above -- this whole
+		 * function is dead code (see the __attribute__((unused)) on
+		 * it: geometry_highlight_node( ) stopped calling it when
+		 * highlighting became a per-node color boost) */
 		break;
 
 		SWITCH_FAIL

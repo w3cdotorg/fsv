@@ -214,8 +214,13 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
  * world x/y plane, text_draw_straight( )), lifted FSN_TEXT_LIFT units off
  * whatever surface they label so they never z-fight with it. */
 #define FSN_TEXT_LIFT            1.0
-#define FSN_PATH_TEXT_HEIGHT   220.0  /* cap height of the ground path text */
-#define FSN_PATH_TEXT_GAP      256.0  /* its distance from the root pedestal */
+/* The ground path text is sized *relative to the root pedestal*, not in
+ * absolute units: the camera frames the whole landscape, so a fixed cap
+ * height reads as gigantic on a small tree and as a smudge on a large
+ * one. Both ratios are of the root pedestal's width. */
+#define FSN_PATH_TEXT_WIDTH_RATIO   2.0  /* text box width */
+#define FSN_PATH_TEXT_HEIGHT_RATIO  0.10 /* cap height */
+#define FSN_PATH_TEXT_GAP_RATIO     0.15 /* distance in front of the pedestal */
 #define FSN_PATH_R 1.0f
 #define FSN_PATH_G 1.0f
 #define FSN_PATH_B 1.0f

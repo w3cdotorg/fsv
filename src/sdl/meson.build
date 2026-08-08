@@ -17,11 +17,12 @@
 # Neither file is folded into libfsvcore: both now call gpu.h, which each
 # frontend implements, and libfsvcore's other consumers (fsv-scan,
 # test_scanfs) have no renderer to link against.
-# geometry-fsn.c (fsn-mode Task B1) rides along with geometry.c for
-# exactly the same reason -- it is FSV_FSN's half of the same per-mode
-# geometry surface, split out only because geometry.c is already ~2.9k
-# lines. Both frontends' source lists must carry the pair together.
-core_gl_src = files('stubs.c', '../geometry.c', '../geometry-fsn.c',
+# geometry-fsn-draw.c (fsn-mode Task B1) rides along with geometry.c for
+# exactly the same reason: it is FSV_FSN's share of the same per-mode
+# geometry surface, split into its own file only because geometry.c is
+# already ~2.9k lines. Its *layout* counterpart, geometry-fsn.c, is
+# gpu-free and lives in libfsvcore instead (see src/meson.build).
+core_gl_src = files('stubs.c', '../geometry.c', '../geometry-fsn-draw.c',
                     '../tmaptext.c', '../fontatlas.c')
 
 # The compiled shader artifacts (Task 3.1) are baked into the binary as

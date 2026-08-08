@@ -18,6 +18,8 @@
 #include "filelist.h"
 #include "fsv-platform.h"
 #include "geometry.h"
+#include "fsn-style.h" /* FSN_GENERATION_GAP -- FSV_FSN framing */
+#include "geometry-fsn.h" /* FSV_FSN layout accessors */
 #include "window.h"
 
 
@@ -28,6 +30,29 @@
 #define MAPV_CAMERA_MAX_PAN_TIME	4.0
 #define TREEV_CAMERA_MIN_PAN_TIME	1.0
 #define TREEV_CAMERA_MAX_PAN_TIME	4.0
+#define FSN_CAMERA_MIN_PAN_TIME		0.5
+#define FSN_CAMERA_MAX_PAN_TIME		4.0
+
+/* FSV_FSN camera, Task B1 PLACEHOLDER.
+ *
+ * FSN reuses MapV's *camera storage* -- a Cartesian XYZ target plus the
+ * base Camera's theta/phi/distance, i.e. MAPV_CAMERA(camera) and the
+ * FSV_MAPV arm of both frontends' setup_modelview_matrix( ). What it
+ * does NOT reuse is MapV's camera *math*: every mapv_* helper below
+ * reads MAPV_GEOM_PARAMS, which in FSN mode holds an FsnPedestal instead
+ * (the two modes share NodeDesc::geomparams), so delegating outright
+ * would feed the camera another mode's numbers reinterpreted as its own.
+ * The fsn_* helpers below are therefore thin equivalents that read the
+ * FSN layout (src/geometry-fsn.h) and are otherwise shaped exactly like
+ * their MapV counterparts.
+ *
+ * Task B2 replaces all of this with the real fsn flight model
+ * (approach-deceleration, ground-level travel). Until then these values
+ * only have to produce a sane, non-degenerate view. */
+#define FSN_CAMERA_PHI			15.0	/* low, near-ground pitch, as in
+						 * the reference screenshot */
+#define FSN_CAMERA_THETA		270.0	/* looking along +y, the
+						 * direction the tree grows */
 
 #define TREEV_CAMERA_AVG_VELOCITY	1024.0
 
@@ -105,6 +130,8 @@ field_distance( double fov, double diameter )
 void
 camera_init( FsvMode mode, boolean initial_view )
 {
+	const FsnPedestal *fsn_ped;
+	XYZvec fsn_ext;
 	RTvec ext_c1;
 	double d, d1, d2;
 
@@ -180,6 +207,31 @@ camera_init( FsvMode mode, boolean initial_view )
 			TREEV_CAMERA(camera)->target.theta = 90.0;
 			TREEV_CAMERA(camera)->target.z = 0.0;
 		}
+		camera->near_clip = NEAR_TO_DISTANCE_RATIO * camera->distance;
+		camera->far_clip = FAR_TO_NEAR_RATIO * camera->near_clip;
+		break;
+
+		case FSV_FSN:
+		/* Frame the whole landscape from behind the root pedestal,
+		 * looking down the depth axis the tree grows along. See the
+		 * FSN_CAMERA_* note at the top of this file -- placeholder,
+		 * Task B2 replaces it. */
+		fsn_layout_extents( &fsn_ext.x, &fsn_ext.y, &fsn_ext.z );
+		fsn_ped = fsn_layout_get( root_dnode );
+		/* MAX(1.0, ...): an empty or not-yet-laid-out landscape would
+		 * otherwise give distance == near_clip == far_clip == 0, and
+		 * a frustum with near == far is a division by zero */
+		d = field_distance( camera->fov,
+		    MAX(1.0, MAX(fsn_ext.x, fsn_ext.y)) );
+		camera->theta = FSN_CAMERA_THETA;
+		camera->phi = FSN_CAMERA_PHI;
+		/* Far enough back that the root pedestal -- which sits at the
+		 * near end of the landscape, not at its center -- still
+		 * clears NEAR_TO_DISTANCE_RATIO's near plane */
+		camera->distance = (initial_view ? 2.0 : 1.25) * d;
+		MAPV_CAMERA(camera)->target.x = (fsn_ped != NULL) ? fsn_ped->x : 0.0;
+		MAPV_CAMERA(camera)->target.y = 0.5 * fsn_ext.y;
+		MAPV_CAMERA(camera)->target.z = 0.5 * fsn_ext.z;
 		camera->near_clip = NEAR_TO_DISTANCE_RATIO * camera->distance;
 		camera->far_clip = FAR_TO_NEAR_RATIO * camera->near_clip;
 		break;
@@ -295,6 +347,29 @@ treev_scrollbar_move( double value, int axis )
 }
 
 
+/* Helper function for camera_scrollbar_moved( ).
+ * FSN's ground plane is Cartesian like MapV's, but deliberately without
+ * MapV's coupled yaw/pitch adjustment: mapv_camera_theta( )/_phi( ) are
+ * expressed in MAPV_GEOM_PARAMS, which hold FSN geometry in this mode.
+ * Panning only, therefore -- and no FSN scrollbar can be dragged today
+ * anyway (see fsn_get_scrollbar_state( ) below). Task B2 replaces this. */
+static void
+fsn_scrollbar_move( double value, int axis )
+{
+	switch (axis) {
+		case X_AXIS:
+		MAPV_CAMERA(camera)->target.x = value;
+		break;
+
+		case Y_AXIS:
+		MAPV_CAMERA(camera)->target.y = - value;
+		break;
+
+		SWITCH_FAIL
+	}
+}
+
+
 /* Called by the frontend whenever the user manually moves one of the
  * viewport scrollbars (i.e. drags the slider). Reads the new scrollbar
  * position via fsv_platform.get_scroll( ) and updates the camera target
@@ -320,6 +395,10 @@ camera_scrollbar_moved( int axis )
 
 		case FSV_TREEV:
 		treev_scrollbar_move( value, axis );
+		break;
+
+		case FSV_FSN:
+		fsn_scrollbar_move( value, axis );
 		break;
 
 		SWITCH_FAIL
@@ -540,6 +619,17 @@ camera_update_scrollbars( boolean hard_update )
 		mapv_get_scrollbar_state(&x, &y);
 		break;
 
+		case FSV_FSN:
+		/* No scroll model yet -- Task B2 is what gives FSN its own
+		 * navigation. Deliberately the *null* state rather than
+		 * MapV's: mapv_get_scrollbar_state( ) is written entirely in
+		 * MAPV_GEOM_PARAMS, which carry FSN pedestals in this mode,
+		 * so it would report ranges computed from a reinterpreted
+		 * FsnPedestal. src/sdl/ui_rail.cpp keeps its Tilt/Height
+		 * sliders disabled in FSN mode to match. */
+		null_get_scrollbar_state(&x, &y);
+		break;
+
 		case FSV_TREEV:
 		treev_get_scrollbar_state(&x, &y);
 		break;
@@ -582,6 +672,10 @@ camera_pan_finish( void )
 		morph_finish( &DISCV_CAMERA(camera)->target.y );
 		break;
 
+		case FSV_FSN:
+		/* FSN stores its target in MapV's Cartesian camera struct
+		 * (see the FSN_CAMERA_* note at the top of this file), so the
+		 * same three variables are the ones to settle */
 		case FSV_MAPV:
 		morph_finish( &MAPV_CAMERA(camera)->target.x );
 		morph_finish( &MAPV_CAMERA(camera)->target.y );
@@ -618,6 +712,8 @@ camera_pan_break( void )
 		morph_break( &DISCV_CAMERA(camera)->target.y );
 		break;
 
+		case FSV_FSN:
+		/* Shares MapV's Cartesian target storage -- as above */
 		case FSV_MAPV:
 		morph_break( &MAPV_CAMERA(camera)->target.x );
 		morph_break( &MAPV_CAMERA(camera)->target.y );
@@ -795,6 +891,88 @@ mapv_look_at( GNode *node, MorphType mtype, double pan_time_override )
 		morph( &camera->near_clip, mtype, new_cam->near_clip, pan_time );
 		morph( &camera->far_clip, mtype, new_cam->far_clip, pan_time );
 	}
+	morph( &MAPV_CAMERA(camera)->target.x, mtype, MAPV_CAMERA(new_cam)->target.x, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.y, mtype, MAPV_CAMERA(new_cam)->target.y, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.z, mtype, MAPV_CAMERA(new_cam)->target.z, pan_time );
+
+	return pan_time;
+}
+
+
+/* Helper function for camera_look_at_full( ), FSV_FSN mode.
+ *
+ * Task B1 PLACEHOLDER -- the real fsn flight (a low, ground-hugging
+ * travel with approach-deceleration, and the wire-following path between
+ * pedestals) is Task B2's whole subject. What this has to do until then
+ * is put the target node in frame from a sane angle without ever
+ * producing a degenerate frustum. Shaped like mapv_look_at( ) above,
+ * with the same morph set, but reading the FSN layout instead of
+ * MAPV_GEOM_PARAMS (see the FSN_CAMERA_* note at the top of this file). */
+static double
+fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
+{
+	MapVCamera new_mcam;
+	Camera *new_cam;
+	const FsnPedestal *ped;
+	XYZvec camera_pos, new_cam_pos, delta;
+	XYZvec ext;
+	double diameter, pan_time, k;
+
+	new_cam = CAMERA(&new_mcam);
+
+	/* A file's box stands on its parent's pedestal, so its own `h` is
+	 * measured from there, not from the ground */
+	ped = fsn_layout_get( node );
+	if (ped == NULL) {
+		/* No FSN geometry for this node (should not happen: the mode
+		 * lays out the whole tree). Stay where we are. */
+		return FSN_CAMERA_MIN_PAN_TIME;
+	}
+
+	MAPV_CAMERA(new_cam)->target.x = ped->x;
+	MAPV_CAMERA(new_cam)->target.y = ped->z;
+	MAPV_CAMERA(new_cam)->target.z = ped->h;
+	if (!NODE_IS_DIR(node) && node->parent != NULL &&
+	    NODE_IS_DIR(node->parent))
+		MAPV_CAMERA(new_cam)->target.z += fsn_layout_get( node->parent )->h;
+
+	new_cam->theta = FSN_CAMERA_THETA;
+	new_cam->phi = FSN_CAMERA_PHI;
+
+	/* Enough of the object in frame to make it identifiable -- and, for
+	 * an expanded directory, enough to take in the wires leaving it and
+	 * the near edge of the generation they lead to, which is the whole
+	 * point of the mode */
+	diameter = SQRT_2 * MAX(ped->w, ped->d);
+	if (NODE_IS_DIR(node) && dirtree_entry_expanded( node ))
+		diameter = MAX(diameter, ped->d + 2.0 * FSN_GENERATION_GAP);
+	new_cam->distance = field_distance( camera->fov, MAX(1.0, diameter) );
+	new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
+	new_cam->far_clip = FAR_TO_NEAR_RATIO * new_cam->near_clip;
+
+	/* Duration: proportional to how far the viewer actually travels,
+	 * measured against the size of the whole landscape -- MapV's rule,
+	 * with its root-node footprint swapped for the FSN extents */
+	if (pan_time_override > 0.0)
+		pan_time = pan_time_override;
+	else {
+		mapv_get_camera_position( camera, &camera_pos );
+		mapv_get_camera_position( new_cam, &new_cam_pos );
+		delta.x = new_cam_pos.x - camera_pos.x;
+		delta.y = new_cam_pos.y - camera_pos.y;
+		delta.z = new_cam_pos.z - camera_pos.z;
+
+		fsn_layout_extents( &ext.x, &ext.y, NULL );
+		k = sqrt( XYZ_LEN(delta) / MAX(1.0, hypot( ext.x, ext.y )) );
+		pan_time = MAX(FSN_CAMERA_MIN_PAN_TIME,
+		    MIN(1.0, k) * FSN_CAMERA_MAX_PAN_TIME);
+	}
+
+	morph( &camera->theta, mtype, new_cam->theta, pan_time );
+	morph( &camera->phi, mtype, new_cam->phi, pan_time );
+	morph( &camera->distance, mtype, new_cam->distance, pan_time );
+	morph( &camera->near_clip, mtype, new_cam->near_clip, pan_time );
+	morph( &camera->far_clip, mtype, new_cam->far_clip, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.x, mtype, MAPV_CAMERA(new_cam)->target.x, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.y, mtype, MAPV_CAMERA(new_cam)->target.y, pan_time );
 	morph( &MAPV_CAMERA(camera)->target.z, mtype, MAPV_CAMERA(new_cam)->target.z, pan_time );
@@ -1013,6 +1191,10 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 		pan_time = treev_look_at( node, mtype, pan_time_override );
 		break;
 
+		case FSV_FSN:
+		pan_time = fsn_look_at( node, mtype, pan_time_override );
+		break;
+
 		SWITCH_FAIL
 	}
 
@@ -1171,6 +1353,7 @@ camera_birdseye_view( boolean going_up )
 {
 	union AnyCamera new_anycam;
 	Camera *new_cam, *pre_cam;
+	XYZvec fsn_ext;
 	RTvec ext_c1;
 	double pan_time = 0.0;
 
@@ -1199,6 +1382,10 @@ camera_birdseye_view( boolean going_up )
 
 		case FSV_TREEV:
 		pan_time = TREEV_CAMERA_MAX_PAN_TIME;
+		break;
+
+		case FSV_FSN:
+		pan_time = FSN_CAMERA_MAX_PAN_TIME;
 		break;
 
 		SWITCH_FAIL
@@ -1230,6 +1417,17 @@ camera_birdseye_view( boolean going_up )
 				new_cam->distance = 4.0 * camera->distance;
 			break;
 
+			case FSV_FSN:
+			/* Straight down over the whole landscape. Its extents
+			 * come from the FSN layout rather than from
+			 * MAPV_NODE_WIDTH( ) as the MapV arm above does -- see
+			 * the FSN_CAMERA_* note at the top of this file. */
+			new_cam->theta = FSN_CAMERA_THETA;
+			fsn_layout_extents( &fsn_ext.x, &fsn_ext.y, NULL );
+			new_cam->distance = field_distance( camera->fov,
+			    MAX(1.0, MAX(fsn_ext.x, fsn_ext.y)) );
+			break;
+
 			SWITCH_FAIL
 		}
 		new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
@@ -1257,6 +1455,9 @@ camera_birdseye_view( boolean going_up )
 			morph( &DISCV_CAMERA(camera)->target.y, MORPH_SIGMOID, DISCV_CAMERA(pre_cam)->target.y, pan_time );
 			break;
 
+			case FSV_FSN:
+			/* Shares MapV's Cartesian target storage -- see the
+			 * FSN_CAMERA_* note at the top of this file */
 			case FSV_MAPV:
 			morph( &MAPV_CAMERA(camera)->target.x, MORPH_SIGMOID, MAPV_CAMERA(pre_cam)->target.x, pan_time );
 			morph( &MAPV_CAMERA(camera)->target.y, MORPH_SIGMOID, MAPV_CAMERA(pre_cam)->target.y, pan_time );
