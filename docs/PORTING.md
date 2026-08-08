@@ -3,9 +3,29 @@
 This branch (`metal-port`) replaces the GTK3 + OpenGL frontend with
 SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 
+## Retrospective (2026-08-06 → 2026-08-08)
+
+**All six milestones (M0–M6) are complete.** The port ran over three
+calendar days: M0 (bootstrap) and M1 (headless core extraction) on
+2026-08-06; M2 through the bulk of M6 (SDL3/Metal app skeleton, the
+SDL_GPU renderer, geometry/text porting, input and picking, the full
+ImGui UI, persistence, packaging and CI) on 2026-08-07; the remaining
+M6 tasks (release artifacts, demo video, this documentation pass) on
+2026-08-08. Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
+— every step is now checked off, with inline deviation notes wherever a
+task's real outcome (recorded here, task by task, as it happened)
+diverged from the plan's original sketch. The two largest such
+deviations: Milestone 6's task list grew a `linux-sdl` CI job and a
+`release` job that the plan's Task 6.2 sketch didn't anticipate (folded
+into Task 6.3 as the release work landed), and Task 5.3 turned up a
+real pre-existing bug — `lib/nvstore.c`, the settings-persistence
+backend both frontends share, was a complete no-op stub upstream —
+fixed as part of this port rather than deferred, since Task 5.3's own
+persistence requirement was unimplementable otherwise.
+
 - Plan: [docs/superpowers/plans/2026-08-06-macos-metal-port.md](superpowers/plans/2026-08-06-macos-metal-port.md)
 - Upstream: https://github.com/jabl/fsv (tracked on `master`)
-- Status: **M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done through Task 6.4 (Xcode project, CI, release artifacts, demo video)**
+- Status: **M0–M6 complete.** M1 (headless core) done — M2 (dependencies + app skeleton) done — M3 done — M4 (input + picking) done — M5 done (UI parity + persistence) — M6 done (Xcode project, CI, release artifacts, demo video, this documentation pass)
 
 ## Task 1.1 verification (platform hooks header)
 
@@ -2814,6 +2834,100 @@ first pass still exceeds the ~10MB budget). Frame dumps are deleted
   file's own "Task 6.4" section for whoever next needs to
   re-record after a UI change.
 
+## Task 6.5 verification (README rewrite + porting retrospective)
+
+Rewrote `README.md` end to end: the metal-port banner now says the port
+*is done* (not "is porting"), the Install section is macOS-first (brew
+one-liner, `meson setup && ninja`, optional `.app` bundle/Xcode pointer,
+prebuilt-binary link) with Linux kept as a secondary section covering
+both frontends, a new Controls section replaces nothing (there wasn't
+one before) built directly from reading `src/sdl/input.cpp`, and the
+entire "TODO" section is replaced by "What's been done" (this port's own
+~9 bullets, jabl/fsv's inherited history condensed to 3, and an honest
+"Known limitations" list) with the old "Misc notes / OpenGL versions"
+section preserved verbatim under a collapsed `<details>` rather than
+deleted. Added this retrospective header to `docs/PORTING.md` and
+checked off every completed checkbox in the plan doc
+(`docs/superpowers/plans/2026-08-06-macos-metal-port.md`), with brief
+inline deviation notes at the tasks where the real outcome diverged from
+the plan's original sketch (Tasks 3.2–3.4, 4.1, 5.3, 6.1–6.3).
+
+**A real correction, not just a doc pass:** the task brief's own
+pre-reading list asserted the controls include "double-click
+activate/warp". Reading `src/sdl/input.cpp` in full (its own header
+comment, plus the button-down/up handlers) shows this is not the actual
+behavior — the port deliberately reproduces `viewport.c`'s exact
+original semantics, where a double-click is just two ordinary clicks in
+a row (`grep -n "DoubleClick\|clicks ==\|clicks >" src/sdl/*.cpp
+src/sdl/*.h` finds nothing; the file's own comment block explains why:
+GDK's second `GDK_2BUTTON_PRESS` event added nothing on top of the first
+ordinary press, and SDL has no equivalent event to ignore in the first
+place). There is no "activate/warp" gesture anywhere in the 3D viewport
+in either the original or this port — that behavior belongs to the
+separate directory-tree panel (`ui_panels.cpp`, ported from `dirtree.c`
+in Task 5.2), not the 3D view. The README's Controls table was written
+from the real behavior, and this deviation from the brief's assumption
+is called out explicitly rather than silently ported as fact.
+
+**Controls table cross-checked row by row against `input.cpp`:**
+left-click (`SDL_EVENT_MOUSE_BUTTON_DOWN`/`UP`, `btn1`) → select on
+press (`update_highlight`), fly-to on release
+(`camera_look_at(g_indicated_node)`); middle-drag (`btn2` in
+`SDL_EVENT_MOUSE_MOTION`) → `camera_dolly()`; Ctrl+left-drag (`ctrl_key
+&& btn1`) → `camera_revolve()`; scroll wheel
+(`SDL_EVENT_MOUSE_WHEEL`) → `camera_dolly()`, labeled in both the source
+comment and the README as an addition, not a port; right-click (`btn3`)
+→ `g_context_menu_request` (consumed by `ui_main.cpp`'s context menu:
+Look At, Properties…, Expand/Collapse — cross-checked against
+`ui_main.cpp`'s `MenuItem` calls); hover with no button
+(`SDL_EVENT_MOUSE_MOTION`'s final `else` branch) →
+`node_at_cursor()`/`update_highlight()`. Menu highlights table
+cross-checked against `ui_main.cpp`'s actual `BeginMenu`/`MenuItem`
+calls (File/Vis/View/Colors/Help), not reconstructed from memory.
+
+**Link/anchor verification:** every relative link the new README adds
+was confirmed to resolve to a real path in the tree —
+`docs/media/demo.gif`, `docs/media/demo.mp4`, `docs/PORTING.md`,
+`packaging/macos/make-bundle.sh`, `packaging/xcode/README.md`,
+`.github/workflows/ci.yml`, `src/sdl/input.cpp` — all present
+(`test -e` on each). The demo embed and its mp4 caption line are
+untouched from Task 6.4.
+
+**Install commands run fresh, not just read.** Per this task's own
+verification bar, the macOS Install section's exact commands were run
+end to end against a clean scratch build directory (outside the repo,
+deleted afterward), not merely inspected:
+- `brew list --versions` confirmed `glib cglm meson ninja pkgconf sdl3`
+  already installed (same one-liner the README and CI both use — no
+  version drift to report).
+- `meson setup <scratch-builddir> .` configured cleanly (default
+  `frontend=sdl`, `Subprojects: imgui: YES`, 13 targets).
+- `ninja -C <scratch-builddir>` — **41/41 targets**, zero errors (one
+  pre-existing, unrelated `G_LOG_DOMAIN` redefinition warning already
+  noted in earlier tasks' verification sections).
+- `meson test -C <scratch-builddir>` → **3/3** (`fsv:scanfs`,
+  `fsv:nvstore`, `fsv:color_persistence`).
+- `./builddir/src/sdl/fsv --screenshot ... tests/fixture` → real Metal
+  frame (`gpu: driver metal`, `gpu: depth format D32_FLOAT`, both shader
+  pairs loaded, `fsv: wrote ...bmp (1280x800)`), exit 0 — confirms the
+  binary the README tells a user to build and run actually works, not
+  just that it compiles.
+- `./builddir/src/sdl/fsv --help` printed the real usage line.
+- `packaging/macos/make-bundle.sh <scratch-builddir> <scratch>.app` —
+  produced a valid ad-hoc-signed bundle (`codesign -dv` →
+  `Signature=adhoc`), confirming the README's ".app bundle" pointer is
+  still accurate after Task 6.2+6.3's fix round changed
+  `make-bundle.sh`'s accepted argument shapes.
+- Scratch builddir and `.app` deleted after verification, per this
+  project's existing per-task convention (never commit scratch build
+  output).
+
+Not re-run for this task (no source change, and already covered by
+CI/earlier tasks' own verification): the Linux GTK/SDL builds, and a
+literal `xcodebuild` invocation (Task 6.1 already proved the Xcode
+wrapper builds; this task only changed its README pointer text, not the
+project itself).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2878,3 +2992,5 @@ code is kept.
 | 2026-08-08 | `linux-sdl` CI job is `continue-on-error: true`; `release` explicitly ignores its result (with `always()`) rather than gating on it | building SDL3 from source on Ubuntu is inherently more fragile than the apt-packaged GTK path and is a bonus, not the anti-regression job; releases must still ship a working Linux binary (falling back to GTK) even if this job fails |
 | 2026-08-08 | CI's `linux-sdl` job links SDL3 statically (`-DSDL_SHARED=OFF -DSDL_STATIC=ON`), not shared, and gained a standing `ldd`-based regression check for it | a shared build would dynamically link `libSDL3.so`, which no Ubuntu release ships a runtime package for either — the release binary would fail to start for every downloader with no user-side fix; static removes the dependency entirely, confirmed by running the binary in a bare `ubuntu:24.04` container |
 | 2026-08-08 | `make-bundle.sh` accepts a direct binary path as an alternative to a meson builddir | the script previously only understood a builddir layout, so it always failed when bundled into a release tarball, where the binary sits flat next to it instead |
+| 2026-08-08 | README's Controls table describes the real gestures read from `src/sdl/input.cpp`, not the task brief's own pre-reading assumption ("double-click activate/warp") | there is no double-click action anywhere in the 3D viewport, in this port or upstream — `viewport.c`'s original code and this file's port of it both treat a double-click as two ordinary clicks; porting an imagined gesture into user-facing docs would misinform users about behavior that doesn't exist |
+| 2026-08-08 | Old "Misc notes / OpenGL versions" section kept verbatim, moved under a collapsed `<details>` rather than deleted | it documents real, still-true constraints on the GTK/OpenGL frontend (core-profile context negotiation, GLSL version floor), which this port didn't touch and doesn't obsolete |

@@ -87,7 +87,7 @@ docs/
 - Create: `docs/PORTING.md`
 - Modify: `README.md` (top banner only)
 
-- [ ] **Step 1: Create branch and commit the plan**
+- [x] **Step 1: Create branch and commit the plan**
 
 ```bash
 git checkout -b metal-port   # if not already on it
@@ -95,7 +95,7 @@ git add docs/superpowers/plans/2026-08-06-macos-metal-port.md
 git commit -m "docs: add macOS/Metal port implementation plan"
 ```
 
-- [ ] **Step 2: Write docs/PORTING.md**
+- [x] **Step 2: Write docs/PORTING.md**
 
 ```markdown
 # Porting fsv to macOS / Metal
@@ -115,7 +115,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 | 2026-08-06 | Keep GLib, drop GTK | core relies on GNode/GList; GLib is headless-safe |
 ```
 
-- [ ] **Step 3: Add README banner under the title**
+- [x] **Step 3: Add README banner under the title**
 
 ```markdown
 > **⚠️ metal-port branch** — this fork is porting fsv to macOS with a native
@@ -123,7 +123,7 @@ SDL3 + SDL_GPU (Metal on macOS) + Dear ImGui.
 > For the stable GTK/OpenGL version, use [jabl/fsv](https://github.com/jabl/fsv).
 ```
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 ```bash
 git add docs/PORTING.md README.md
@@ -187,7 +187,7 @@ int fsv_animation_tick(void);
 #endif
 ```
 
-- [ ] **Step 1: Add the header exactly as above; define the global in `animation.c`**
+- [x] **Step 1: Add the header exactly as above; define the global in `animation.c`**
 
 ```c
 /* in src/animation.c, near top */
@@ -195,7 +195,7 @@ int fsv_animation_tick(void);
 FsvPlatformHooks fsv_platform; /* zero-initialized; frontends fill it in */
 ```
 
-- [ ] **Step 2: Refactor the animation loop**
+- [x] **Step 2: Refactor the animation loop**
 
 In `src/animation.c`, rename the static `animation_loop()` body into the public tick and re-express both entry points through it:
 
@@ -243,9 +243,9 @@ static void gtk_render_frame(void) { ogl_draw(); }
    viewport-size and GtkAdjustment-backed scroll implementations. */
 ```
 
-- [ ] **Step 3: Build the GTK frontend on Linux CI or skip if no Linux at hand — at minimum `meson setup builddir && ninja -C builddir` must still succeed in a Linux container. Record outcome in docs/PORTING.md.**
+- [x] **Step 3: Build the GTK frontend on Linux CI or skip if no Linux at hand — at minimum `meson setup builddir && ninja -C builddir` must still succeed in a Linux container. Record outcome in docs/PORTING.md.**
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/fsv-platform.h src/animation.c src/gui.c
@@ -263,7 +263,7 @@ git commit -m "refactor: decouple animation loop from GTK/GL via platform hooks"
 - Consumes: `fsv_platform.set_scroll` / `fsv_platform.get_scroll` from Task 1.1.
 - Produces: `camera.h` API unchanged except `camera_pass_scrollbar_widgets(GtkWidget*, GtkWidget*)` is deleted; all internal `gtk_adjustment_*` reads/writes go through the two hooks.
 
-- [ ] **Step 1: Replace every `gtk_adjustment_get_value(adj) ...` pattern in camera.c.** Example of the transformation (from `src/camera.c:304`):
+- [x] **Step 1: Replace every `gtk_adjustment_get_value(adj) ...` pattern in camera.c.** Example of the transformation (from `src/camera.c:304`):
 
 ```c
 /* before */
@@ -274,14 +274,14 @@ value = fsv_platform.get_scroll(axis) + 0.5 * page_size;
 
 Track `lower/upper/page` in a small static struct per axis inside camera.c (they are computed there anyway before being pushed into the adjustments today).
 
-- [ ] **Step 2: Move the GtkAdjustment plumbing into gui.c** behind `set_scroll`/`get_scroll` so `-Dfrontend=gtk` behaves identically.
+- [x] **Step 2: Move the GtkAdjustment plumbing into gui.c** behind `set_scroll`/`get_scroll` so `-Dfrontend=gtk` behaves identically.
 
-- [ ] **Step 3: Verify camera.c no longer includes gtk**
+- [x] **Step 3: Verify camera.c no longer includes gtk**
 
 Run: `grep -n "gtk\|Gtk\|GTK" src/camera.c`
 Expected: no matches (remove the `#include <gtk/gtk.h>` at `src/camera.c:16`).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/camera.c src/camera.h src/gui.c
@@ -300,14 +300,14 @@ git commit -m "refactor: route camera scroll state through platform hooks, drop 
 **Interfaces:**
 - Produces: meson target `libfsvcore` = `[scanfs.c, colexp.c, color.c, common.c, animation.c, camera.c]` + deps `[glib-2.0, cglm, libm]`. (geometry.c joins the lib in M3 once its GL calls are gone.)
 
-- [ ] **Step 1: meson_options.txt**
+- [x] **Step 1: meson_options.txt**
 
 ```meson
 option('frontend', type: 'combo', choices: ['gtk', 'sdl'], value: 'gtk',
        description: 'UI frontend: gtk (legacy OpenGL) or sdl (SDL3 GPU / Metal)')
 ```
 
-- [ ] **Step 2: Define the core lib in src/meson.build**
+- [x] **Step 2: Define the core lib in src/meson.build**
 
 ```meson
 glibdep = dependency('glib-2.0')
@@ -320,7 +320,7 @@ libfsvcore = static_library('fsvcore', fsvcore_src,
 
 Note: `animation.c`/`camera.c` may still include `"ogl.h"` for constants — remove those includes; anything still needed moves to `fsv.h` or `fsv-platform.h`. `camera.c` calls into `geometry.c`/`gui.c` symbols; for the core lib to link into `fsv-scan`, keep `fsv-scan` linking only against the objects it needs, or add `-Wl,-undefined,dynamic_lookup`-free stubs: simplest correct approach is to give `fsv-scan` its own link line with `scanfs.c colexp.c color.c common.c` objects only (meson `extract_objects`), and leave full-lib linking to the real frontends. Choose that if the full lib does not link standalone, and note it in PORTING.md.
 
-- [ ] **Step 3: Write tools/fsv-scan.c**
+- [x] **Step 3: Write tools/fsv-scan.c**
 
 ```c
 /* fsv-scan: headless smoke test for the fsv core scanner.
@@ -353,7 +353,7 @@ main(int argc, char **argv)
 
 (The scanner's real signature and the tree global must be read from `src/scanfs.h` / `src/fsv.h` at implementation time and the CLI adjusted; the test contract below is what's fixed.)
 
-- [ ] **Step 4: Create the fixture and the test**
+- [x] **Step 4: Create the fixture and the test**
 
 ```bash
 mkdir -p tests/fixture/dir-a/dir-b
@@ -390,7 +390,7 @@ test_scanfs = executable('test_scanfs', 'tests/test_scanfs.c',
 test('scanfs', test_scanfs)
 ```
 
-- [ ] **Step 5: Run the test on macOS, verify it fails before wiring, passes after**
+- [x] **Step 5: Run the test on macOS, verify it fails before wiring, passes after**
 
 ```bash
 brew install glib cglm meson ninja pkgconf
@@ -400,7 +400,7 @@ ninja -C builddir test_scanfs fsv-scan && meson test -C builddir scanfs
 
 Expected: `1/1 scanfs OK`. If meson refuses to configure because GTK is missing, gate the GTK frontend targets behind `if frontend == 'gtk' and gtkdep.found()` so core targets configure everywhere.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add meson_options.txt meson.build src/meson.build tools/fsv-scan.c tests/
@@ -419,8 +419,8 @@ Deliverable: `fsv -Dfrontend=sdl` opens a native macOS window, clears via Metal,
 - Create: `subprojects/imgui/` (vendored: `imgui*.cpp/h`, `backends/imgui_impl_sdl3.*`, `backends/imgui_impl_sdlgpu3.*`, plus a hand-written `meson.build`)
 - Modify: root `meson.build`
 
-- [ ] **Step 1: Install SDL3**: `brew install sdl3`. Verify: `pkg-config --modversion sdl3` ≥ 3.2.
-- [ ] **Step 2: Vendor Dear ImGui (docking branch)** — copy the 9 core files + the two backends into `subprojects/imgui/`, pin the version in `subprojects/imgui/VERSION.txt`, and add:
+- [x] **Step 1: Install SDL3**: `brew install sdl3`. Verify: `pkg-config --modversion sdl3` ≥ 3.2.
+- [x] **Step 2: Vendor Dear ImGui (docking branch)** — copy the 9 core files + the two backends into `subprojects/imgui/`, pin the version in `subprojects/imgui/VERSION.txt`, and add:
 
 ```meson
 # subprojects/imgui/meson.build
@@ -435,7 +435,7 @@ imgui_dep = declare_dependency(link_with: imgui_lib,
   include_directories: ['.', 'backends'])
 ```
 
-- [ ] **Step 3: Commit** — `git commit -m "build: vendor Dear ImGui with SDL3/SDLGPU3 backends"`
+- [x] **Step 3: Commit** — `git commit -m "build: vendor Dear ImGui with SDL3/SDLGPU3 backends"`
 
 ### Task 2.2: main.cpp — window, GPU device, main loop, animation tick
 
@@ -448,7 +448,7 @@ imgui_dep = declare_dependency(link_with: imgui_lib,
 - Consumes: `fsv_platform`, `fsv_animation_tick()` (Task 1.1).
 - Produces: `bool app_frame_requested` semantics; `gpu_init(SDL_Window*)`, `gpu_begin_frame()`, `gpu_end_frame()` are stubbed here and implemented for real in M3 (`src/sdl/gpu.h`).
 
-- [ ] **Step 1: Write the skeleton (this is real, compilable SDL3 + ImGui SDLGPU3 wiring — cross-check identifiers against the vendored ImGui example `example_sdl3_sdlgpu3` and adjust if the pinned version drifted):**
+- [x] **Step 1: Write the skeleton (this is real, compilable SDL3 + ImGui SDLGPU3 wiring — cross-check identifiers against the vendored ImGui example `example_sdl3_sdlgpu3` and adjust if the pinned version drifted):**
 
 ```cpp
 // src/sdl/main.cpp — SPDX-License-Identifier: MIT
@@ -536,7 +536,7 @@ int main(int argc, char **argv)
 }
 ```
 
-- [ ] **Step 2: Wire meson**
+- [x] **Step 2: Wire meson**
 
 ```meson
 # src/sdl/meson.build
@@ -551,7 +551,7 @@ fsv_sdl = executable('fsv', ['main.cpp'],
 
 Root meson.build: `if get_option('frontend') == 'sdl'` → `subdir('src/sdl')`, and only look up GTK deps in the `gtk` arm.
 
-- [ ] **Step 3: Run and verify**
+- [x] **Step 3: Run and verify**
 
 ```bash
 meson setup build-sdl -Dfrontend=sdl && ninja -C build-sdl
@@ -560,7 +560,7 @@ meson setup build-sdl -Dfrontend=sdl && ninja -C build-sdl
 
 Expected: window opens, log line `GPU driver: metal`, ImGui demo renders, Cmd+Q quits, idle CPU near 0% (event-wait path).
 
-- [ ] **Step 4: Commit** — `git commit -m "feat: SDL3+Metal app skeleton with ImGui and core animation tick"`
+- [x] **Step 4: Commit** — `git commit -m "feat: SDL3+Metal app skeleton with ImGui and core animation tick"`
 
 ---
 
@@ -575,7 +575,7 @@ Deliverable: the three fsv modes (DiscV, MapV, TreeV) render via Metal, camera a
 - Create: `tools/compile-shaders.sh`
 - Create: `shaders/compiled/*.msl`, `*.spv` (generated, committed)
 
-- [ ] **Step 1: Port each `#version 140` shader to Vulkan-GLSL 4.50.** Mechanical transformation, e.g. for the scene vertex shader:
+- [x] **Step 1: Port each `#version 140` shader to Vulkan-GLSL 4.50.** Mechanical transformation, e.g. for the scene vertex shader:
 
 ```glsl
 #version 450
@@ -597,7 +597,7 @@ void main() {
 
 Uniform values that upstream sets via `glUniform*` in `ogl.c` move into this single UBO pushed per-frame with `SDL_PushGPUVertexUniformData(cmd, 0, &ubo, sizeof ubo)` (SDL_GPU set/binding conventions: vertex uniforms are set 1, fragment uniforms set 3, fragment samplers set 2).
 
-- [ ] **Step 2: tools/compile-shaders.sh**
+- [x] **Step 2: tools/compile-shaders.sh**
 
 ```bash
 #!/usr/bin/env bash
@@ -611,7 +611,7 @@ for f in src/*.vert src/*.frag; do
 done
 ```
 
-- [ ] **Step 3: Run it, commit sources AND artifacts** — `git commit -m "feat: port shaders to GLSL450, add compiled MSL/SPIR-V artifacts"`
+- [x] **Step 3: Run it, commit sources AND artifacts** — `git commit -m "feat: port shaders to GLSL450, add compiled MSL/SPIR-V artifacts"`
 
 ### Task 3.2: gpu.h/gpu.cpp — device, pipelines, mesh API, matrices
 
@@ -654,10 +654,19 @@ unsigned int gpu_pick(int x, int y);
 #endif
 ```
 
-- [ ] **Step 1: Implement device/pipeline creation.** Load `shaders/compiled/scene.vert.msl` (or `.spv` when the driver reports SPIRV) with `SDL_CreateGPUShader`; create the scene pipeline with `SDL_CreateGPUGraphicsPipeline` — vertex layout = `FsvVertex` (3 attributes, one buffer, 40-byte stride), depth-stencil target `SDL_GPU_TEXTUREFORMAT_D24_UNORM` with depth test/write on, cull back faces, and a second pipeline variant for picking (no blending, flat id color from a per-draw uniform).
-- [ ] **Step 2: Implement `FsvMesh`** with `SDL_CreateGPUBuffer` (VERTEX/INDEX usage), uploads through a transfer buffer + copy pass (`SDL_BeginGPUCopyPass`/`SDL_UploadToGPUBuffer`). Meshes are rebuilt on filesystem rescan and camera-independent, so upload once, draw many.
-- [ ] **Step 3: Port matrix setup** — move `setup_projection_matrix()` / `setup_modelview_matrix()` / `ogl_upload_matrices()` logic from `src/ogl.c` into `gpu.cpp` verbatim (they already use cglm), feeding the UBO instead of `glUniformMatrix4fv`.
-- [ ] **Step 4: Compile check + commit** — `git commit -m "feat: SDL_GPU renderer core (pipelines, mesh API, camera matrices)"`
+- [x] **Step 1: Implement device/pipeline creation.** Load `shaders/compiled/scene.vert.msl` (or `.spv` when the driver reports SPIRV) with `SDL_CreateGPUShader`; create the scene pipeline with `SDL_CreateGPUGraphicsPipeline` — vertex layout = `FsvVertex` (3 attributes, one buffer, 40-byte stride), depth-stencil target `SDL_GPU_TEXTUREFORMAT_D24_UNORM` with depth test/write on, cull back faces, and a second pipeline variant for picking (no blending, flat id color from a per-draw uniform).
+- [x] **Step 2: Implement `FsvMesh`** with `SDL_CreateGPUBuffer` (VERTEX/INDEX usage), uploads through a transfer buffer + copy pass (`SDL_BeginGPUCopyPass`/`SDL_UploadToGPUBuffer`). Meshes are rebuilt on filesystem rescan and camera-independent, so upload once, draw many.
+- [x] **Step 3: Port matrix setup** — move `setup_projection_matrix()` / `setup_modelview_matrix()` / `ogl_upload_matrices()` logic from `src/ogl.c` into `gpu.cpp` verbatim (they already use cglm), feeding the UBO instead of `glUniformMatrix4fv`.
+- [x] **Step 4: Compile check + commit** — `git commit -m "feat: SDL_GPU renderer core (pipelines, mesh API, camera matrices)"`
+
+**Deviation (Task 3.3):** the depth format actually in use is `D32_FLOAT`,
+not `D24_UNORM` — `SDL_GPUTextureSupportsFormat()` reports `D24_UNORM`
+unsupported on Apple Silicon, so the code falls back per its own checked
+query. The `FsvMesh` retained-handle API sketched here was replaced in
+Task 3.3 by an immediate-mode `gpu_draw()` that records-then-replays each
+frame (see PORTING.md, Task 3.3 — `geometry.c` owns no persistent meshes,
+and SDL_GPU forbids buffer copies inside a render pass, so a per-call-site
+mesh reused across nodes painted every node with the last one's geometry).
 
 ### Task 3.3: Port geometry.c off OpenGL
 
@@ -675,12 +684,12 @@ Mapping table to apply mechanically:
 | `glUniform*` color/id pushes | per-draw uniform via `fsv_mesh_draw` variant `fsv_mesh_draw_id(m, id)` (add to gpu.h if geometry.c needs it for picking colors) |
 | `glEnable/glDisable(GL_...)` state toggles | pipeline state — delete; encode in the two pipelines |
 
-- [ ] **Step 1: Do the mechanical port file-section by file-section (DiscV, MapV, TreeV builders), compiling after each section.**
-- [ ] **Step 2: Verify** `grep -c "\bgl[A-Z]" src/geometry.c` → `0`, and no `epoxy` include.
-- [ ] **Step 3: Wire `sdl_render_frame()`** in main.cpp: `gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();` then the existing ImGui pass renders on top in the same swapchain texture (load_op LOAD for the ImGui pass).
-- [ ] **Step 4: Run `./fsv ~/some/dir`** — expect the classic fsv landscape rendered by Metal; middle-drag not yet wired, camera intro animation (splash → mode) should play since animation ticks are live.
-- [ ] **Step 5: Add `--screenshot out.bmp` flag** using `SDL_DownloadFromGPUTexture` on the swapchain-sized offscreen target, for CI smoke tests. Verify file is non-black.
-- [ ] **Step 6: Commit** — `git commit -m "feat: render fsv scene via SDL_GPU/Metal"` (commit per section in Step 1 too).
+- [x] **Step 1: Do the mechanical port file-section by file-section (DiscV, MapV, TreeV builders), compiling after each section.**
+- [x] **Step 2: Verify** `grep -c "\bgl[A-Z]" src/geometry.c` → `0`, and no `epoxy` include.
+- [x] **Step 3: Wire `sdl_render_frame()`** in main.cpp: `gpu_scene_begin(); geometry_draw(TRUE); gpu_scene_end();` then the existing ImGui pass renders on top in the same swapchain texture (load_op LOAD for the ImGui pass).
+- [x] **Step 4: Run `./fsv ~/some/dir`** — expect the classic fsv landscape rendered by Metal; middle-drag not yet wired, camera intro animation (splash → mode) should play since animation ticks are live.
+- [x] **Step 5: Add `--screenshot out.bmp` flag** using `SDL_DownloadFromGPUTexture` on the swapchain-sized offscreen target, for CI smoke tests. Verify file is non-black.
+- [x] **Step 6: Commit** — `git commit -m "feat: render fsv scene via SDL_GPU/Metal"` (commit per section in Step 1 too).
 
 ### Task 3.4: Port tmaptext.c → text3d.cpp (3D name labels)
 
@@ -688,8 +697,14 @@ Mapping table to apply mechanically:
 - Create: `src/sdl/text3d.cpp` (port of `src/tmaptext.c`, 55 GL calls)
 - Modify: `src/sdl/gpu.cpp` (text pipeline: alpha-blended, textured quads, `text.vert/frag` shaders)
 
-- [ ] **Step 1: Keep the existing font-atlas generation logic from tmaptext.c; swap texture upload to `SDL_CreateGPUTexture` + copy pass; label quads become a dynamic `FsvMesh` rebuilt when labels change.**
-- [ ] **Step 2: Verify labels render in TreeV mode (directory names on pedestals). Commit** — `git commit -m "feat: port 3D text labels to SDL_GPU"`.
+- [x] **Step 1: Keep the existing font-atlas generation logic from tmaptext.c; swap texture upload to `SDL_CreateGPUTexture` + copy pass; label quads become a dynamic `FsvMesh` rebuilt when labels change.**
+- [x] **Step 2: Verify labels render in TreeV mode (directory names on pedestals). Commit** — `git commit -m "feat: port 3D text labels to SDL_GPU"`.
+
+**Deviation:** no separate `src/sdl/text3d.cpp` file — `tmaptext.c`'s GL
+surface was small (55 calls: one texture, one program, one draw) against
+a lot of shared glyph-layout math, so it was ported in place behind six
+new `gpu.h` entry points instead, avoiding either duplicating that math
+in a new file or `#include`-ing the original (see PORTING.md, Task 3.4).
 
 ---
 
@@ -710,15 +725,25 @@ Port the bindings from `src/viewport.c` and the original man page semantics:
 - Right click: ImGui context menu (Task 5.1 provides the menu content; until then, log).
 - Scroll wheel: `camera_dolly(delta)`.
 
-- [ ] **Step 1: Implement, compile, manual test each binding. Commit** — `git commit -m "feat: port mouse navigation and selection input"`.
+- [x] **Step 1: Implement, compile, manual test each binding. Commit** — `git commit -m "feat: port mouse navigation and selection input"`.
+
+**Deviation:** the bindings above were this plan's *assumption*, written
+before `viewport.c` was read in full; the real gestures (PORTING.md,
+Task 4.1) are middle-drag dolly and Ctrl+left-drag revolve, not a
+middle-drag "flight" with Shift for vertical motion — `viewport.c` has no
+flight mechanic and no Shift modifier anywhere. Left double-click has no
+"activate" behavior in the 3D viewport either (that lives in `dirtree.c`,
+ported separately in Task 5.2); a double-click is just two ordinary
+clicks in a row, exactly as upstream. Scroll-wheel dolly was ported as a
+labeled *addition* (upstream has no wheel gesture at all), not a port.
 
 ### Task 4.2: gpu_pick — color-ID picking readback
 
 **Files:**
 - Modify: `src/sdl/gpu.cpp`
 
-- [ ] **Step 1: Implement `gpu_pick(x, y)`** as a direct port of `ogl_select_modern()` (`src/ogl.c:456`): render `geometry_draw(FALSE)` with the picking pipeline into a private RGBA8 render target, then `SDL_DownloadFromGPUTexture` the single texel `(x, height-1-y)` region via a transfer buffer, `SDL_MapGPUTransferBuffer`, decode `id = r | g<<8 | b<<16`. Note in a comment: full-target download is acceptable at first (picking is click-frequency); optimize to a 1×1 region only if profiling demands.
-- [ ] **Step 2: Manual test — click each of ~10 nodes in the fixture tree; selection highlight and dirtree state must match. Commit** — `git commit -m "feat: color-ID picking via GPU readback"`.
+- [x] **Step 1: Implement `gpu_pick(x, y)`** as a direct port of `ogl_select_modern()` (`src/ogl.c:456`): render `geometry_draw(FALSE)` with the picking pipeline into a private RGBA8 render target, then `SDL_DownloadFromGPUTexture` the single texel `(x, height-1-y)` region via a transfer buffer, `SDL_MapGPUTransferBuffer`, decode `id = r | g<<8 | b<<16`. Note in a comment: full-target download is acceptable at first (picking is click-frequency); optimize to a 1×1 region only if profiling demands.
+- [x] **Step 2: Manual test — click each of ~10 nodes in the fixture tree; selection highlight and dirtree state must match. Commit** — `git commit -m "feat: color-ID picking via GPU readback"`.
 
 ---
 
@@ -731,7 +756,7 @@ Deliverable: menu bar, directory tree panel, file list, color-setup and properti
 - Menus to reproduce (from `src/gui.c` menu construction): **File** (Change root…, Rescan, Exit), **Vis** (DiscV/MapV/TreeV radio → `fsv_set_mode()`), **Colors** (by node type / timestamp / wildcard → dialog), **Help** (About, Controls).
 - "Change root…" uses ImGui's file-browser-less approach: SDL3's `SDL_ShowOpenFolderDialog` (native macOS panel).
 
-- [ ] Implement + commit — `git commit -m "feat: ImGui menu bar and mode switching"`.
+- [x] Implement + commit — `git commit -m "feat: ImGui menu bar and mode switching"`.
 
 ### Task 5.2: ui_panels.cpp — directory tree + file list (replaces dirtree.c/filelist.c)
 
@@ -758,14 +783,24 @@ static void draw_dir_node(GNode *gnode)
 }
 ```
 
-- [ ] Implement both panels in a left dock (ImGui docking), sync expand/collapse with `colexp` so tree state and 3D state stay coherent (as GTK's dirtree.c does today). Commit per panel.
+- [x] Implement both panels in a left dock (ImGui docking), sync expand/collapse with `colexp` so tree state and 3D state stay coherent (as GTK's dirtree.c does today). Commit per panel.
 
 ### Task 5.3: ui_dialogs.cpp — color setup, properties, about
 
 - Port `src/dialog.c` logic (not widgets): color-by-timestamp spectrum settings, color-by-wildcard-pattern list (add/edit/remove rows), node properties window (name, size, mtime, owner — data already computed in common.c).
 - About window: text + version; drop the GL splash of `about.c` (keep the splash *mode* removal noted in PORTING.md).
 
-- [ ] Implement + commit each dialog. Then flip the meson default: `frontend` default `sdl` when `host_machine.system() == 'darwin'`. Commit — `git commit -m "feat: ImGui dialogs; make SDL frontend the macOS default"`.
+- [x] Implement + commit each dialog. Then flip the meson default: `frontend` default `sdl` when `host_machine.system() == 'darwin'`. Commit — `git commit -m "feat: ImGui dialogs; make SDL frontend the macOS default"`.
+
+**Deviation, disclosed as a real find, not a plan miss:** `lib/nvstore.c`
+— the only persistence backend `color.c` uses, on *both* frontends — was
+a complete upstream stub (`nvs_open()` always returned `NULL`; every
+read/write was a no-op). Color-setup persistence was therefore
+unimplementable on either frontend until this task implemented
+`nvstore.c` for real (an in-memory tree serialized to `~/.fsvrc`, zero
+new dependencies). This also fixes the same latent gap in the GTK
+frontend, whose own (dead-code, `#if 0`'d) config path would now work
+too. See PORTING.md, Task 5.3.
 
 ---
 
@@ -782,7 +817,17 @@ build so users who want a bundled app can build one themselves.
 - Create: `packaging/xcode/README.md` — how to open, build, and (optionally) sign with your own team if you have one.
 - Create: `packaging/macos/Info.plist` + `packaging/macos/fsv.icns` — referenced by the Xcode target's bundle step for local use.
 
-- [ ] Generate the project, verify `xcodebuild -project packaging/xcode/fsv.xcodeproj -scheme fsv build` succeeds on a clean checkout with only brew deps installed. Commit.
+- [x] Generate the project, verify `xcodebuild -project packaging/xcode/fsv.xcodeproj -scheme fsv build` succeeds on a clean checkout with only brew deps installed. Commit.
+
+**Deviation:** no `packaging/macos/fsv.icns` — the repo's only icon asset
+is a legacy GTK XPM (`src/xmaps/fsv-icon.xpm`), not a viable `.icns`
+source without a hand-drawn multi-resolution PNG set; skipped per this
+task's own "optional" carve-out (`make-bundle.sh` picks one up
+automatically if ever added). The target itself is a `PBXLegacyTarget`
+("External Build System"), with no Signing & Capabilities tab — such
+targets have no product for Xcode to sign, so ad-hoc signing lives in
+`packaging/macos/make-bundle.sh` instead, as this task's plan text itself
+anticipated.
 
 ### Task 6.2: GitHub Actions CI
 
@@ -814,31 +859,65 @@ jobs:
 
 (Note: GPU rendering can't run on CI runners; CI covers build + headless core tests. The `--screenshot` smoke test is a local/manual gate.)
 
-- [ ] Commit — `git commit -m "ci: macOS Metal build + Linux GTK build"`.
+- [x] Commit — `git commit -m "ci: macOS Metal build + Linux GTK build"`.
+
+**Deviation — the task list changed shape here.** The shipped
+`.github/workflows/ci.yml` has four jobs, not the two sketched above:
+`macos-metal`, `linux-gtk` (the anti-regression job — meson's default
+frontend became `sdl` in Task 5.3, so this job must pass
+`-Dfrontend=gtk` explicitly or it would silently stop exercising GTK at
+all), `linux-sdl` (best-effort, `continue-on-error: true` — SDL3 has no
+Ubuntu package on any GitHub-hosted runner as of this task, so it's
+built from source and cached), and `release` (Task 6.3's job, folded
+into the same workflow file rather than a separate change). Runner image
+is `macos-15`, not `macos-14` — `macos-14`'s image began deprecating
+during this branch's likely CI lifetime. See PORTING.md, Tasks 6.2+6.3.
 
 ### Task 6.3: Release artifacts in CI (user request, 2026-08-07)
 
 GitHub Actions is free for public repos; `ubuntu-latest` = Linux x86_64,
 `macos-14`+ = Apple Silicon (arm64). Extend the CI workflow:
 
-- [ ] macOS job uploads the built `fsv` binary (arm64) as an artifact on every push; Linux job builds the SDL frontend too (`-Dfrontend=sdl`, Vulkan available headless for build only) and uploads the x86_64 binary.
-- [ ] Add a `release` job triggered on tag push (`v*`): repackages both artifacts (tar.gz with shaders/ and README) and attaches them to a GitHub Release via `softprops/action-gh-release` (or `gh release upload`).
-- [ ] Commit — `git commit -m "ci: attach Linux x86_64 and macOS arm64 binaries to releases"`.
+- [x] macOS job uploads the built `fsv` binary (arm64) as an artifact on every push; Linux job builds the SDL frontend too (`-Dfrontend=sdl`, Vulkan available headless for build only) and uploads the x86_64 binary.
+- [x] Add a `release` job triggered on tag push (`v*`): repackages both artifacts (tar.gz with shaders/ and README) and attaches them to a GitHub Release via `softprops/action-gh-release` (or `gh release upload`).
+- [x] Commit — `git commit -m "ci: attach Linux x86_64 and macOS arm64 binaries to releases"`.
+
+**Deviations:** release tarballs deliberately do NOT contain a `shaders/`
+directory (unlike this task's own text above) — shaders are compiled
+offline and embedded in the binary since Task 3.2, so nothing under
+`shaders/` is needed at runtime on either platform. Release publication
+uses the `gh` CLI directly (`gh release create`/`gh release upload`),
+not `softprops/action-gh-release`. The Linux tarball ships the SDL binary
+when the best-effort `linux-sdl` job produced one, falling back to the
+GTK binary otherwise (both tiers of dependency documented in each
+tarball's `USAGE.txt`); a code-review fix round also made the Linux SDL
+build link SDL3 **statically** (a first pass linked it shared, which
+would not have started on any real Ubuntu download target — see
+PORTING.md's Task 6.2+6.3 fix round).
 
 ### Task 6.4: Demo video (user request, 2026-08-07)
 
 A ≤20s demo video of navigating this repo's own source tree in fsv, embedded in the README.
 
-- [ ] Add a `--record <dir> <seconds> <out-prefix>` mode to the SDL frontend (or a small driver script): drive the camera programmatically (scripted look_at/dolly/revolve sequence over the project's `src/` tree), render frames offscreen via the existing readback path at ~30fps, dump numbered PNGs/BMPs. Screen capture is TCC-blocked in this environment — offscreen rendering is the sanctioned path.
-- [ ] Assemble with ffmpeg (brew): `demo.mp4` (H.264, ≤20s) AND `demo.gif` (optimized ≤10MB, palette pass) committed under `docs/media/`.
-- [ ] Embed `docs/media/demo.gif` in README.md near the top. Commit — `git commit -m "docs: add navigation demo video"`.
-- [ ] Remove the recording mode afterwards ONLY if it required invasive hooks; a clean `--record` flag may stay (useful for future docs).
+- [x] Add a `--record <dir> <seconds> <out-prefix>` mode to the SDL frontend (or a small driver script): drive the camera programmatically (scripted look_at/dolly/revolve sequence over the project's `src/` tree), render frames offscreen via the existing readback path at ~30fps, dump numbered PNGs/BMPs. Screen capture is TCC-blocked in this environment — offscreen rendering is the sanctioned path.
+- [x] Assemble with ffmpeg (brew): `demo.mp4` (H.264, ≤20s) AND `demo.gif` (optimized ≤10MB, palette pass) committed under `docs/media/`.
+- [x] Embed `docs/media/demo.gif` in README.md near the top. Commit — `git commit -m "docs: add navigation demo video"`.
+- [x] Remove the recording mode afterwards ONLY if it required invasive hooks; a clean `--record` flag may stay (useful for future docs).
 
 ### Task 6.5: Documentation (amended per user request, 2026-08-07)
 
-- [ ] Rewrite `README.md`: what fsv is (fsn lineage), **revised Install section** (macOS: brew deps + meson build + Xcode project pointer; Linux: apt deps, both frontends; link CI release artifacts for prebuilt binaries), **replace the "TODO" section with a "What's been done" section** summarizing the metal-port work (SDL3 GPU/Metal renderer, ImGui UI, preserved GTK frontend, CI), controls table (the REAL gestures from input.cpp), demo GIF embed, screenshots. English.
-- [ ] Update `docs/PORTING.md` decision log; mark plan checkboxes done.
-- [ ] Commit — `git commit -m "docs: macOS-first README and porting retrospective"`.
+- [x] Rewrite `README.md`: what fsv is (fsn lineage), **revised Install section** (macOS: brew deps + meson build + Xcode project pointer; Linux: apt deps, both frontends; link CI release artifacts for prebuilt binaries), **replace the "TODO" section with a "What's been done" section** summarizing the metal-port work (SDL3 GPU/Metal renderer, ImGui UI, preserved GTK frontend, CI), controls table (the REAL gestures from input.cpp), demo GIF embed, screenshots. English.
+- [x] Update `docs/PORTING.md` decision log; mark plan checkboxes done.
+- [x] Commit — `git commit -m "docs: macOS-first README and porting retrospective"`.
+
+**Deviation:** the Controls table in the rewritten README does not match
+the task brief's own pre-reading assumption ("double-click
+activate/warp") — reading `src/sdl/input.cpp` in full shows no such
+gesture exists anywhere in the 3D viewport, in this port or upstream; see
+PORTING.md's Task 6.5 section for the full correction. No separate
+"screenshots" section was added beyond the existing demo GIF/mp4 embed
+(from Task 6.4) — this task's own scope list already folds screenshots
+into that embed rather than asking for a second, static set.
 
 ---
 

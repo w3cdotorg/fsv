@@ -1,8 +1,11 @@
 # FSV
 
-> **⚠️ metal-port branch** — this fork is porting fsv to macOS with a native
-> Metal renderer (SDL3 GPU + Dear ImGui). See [`docs/PORTING.md`](docs/PORTING.md).
-> For the stable GTK/OpenGL version, use [jabl/fsv](https://github.com/jabl/fsv).
+> **metal-port branch** — this branch **is** the macOS/Metal port of fsv: a
+> native SDL3 GPU (Metal) renderer with a Dear ImGui interface, replacing
+> the GTK3 + OpenGL frontend on macOS. The legacy GTK/OpenGL frontend is
+> preserved and keeps building on Linux. See [`docs/PORTING.md`](docs/PORTING.md)
+> for the full porting record. For the original GTK/OpenGL-only project,
+> use [jabl/fsv](https://github.com/jabl/fsv).
 
 ![fsv navigating its own source tree](docs/media/demo.gif)
 
@@ -17,70 +20,164 @@ The original author is [Daniel Richard G.](https://github.com/iskunk), a former 
 
 > fsv (pronounced eff-ess-vee) is a file system visualizer in cyberspace. It lays out files and directories in three dimensions, geometrically representing the file system hierarchy to allow visual overview and analysis. fsv can visualize a modest home directory, a workstation's hard drive, or any arbitrarily large collection of files, limited only by the host computer's memory and graphics hardware.
 
-Its ancestor, SGI's `fsn` (pronounced "fusion") originated on IRIX and was prominently featured in Jurassic Park: ["It's a Unix system!"](https://www.youtube.com/watch?v=3HjOjvu6oKA). 
+Its ancestor, SGI's `fsn` (pronounced "fusion") originated on IRIX and was prominently featured in Jurassic Park: ["It's a Unix system!"](https://www.youtube.com/watch?v=3HjOjvu6oKA).
 
 [Screenshots](http://fsv.sourceforge.net/screenshots/) of the original clone are still available.
 
 Useful info and screenshots of the original SGI IRIX implementation are available on [siliconbunny](http://www.siliconbunny.com/fsn-the-irix-3d-file-system-tool-from-jurassic-park/).
 
-### Install
+## Install
 
-1. Clone the repository
-2. Install dependencies (Ubuntu): `sudo apt install libgtk-3-dev libgl1-mesa-dev libglu1-mesa-dev libepoxy-dev libcglm-dev`
-   For Gtk4: `sudo apt install libgtk-4-dev`
-    1. cglm is available as of Ubuntu 20.10. If cglm is not available
-       system-wide, make a subdirectory under the project root and extract
-        cglm there under the name cglm:
-        1. `mkdir -p subprojects; cd subprojects`
-        2. `tar xaf /path/to/cglm-version.tar.gz`
-        3. `mv cglm-version cglm`
-3. Run meson in repository root directory: `meson setup builddir`
-    - Or set non-default options: `meson setup -Dbuildtype=release -Dprefix=~/.local builddir`
-    - Check current options: `meson configure builddir`
-    - Modify options on existing builddir: `meson configure -Doptimization=g builddir`
-4. Compile: `ninja -C builddir`
-5. Install: `sudo ninja -C builddir install`
+### macOS (primary)
 
-## TODO
+```sh
+brew install glib cglm meson ninja pkgconf sdl3
+meson setup builddir
+ninja -C builddir
+./builddir/src/sdl/fsv [dir]
+```
 
-### DONE Update to Gtk+3
+`frontend=sdl` (the SDL3/Metal renderer, this port) is the default on
+every platform. `[dir]` defaults to the current directory if omitted.
 
-1. DONE Update code, still using gtk+2, to build cleanly with
-   `meson configure -Dc_args="-DGDK_DISABLE_DEPRECATED -DGTK_DISABLE_DEPRECATED" builddir`
-2. DONE Update code, still using gtk+-2.0, to build cleanly with
-   `meson configure -Dc_args="-DGDK_DISABLE_DEPRECATED -DGTK_DISABLE_DEPRECATED -DGTK_DISABLE_SINGLE_INCLUDES -DGSEAL_ENABLE" builddir`
-3. DONE Update to 'modern' OpenGL 3.1. GtkGLArea in Gtk+3 supports only core
-   profile, so modernize the OpenGL code before switching to Gtk+3 and the
-   OpenGL core profile.
-    1. Build scaffolding to use shaders and VBO's. Bundle shaders using
-       Gresource, compile and link shaders, use cglm for host side linear
-       algebra instead of OpenGL 1.x matrix stack manipulation.
-    2. Get rid of display lists, using VBO's and shaders inside display lists
-       does not work properly.
-    3. Replace deprecated GL_SELECT for picking objects. Maybe with something like
-       http://www.opengl-tutorial.org/miscellaneous/clicking-on-objects/picking-with-an-opengl-hack/
-    4. Convert immediate mode OpenGL code to VBO's, including switching from
-       GL_QUADS to GL_TRIANGLES.
-4. DONE Switch to Gtk+3
+- **`.app` bundle** (optional, for double-clicking instead of running from
+  a terminal): `packaging/macos/make-bundle.sh` copies the binary built
+  above into a standard bundle layout and ad-hoc code-signs it —
+  `packaging/macos/make-bundle.sh && open fsv.app`. See
+  [`packaging/macos/make-bundle.sh`](packaging/macos/make-bundle.sh) for
+  details (also used to build the tarball layout below).
+- **Xcode project** (optional, for people who'd rather hit Cmd-B than type
+  `meson`/`ninja`): `open packaging/xcode/fsv.xcodeproj`. It's a thin
+  wrapper around the same Meson build — see
+  [`packaging/xcode/README.md`](packaging/xcode/README.md).
+- **Prebuilt binaries**: every push builds macOS (arm64) and Linux
+  (x86_64) binaries; tagged releases (`v*`) attach both as `.tar.gz`
+  assets on the [GitHub Releases](../../releases) page — see
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-### Update to Gtk 4
+### Linux
 
-Step by step instructions at https://docs.gtk.org/gtk4/migrating-3to4.html
+**GTK frontend** (the legacy, OpenGL-based UI — the one Linux distributions
+have packages for today):
 
-1. DONE While using Gtk 3, build cleanly with
-   `meson configure -Dc_args="-DGDK_DISABLE_DEPRECATED -DGTK_DISABLE_DEPRECATED" builddir`
+```sh
+sudo apt install libgtk-3-dev libgl1-mesa-dev libglu1-mesa-dev libepoxy-dev libcglm-dev
+meson setup builddir -Dfrontend=gtk
+ninja -C builddir
+sudo ninja -C builddir install
+```
 
-### Setup github actions for CI
+cglm is available as of Ubuntu 20.10; on older systems, vendor it as a
+Meson subproject: `mkdir -p subprojects && cd subprojects && tar xaf
+/path/to/cglm-version.tar.gz && mv cglm-version cglm`.
 
-### Use Gtk calendar
+**SDL frontend** (this port's renderer, on Linux): needs SDL3 ≥ 3.2, which
+has no `apt` package on Ubuntu 22.04/24.04 as of this writing (it lands in
+Ubuntu starting with 25.10) — build it from source, or install it from
+your distribution if a package is available, then:
 
-There exists commented out code for using gnome date edit widget
-(gnome_date_edit_new etc.). Use gtk calendar widget instead.
-https://developer-old.gnome.org/gtk2/stable/GtkCalendar.html
+```sh
+meson setup builddir -Dfrontend=sdl
+ninja -C builddir
+./builddir/src/sdl/fsv [dir]
+```
 
-## Misc notes
+CI builds this configuration on every push against a from-source SDL3
+(see `.github/workflows/ci.yml`'s `linux-sdl` job) as a best-effort arm;
+`linux-gtk` is the load-bearing Linux build.
 
-### OpenGL versions and compatibility
+## Controls
+
+Gestures in the 3D viewport (ported from the original `viewport.c` mouse
+handling — see [`src/sdl/input.cpp`](src/sdl/input.cpp)):
+
+| Input | Action |
+|---|---|
+| Hover (no button held) | Highlight the node under the cursor; show its path in the status bar |
+| Left-click, release | Select the node under the cursor and fly the camera to it ("look at") |
+| Middle-drag | Dolly (zoom) the camera in/out |
+| Ctrl + left-drag | Revolve the camera around the current target |
+| Scroll wheel | Dolly (zoom) — an addition in this port; upstream fsv has no wheel gesture, only the middle-drag |
+| Right-click | Open the context menu for the node under the cursor (Look At, Properties…, Expand/Collapse) |
+
+There is no separate double-click action in the 3D view: a double-click
+is just two ordinary left-clicks in a row, matching the original GTK
+behavior exactly.
+
+Menu highlights (menu bar at the top of the window):
+
+| Menu | Notable items |
+|---|---|
+| **File** | Change Root… (pick a new directory to visualize), Rescan, Quit |
+| **Vis** | Switch between the three visualization modes — DiscV, MapV, TreeV |
+| **View** | Toggle the docked Directory Tree & Files panel |
+| **Colors** | Color nodes by type, by timestamp, or by wildcard pattern; Setup… opens the full color editor (settings persist to `~/.fsvrc`) |
+| **Help** | Controls (this table, in-app), About fsv… |
+
+## What's been done
+
+### The macOS / Metal port (this branch)
+
+- Extracted a headless, GTK-free core (`libfsvcore`: scanning, geometry
+  layout, camera math, color/persistence logic) behind a small
+  platform-hooks header, with a `fsv-scan` CLI and unit tests exercising
+  it independently of any UI.
+- Replaced the OpenGL renderer with SDL3's GPU API (Metal on macOS,
+  Vulkan-capable on Linux): shaders ported to GLSL 4.50, compiled offline
+  to MSL and SPIR-V, and embedded directly in the binary.
+- Rebuilt the entire UI in Dear ImGui — menu bar, docked directory-tree
+  and file-list panels, color-setup and node-properties dialogs — with no
+  GTK dependency in this frontend.
+- Ported real mouse-driven object picking (color-ID offscreen readback)
+  so clicking, hovering, and the context menu all resolve the actual node
+  under the cursor.
+- Implemented `nvstore.c` — the settings-persistence backend — for real.
+  It was a complete no-op stub upstream on *both* frontends, silently
+  discarding every color-setup change; it now serializes to `~/.fsvrc`,
+  fixing persistence for the GTK frontend too.
+- Added a scripted `--record` mode and screenshot support for
+  headless/offscreen rendering, used to produce the demo video above and
+  as a CI smoke test.
+- Set up GitHub Actions CI: a macOS/Metal build, a Linux/GTK
+  anti-regression build, a best-effort Linux/SDL build, and a release job
+  that attaches macOS (arm64) and Linux (x86_64) binaries to tagged
+  releases.
+- Added an optional Xcode project (an external-build-system wrapper
+  around the same Meson build) and a `.app`-bundling script for people
+  who don't want to use the command line.
+- Kept the GTK/OpenGL frontend building and working throughout — it's a
+  separate `meson` target, not a fork of this one, and Linux CI builds it
+  on every push.
+
+### Inherited from jabl/fsv
+
+- Migrated the UI from GTK+2 to GTK+3, including dropping every
+  deprecated GTK/GDK API along the way.
+- Modernized the OpenGL path to core-profile OpenGL 3.1 / GLSL 1.40:
+  shaders and VBOs instead of the immediate-mode/display-list code the
+  original SGI-era `fsv` used, with linear algebra moved onto `cglm`.
+  `GL_QUADS` became `GL_TRIANGLES` throughout.
+- Replaced the deprecated `GL_SELECT` picking mechanism with a modern
+  color-ID offscreen-render-and-read-back technique — the same technique
+  this port's Metal picking is itself based on.
+
+### Known limitations / ideas
+
+- **GTK4**: the GTK arm is still GTK+3; a GTK4 migration was scoped
+  upstream but never completed (see the GTK/OpenGL frontend notes below).
+- **DiscV**: has a few rougher visual edges than MapV/TreeV on both
+  frontends — not a regression from this port, just an area that never
+  got as much polish upstream.
+- **Line width**: SDL_GPU has no equivalent of `glLineWidth()` on any
+  backend, so every line (including the node cursor's outline) renders 1
+  pixel wide on the SDL/Metal frontend — a small, deliberate cosmetic
+  difference from the thicker lines the GTK/OpenGL build draws.
+- **GTK frontend testing**: the GTK arm only builds a real GUI on Linux
+  (macOS lacks a usable `GL/glu.h`), so its interactive behavior needs a
+  Linux machine or container to exercise visually.
+
+<details>
+<summary>GTK/OpenGL frontend notes (OpenGL versions and compatibility)</summary>
 
 Gtk+3 tries to create a OpenGL 3.2 core context (since 3.16), and if that fails
 it falls back to whatever legacy context it manages to create (since 3.20).
@@ -101,3 +198,5 @@ and also uses GLSL ES 3.0.
 Fsv is a relatively simple OpenGL application and doesn't need very fancy
 features. Thus, aim for OpenGL 3.1 and GLSL 1.40 in order to provide maximum
 compatibility.
+
+</details>
