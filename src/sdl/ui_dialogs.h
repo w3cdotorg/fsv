@@ -56,4 +56,18 @@ void ui_dialogs_close_properties(void);
 // frame, alongside ui_main_draw()/ui_panels_draw().
 void ui_dialogs_draw(void);
 
+// If Properties or Color Setup is open, closes it (Properties first if
+// both are) and returns true; otherwise a no-op returning false.
+//
+// Exists for src/sdl/input.cpp's Escape-to-collapse handler: neither
+// window is a modal or an ImGui popup (both are plain ImGui::Begin()
+// windows, per this file's header comment), so ImGui's own
+// io.WantCaptureKeyboard (only true for an active widget or a *modal*)
+// and IsPopupOpen() never see either of them. Without this, Escape
+// would fall straight through an open, unfocused Properties/Color Setup
+// window into the 3D scene underneath it. Closing here mirrors each
+// window's own close path exactly (the "Close" button, the title-bar
+// X) -- same next-frame teardown either way, nothing skipped.
+bool ui_dialogs_handle_escape(void);
+
 /* end ui_dialogs.h */

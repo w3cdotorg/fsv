@@ -61,11 +61,38 @@
 // IsKeyPressed(ImGuiKey_Escape) -> CloseCurrentPopup(), and this case
 // checks IsPopupOpen() itself so this file's own action does not *also*
 // fire underneath that popup on the same keypress.
+//
+// Two more gates, added on review, cover what WantCaptureKeyboard/
+// IsPopupOpen() still miss:
+//
+//  - A right-click and this Escape landing in the *same*
+//    SDL_PollEvent drain (both queued before either is processed --
+//    a batched/scripted injection, or just a fast enough double
+//    action) hit IsPopupOpen() before the context-menu popup exists:
+//    the BUTTON_DOWN case below only fills g_context_menu_request and
+//    returns, and ui_main.cpp's draw_context_menu() doesn't call
+//    ImGui::OpenPopup() on it until the *next* ui_main_draw() -- one
+//    full frame later than this same drain's Escape. So this case
+//    also checks g_context_menu_request.pending directly (this file
+//    owns that struct -- see the seam doc comment in input.h) and
+//    cancels it rather than falling through to the scene: a batched
+//    right-click+Escape should read the same as "open the menu, then
+//    immediately close it", not "open the menu AND collapse a node".
+//  - Properties and Color Setup (src/sdl/ui_dialogs.cpp) are plain
+//    ImGui::Begin() windows, not popups or modals -- neither
+//    WantCaptureKeyboard nor IsPopupOpen() above ever sees them, even
+//    while one is open and focused with no widget inside it active.
+//    Without an explicit check, Escape would fall straight through an
+//    open Properties/Color Setup window into the 3D scene underneath
+//    it. ui_dialogs_handle_escape() closes whichever is open (see its
+//    own doc comment for the fixed close order) and reports whether it
+//    did, so this case can stop there instead.
 #include "input.h"
 
 #include <imgui.h>
 
 #include "gpu.h" /* gpu_pick() -- self-guards extern "C" */
+#include "ui_dialogs.h" /* ui_dialogs_handle_escape() -- Properties/Color Setup, neither a popup or modal */
 
 extern "C" {
 #include "common.h"
@@ -538,11 +565,26 @@ input_handle_event(const SDL_Event *ev)
 			break;
 
 		// ImGui gets first refusal -- see the header comment above for
-		// why this is two checks, not one.
+		// why this is four checks, not one.
 		if (io.WantCaptureKeyboard)
 			break;
 		if (ImGui::IsPopupOpen("",
 		    ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+			break;
+		if (g_context_menu_request.pending) {
+			// A right-click and this Escape landed in the same event
+			// drain, before ui_main.cpp's draw_context_menu() ever got
+			// a frame to turn the request into a real (IsPopupOpen()-
+			// visible) popup -- see the header comment above. Cancel
+			// the request instead of falling through to the scene.
+			g_context_menu_request.pending = false;
+			g_context_menu_request.node = nullptr;
+			break;
+		}
+		if (ui_dialogs_handle_escape())
+			// Properties or Color Setup was open -- see the header
+			// comment above and ui_dialogs_handle_escape()'s own doc
+			// comment. Consumed; leave the scene alone.
 			break;
 
 		GNode *node = globals.current_node;

@@ -629,4 +629,28 @@ ui_dialogs_draw(void)
 	draw_properties_window();
 }
 
+bool
+ui_dialogs_handle_escape(void)
+{
+	// Order is arbitrary (the two windows are independent and neither
+	// is modal) but fixed and documented rather than left implicit:
+	// Properties first, then Color Setup. If both happen to be open, one
+	// Escape closes Properties; a second closes Color Setup. Each branch
+	// just flips the same `open` flag each window's own close affordance
+	// already flips (draw_properties_window()'s "Close" button;
+	// draw_color_setup_window()'s title-bar X, via `ImGui::Begin(...,
+	// &g_cs.open)`) -- the next ui_dialogs_draw() call runs the exact
+	// same teardown (ui_dialogs_close_properties() /
+	// color_config_destroy()) either way, nothing bypassed.
+	if (g_props.open) {
+		g_props.open = false;
+		return true;
+	}
+	if (g_cs.open) {
+		g_cs.open = false;
+		return true;
+	}
+	return false;
+}
+
 /* end ui_dialogs.cpp */

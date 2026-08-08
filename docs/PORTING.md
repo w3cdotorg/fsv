@@ -3202,6 +3202,51 @@ shipped as part of a task rather than afterward.
     platform's repeat delay, and letting that flood into this logic
     would silently walk multiple directory levels up the tree from one
     physical keypress the user never intended to hold for that purpose.
+  - **Fix round (review, 2026-08-08): the ImGui gate had two blind
+    spots beyond the popup case above.** Both `io.WantCaptureKeyboard`
+    and `IsPopupOpen()` only ever see an *active widget*, a *modal*
+    window, or an ImGui *popup* -- neither test has any concept of a
+    plain `ImGui::Begin()` window, which is exactly what Properties and
+    Color Setup (`src/sdl/ui_dialogs.cpp`) both are (this file's own
+    header comment: "Neither window is modal... matching every other
+    window this frontend has added"). Repro found on review: open
+    Properties, don't touch a widget inside it, press Escape -- the
+    scene collapsed a node *underneath* the still-open dialog, because
+    nothing in the original gate chain knew the dialog was there. Fixed
+    by adding `ui_dialogs_handle_escape()` (`src/sdl/ui_dialogs.cpp`/
+    `.h`): closes whichever of Properties/Color Setup is open
+    (Properties first, then Color Setup, if both happen to be) and
+    reports whether it did, checked in this case right after the popup
+    checks and before any scene action. A second, narrower gap: a
+    right-click and this Escape landing in the *same* `SDL_PollEvent`
+    drain (a batched/scripted injection, or just two fast physical
+    actions) hit `IsPopupOpen()` *before* the context-menu popup
+    exists -- the `BUTTON_DOWN` case only fills
+    `input.cpp`'s own `g_context_menu_request` and returns;
+    `ui_main.cpp`'s `draw_context_menu()` doesn't call
+    `ImGui::OpenPopup()` on it until the *next* frame. Fixed by also
+    checking `g_context_menu_request.pending` directly (this file
+    already owns that struct) and cancelling the request rather than
+    falling through to the scene, so a batched right-click+Escape reads
+    as "open the menu, then immediately close it" rather than "open the
+    menu AND collapse a node".
+  - **Disclosed, not specially handled -- rapid Escape volleys inherit
+    the same jerky-camera quirk already disclosed above for the
+    double-click addition's `curnode_is_equal` case.** Each Escape that
+    lands while a previous one's `colexp()`-driven pan is still in
+    flight calls `camera_look_at()`/`colexp()` again immediately
+    (`camera_look_at_full()` restarts a fresh minimum-duration pan
+    toward the new target rather than letting the in-flight one
+    finish), so a fast Esc-Esc-Esc walking up several directory levels
+    can visibly reads as several short, jerky re-aims rather than one
+    smooth pan up the tree. Verified harmless (no crash, no stuck
+    state, no misrouted event -- the second Escape always acts on
+    whatever `globals.current_node`/`dirtree_entry_expanded()` state
+    the first one already left, since both are plain synchronous C
+    calls with no async window between them) but not visually smooth;
+    fixing the *camera* side of this would mean changing `camera.c`'s
+    pan-restart behavior for every caller, not just this addition, and
+    was not asked for here.
   - Documented in `README.md`'s Controls table and the in-app
     Help → Controls window (`src/sdl/ui_main.cpp`), both marked as an
     addition the same way the scroll-wheel and double-click rows
