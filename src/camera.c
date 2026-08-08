@@ -1766,6 +1766,21 @@ camera_birdseye_view( boolean going_up )
 	}
 	else {
 		/* Restore pre-bird's-eye-view camera state */
+
+		/* Third consumer of the same whip fix as fsn_look_at( ) and the
+		 * going-up arm above (task-B2-report.md's fix round, item 2):
+		 * a flight can leave camera->theta unwrapped past a multiple of
+		 * 360, and morph( ) interpolates that raw number rather than
+		 * the angle it represents, so restoring straight to
+		 * pre_cam->theta can spin most of the way around instead of
+		 * taking the short arc back to where the user was before going
+		 * up. FSN-only, like the going-up arm's call: DiscV/MapV/TreeV
+		 * never wrap theta the way a flight does, so their own
+		 * pre-existing "long way round" behavior after a manual
+		 * revolve (documented in the same fix-round note) is left
+		 * alone here too. */
+		if (globals.fsv_mode == FSV_FSN)
+			unwrap_theta_toward( pre_cam->theta );
 		morph( &camera->theta, MORPH_SIGMOID, pre_cam->theta, pan_time );
 		morph( &camera->phi, MORPH_SIGMOID, pre_cam->phi, pan_time );
 		morph( &camera->distance, MORPH_SIGMOID, pre_cam->distance, pan_time );
