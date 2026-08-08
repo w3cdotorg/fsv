@@ -449,6 +449,33 @@ node_named( const char *absname )
 }
 
 
+/* fsn-mode Task C2: resolves an absolute node path -- in node_absname( )'s
+ * exact byte format -- back to the corresponding GNode in the *current*
+ * fstree, or NULL if there is none (a deleted node, or a path captured
+ * under a different Change Root than the one now loaded).
+ *
+ * The Marks panel (src/sdl/ui_rail.cpp) stores paths, not GNode pointers,
+ * precisely so a rescan or Change Root can't leave a stale pointer
+ * behind (see Task B1's UAF notes on why fsn geometry code is careful
+ * about the same thing); this is the other half of that round trip,
+ * called at "go to"/draw time rather than kept live.
+ *
+ * This is node_named( )'s exact contract under a new, purpose-named
+ * entry point. node_named( ) already walks the *whole* path component
+ * by component against the live root_dnode -- it is not a one-level
+ * lookup despite what its name alone might suggest; verified by reading
+ * it end to end before adding this wrapper rather than assumed. Kept as
+ * a separate name (instead of pointing marks straight at node_named( ))
+ * so the two call sites -- symlink-target resolution and mark
+ * resolution -- can each state their own intent, and so either one is
+ * free to diverge later without disturbing the other. */
+GNode *
+node_from_absname( const char *absname )
+{
+	return node_named( absname );
+}
+
+
 #ifdef HAVE_FILE_COMMAND
 /* Runs the 'file' command on the given file, and returns the output
  * (a verbose description of the file type) */

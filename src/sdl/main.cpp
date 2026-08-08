@@ -1095,6 +1095,14 @@ main(int argc, char **argv)
 	// gpu_set_landscape() before the first frame draws.
 	landscape_init();
 
+	// fsn-mode Task C2: loads the persisted "marks" vector (named node
+	// bookmarks) from ~/.fsvrc, same nvstore-backed pattern and the same
+	// startup slot as color_init()/landscape_init() just above. Safe
+	// before any filesystem has been scanned -- it only populates
+	// name/path strings, resolving no GNode pointers until a mark is
+	// drawn or gone to (src/sdl/ui_rail.cpp).
+	ui_marks_init();
+
 	// Before the scan, not after: scanning a large tree takes minutes,
 	// and gui_update() paints its progress overlay through these
 	// backends the whole time. --screenshot skips them (and so renders

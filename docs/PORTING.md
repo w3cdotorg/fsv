@@ -4972,6 +4972,153 @@ Verified:
 - **"Night" landscape remains uncalibrated** (Task A1's own disclosed
   gap; untouched here, and auto-landscape only ever selects "classic").
 
+### Task C2 verification (Marks panel — named node bookmarks)
+
+Upstream fsn's left-rail "Marks" list (task-C2-brief.md's reference
+screenshot): named bookmarks of nodes in the landscape, with "go to" and
+"delete" per row and a "Mark here" button that bookmarks
+`globals.current_node`. **A slight extension of the original**: shown in
+every mode, not FSN-only — a mark is just a node bookmark, and there's
+nothing FSN-specific about wanting to jump back to a node from MapV or
+TreeV either. It joins `src/sdl/ui_rail.cpp`'s camera rail below its
+Tilt/Height sliders.
+
+**Files:** `src/common.c`/`.h` (`node_from_absname()` — a purpose-named
+entry point wrapping the already-complete `node_named()`); `src/sdl/
+ui_rail.cpp`/`.h` (`ui_marks_init()`, the whole Marks section);
+`src/sdl/main.cpp` (`ui_marks_init()` call at startup); `tests/
+test_fsn_layout.c` (invariant 9).
+
+**Storage: paths, not pointers — same UAF discipline as Task B1.** Each
+mark is `{name, path}`, where `path` is `node_absname()`'s raw-byte
+absolute path. A rescan or Change Root frees and rebuilds the whole
+fstree, so a `GNode *` captured before that would dangle; a path string
+survives it and is resolved back to a live node only at draw time (to
+grey out a missing row) and at "go to" time, via the new
+`node_from_absname()`. This is cheap enough to redo every frame for a
+handful of marks and needs no dedicated "invalidate on rescan" hook.
+
+**`node_from_absname()` turned out to already exist, under a different
+name.** The brief asked to "compose a resolve helper... `node_from_absname(
+)` — verify against `node_absname()`'s format so round-trip is exact,"
+flagging `node_named()` as a "one level" lookup to check. Reading
+`node_named()` end to end (not skimmed) showed it already walks the
+*whole* path component by component against the live `root_dnode` — it
+is a complete resolver, not a one-level one, and its contract already
+matches `node_absname()`'s exact byte format (it strips `node_absname(
+root_dnode)` as a prefix, then `strtok()`s the rest against `NODE_DESC(
+node)->name`, the same raw name `node_absname()` itself concatenates).
+So `node_from_absname()` is a one-line wrapper around it, kept as a
+separate, purpose-named entry point rather than pointing marks straight
+at `node_named()` — the two call sites (existing symlink-target
+resolution, new mark resolution) can each state their own intent, and
+either is free to diverge later without disturbing the other.
+
+**Persistence mirrors `color.c`'s wpattern-group vector round trip
+exactly**: `nvs_vector_begin()`/`nvs_path_present()`/`nvs_vector_end()`
+around a repeated `mark` node, each holding scalar `name`/`path`
+children, under its own `marks` path. Loaded once at startup
+(`ui_marks_init()`, the same slot as `color_init()`/`landscape_init()` in
+`src/sdl/main.cpp`); every mutation (add/delete/rename) does a full
+rewrite immediately (`nvs_delete_recursive()` then re-write the whole
+vector) — there is no "Save" button to defer to, unlike the Color Setup
+dialog's Apply, so rewrite-on-every-change is the simplest thing that
+stays correct.
+
+**UI**: "Mark here" (disabled only when there's no current node — it
+doesn't touch the camera, so it isn't blocked by the same in-flight-morph
+guard as Reset/Go back/Front view); each row is a label + "Go" + "X". The
+label doubles as the smallest-decent-UX inline rename affordance: double-
+click to open an `ImGui::InputText`, commit on Enter or on losing focus,
+discard an empty edit. A row whose path doesn't resolve shows its label
+greyed (`ImGui::TextDisabled`) with a "Not found here: <path>" tooltip
+and a disabled "Go" button — never auto-removed, exactly per the brief
+("the user might switch back roots"). A resolved row's tooltip shows
+`node_absname_display()` (UTF-8-safe, NFC-composed) rather than the raw
+stored path, matching the B-era display/storage split; the raw path is
+the fallback for a row with no live node to ask a display form of.
+
+**A real bug the brief's own "go-to" verification step surfaced**:
+`camera_look_at_full()` asserts the target's immediate parent directory
+is already expanded in the dirtree. A mark pointing into a collapsed
+subdirectory (the normal case for anything not near the root) hit this
+assertion and aborted, discovered by the headed verification below, not
+by inspection. Fixed the same way `src/sdl/ui_dialogs.cpp`'s existing
+"Look at target node" button already does for symlink targets: `colexp(
+target->parent, COLEXP_EXPAND_ANY)` before `camera_look_at()`, if the
+parent isn't already expanded. `COLEXP_EXPAND_ANY` walks the *whole*
+ancestor chain (`colexp.c` recurses into `dnode->parent` under that
+message), so this also covers a mark buried several directories deep,
+not just one level — verified directly against the fixture's `dir-a/
+dir-b` (two levels under the root).
+
+**Verification.**
+
+1. **Both arms build clean.** SDL/macOS native. GTK: the same Debian
+   bookworm container prior tasks used (`fsvbuild`, repo bind-mounted at
+   `/work`) — a full reconfigure + rebuild produced the real GTK `fsv`
+   executable, **53/53 targets**, including `src/window.c`; `common.c`'s
+   new `node_from_absname()` compiled into `libfsvcore` there with no
+   unused-symbol warning (it has a real caller: `src/sdl/ui_rail.cpp`,
+   which the GTK arm doesn't link, but the function itself is an ordinary
+   exported entry point, not `static`, so nothing in that arm's build
+   flags to it). `meson test` **4/4 on both arms** (nvstore, scanfs,
+   color_persistence, fsn_layout) — `test_fsn_layout.c` gained invariant
+   9 (`node_from_absname()` round-trips `node_absname()` for the root, a
+   directory nested two deep, a sibling directory, and a file; a
+   never-existed path resolves to `NULL`).
+2. **Headed, direct-state verification** (temporary, non-committed hooks
+   in `src/sdl/main.cpp`/`ui_rail.cpp`/`.h` — the same "SDL_PushEvent /
+   direct state where cleaner" allowance prior tasks used, since
+   pixel-driving ImGui's double-click-to-rename and button hit-testing
+   would test ImGui's own input handling, not this task's logic; deleted
+   before either commit below — `git diff` against both shows no trace,
+   confirmed by grepping the tree for the hook names after removal). Run
+   against `tests/fixture` (`dir-a/dir-b` nested two deep, sibling
+   `dir-c`), `$HOME` redirected to a private temp directory so this never
+   touched the real invoking user's `~/.fsvrc`:
+   - **Add two marks** (`file1.txt` at the root, `dir-a/dir-b`) — logged
+     `resolved=1` for both immediately.
+   - **Simulate a relaunch** (re-run `ui_marks_init()`'s read path in the
+     same process, without touching the in-memory list any other way) —
+     logged `count=2`, both still `resolved=1`, proving the add persisted
+     to `~/.fsvrc`'s new `marks` vector (inspected directly afterward:
+     `marks\n\tmark\n\t\tname ...\n\t\tpath ...`, the same indented shape
+     `color`'s own sections use).
+   - **Go to each** — logged the resolved target's `node_absname_display(
+     )` for both, matching the expected node exactly, and (after the
+     `colexp()` fix above) no assertion failure, including for `dir-a/
+     dir-b`'s two-level-collapsed case.
+   - **Delete one** (`file1.txt`'s mark) — logged `count=1`; simulated
+     relaunch again — still `count=1`, only the `dir-b` mark, proving the
+     delete persisted too (not just the in-memory erase).
+   - **Missing-path case**: with only the `dir-a/dir-b` mark left, Change
+     Root to `tests/fixture/dir-c` (a sibling with no `dir-a` in it) —
+     logged `resolved=0` for that mark (the greyed-row case) without it
+     being removed from the list; Change Root back to `tests/fixture` —
+     logged `resolved=1` again, same mark, same path string, never
+     re-entered by the user.
+3. This section itself, added to `docs/PORTING.md`.
+
+### Concerns / disclosed gaps
+
+- **No de-duplication on "Mark here."** Marking the same node twice
+  creates two rows with the same path. Not handled per the brief's "keep
+  it simple" instruction; a minor UX rough edge, not a correctness one
+  (both rows resolve and behave independently).
+- **A missing mark's tooltip shows the raw stored path, not a display-
+  safe form.** There is no live `GNode *` for a missing entry to ask
+  `node_absname_display()` of; for the vanishingly rare case of a
+  non-UTF-8 byte sequence in a stored path, the tooltip could render
+  oddly. Accepted rather than duplicating `node_absname_display()`'s
+  validate-and-normalize logic against a raw string with no node behind
+  it.
+- **At most one row can be renamed at a time** (a single `g_editing_
+  index`, not per-row state). Matches the brief's "smallest decent UX"
+  framing; a second double-click while already editing another row just
+  moves the edit to the new row, discarding the first's pending (already
+  committed-on-blur, in practice) edit.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`

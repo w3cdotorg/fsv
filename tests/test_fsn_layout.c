@@ -27,6 +27,12 @@
  *      would otherwise get wrong;
  *   8. fsn_layout_nearest( ) (Task C1) maps a ground point to the
  *      pedestal it belongs to, including from outside the landscape.
+ *   9. node_from_absname( ) (Task C2, src/common.c) is the exact inverse
+ *      of node_absname( ): round-tripping every fixture node through
+ *      node_absname( ) -> node_from_absname( ) returns the same GNode,
+ *      and a path that doesn't exist in the tree resolves to NULL. This
+ *      is what the Marks panel's persisted paths rely on to survive a
+ *      relaunch.
  *
  * LINKING. src/geometry-fsn.c is gpu-free by construction and therefore
  * part of libfsvcore, so this links exactly like test_scanfs -- core
@@ -231,6 +237,25 @@ main(void)
 	assert(dir_c != NULL && NODE_IS_DIR(dir_c));
 	file1 = child_named(root, "file1.txt");
 	assert(file1 != NULL && !NODE_IS_DIR(file1));
+
+	/* 9. node_from_absname( ) round-trips node_absname( ) for every kind
+	 * of fixture node -- root, a directory nested two deep, a sibling
+	 * directory, and a plain file -- and returns NULL for a path that
+	 * was never in the tree to begin with. node_absname( ) reuses one
+	 * static buffer per call, so each name is xstrdup( )'d immediately,
+	 * before the next node_absname( ) call overwrites it. */
+	{
+		GNode *nodes[] = { root, dir_a, dir_b, dir_c, file1 };
+		size_t i;
+
+		for (i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+			char *absname = xstrdup(node_absname(nodes[i]));
+			assert(node_from_absname(absname) == nodes[i]);
+			xfree(absname);
+		}
+
+		assert(node_from_absname("/no/such/path/at/all") == NULL);
+	}
 
 	/* No layout yet */
 	assert(fsn_layout_get(root) == NULL);
