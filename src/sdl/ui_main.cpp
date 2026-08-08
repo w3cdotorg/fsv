@@ -20,6 +20,9 @@
 //   Vis    -> DiscV/MapV/TreeV == on_vis_*_activate() -> fsv_set_mode()
 //   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
 //                                 GTK's left pane has no show/hide toggle at all
+//          -> Camera Rail       == addition (fsn-mode Task A3, src/sdl/ui_rail.cpp);
+//                                 GTK's toolbar (src/window.c) has no show/hide
+//                                 toggle either
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
 //          -> Setup...        == on_color_setup_activate() -> dialog_color_setup()
 //                                 (Task 5.3, src/sdl/ui_dialogs.cpp)
@@ -42,6 +45,7 @@
 #include "input.h"
 #include "ui_dialogs.h"
 #include "ui_panels.h"
+#include "ui_rail.h"
 
 extern "C" {
 #include "common.h"
@@ -265,6 +269,13 @@ ui_main_draw(void)
 			if (ImGui::MenuItem("Directory Tree && Files", nullptr,
 			    panels_visible))
 				ui_panels_set_visible(!panels_visible);
+			// fsn-mode Task A3: same show/hide toggle pattern as the
+			// Directory Tree panel above -- upstream fsn's control rail
+			// had no show/hide affordance either, so this is an
+			// addition, not a port.
+			const bool rail_visible = ui_rail_get_visible();
+			if (ImGui::MenuItem("Camera Rail", nullptr, rail_visible))
+				ui_rail_set_visible(!rail_visible);
 			ImGui::EndMenu();
 		}
 

@@ -77,11 +77,27 @@ viewport_node_for_id(unsigned int id)
 	return node_table[id];
 }
 
-/* window.h */
+/* window.h
+ *
+ * window_set_access( )/window_birdseye_view_off( ) used to be pure no-ops
+ * here (this build had no widgets to grey out). fsn-mode Task A3's camera
+ * rail (src/sdl/ui_rail.cpp) is the first SDL-frontend consumer, so both
+ * now store the state real widgets would otherwise carry -- mirroring
+ * src/window.c's sw_widget_list / birdseye_view_tbutton_w, just as a pair
+ * of flags instead of GTK widgets. */
+static boolean g_window_access_enabled = TRUE;
+static boolean g_birdseye_active = FALSE;
+
 void
 window_set_access(boolean enabled)
 {
-	(void)enabled;
+	g_window_access_enabled = enabled;
+}
+
+boolean
+window_access_enabled(void)
+{
+	return g_window_access_enabled;
 }
 
 void
@@ -93,6 +109,19 @@ window_set_color_mode(ColorMode mode)
 void
 window_birdseye_view_off(void)
 {
+	g_birdseye_active = FALSE;
+}
+
+boolean
+window_birdseye_active(void)
+{
+	return g_birdseye_active;
+}
+
+void
+window_birdseye_set_active(boolean active)
+{
+	g_birdseye_active = active;
 }
 
 /* about.h — no About presentation or splash screen in this frontend */

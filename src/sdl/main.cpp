@@ -113,24 +113,49 @@ sdl_viewport_size(int *width, int *height)
 	SDL_GetWindowSizeInPixels(g_window, width, height);
 }
 
-// Scroll state for MapV/TreeV camera panning. Plain statics until the
-// ImGui scrollbars exist (Task 5.1); camera.c only ever reads back what
-// it wrote here, so panning behaves as if the user never scrolled.
-static double g_scroll[2];
+// Scroll state for MapV/TreeV camera panning. Plain statics stand in for
+// a real GtkAdjustment: camera.c only ever reads back what it wrote here
+// (fsv_platform.get_scroll()), so panning behaves as if the user never
+// scrolled -- until fsn-mode Task A3's camera rail (src/sdl/ui_rail.cpp)
+// became the first real consumer. lower/upper/page used to be discarded
+// ((void)-cast) since nothing read them back; ui_rail.cpp's Tilt/Height
+// sliders need the full ScrollState to render a sensible range, so all
+// four fields are kept now (see app_get_scroll_range() below).
+struct ScrollAxisState {
+	double lower = 0.0, upper = 100.0, page = 100.0, value = 0.0;
+};
+static ScrollAxisState g_scroll[2];
 
 static void
 sdl_set_scroll(int axis, double lower, double upper, double page, double pos)
 {
-	(void)lower;
-	(void)upper;
-	(void)page;
-	g_scroll[axis] = pos;
+	g_scroll[axis] = { lower, upper, page, pos };
 }
 
 static double
 sdl_get_scroll(int axis)
 {
-	return g_scroll[axis];
+	return g_scroll[axis].value;
+}
+
+// app.h: src/sdl/ui_rail.cpp's Tilt/Height sliders.
+void
+app_get_scroll_range(int axis, double *lower, double *upper, double *page,
+    double *value)
+{
+	const ScrollAxisState &s = g_scroll[axis];
+	*lower = s.lower;
+	*upper = s.upper;
+	*page = s.page;
+	*value = s.value;
+}
+
+// app.h: src/sdl/ui_rail.cpp's Tilt/Height sliders, on user drag.
+void
+app_scrollbar_dragged(int axis, double new_value)
+{
+	g_scroll[axis].value = new_value;
+	camera_scrollbar_moved(axis);
 }
 
 // ---- Startup ---------------------------------------------------------
@@ -184,14 +209,25 @@ enter_mode(FsvMode mode)
 	schedule_event((void (*)())initial_camera_pan, (char *)"new_fs", 1);
 }
 
+// Shared body of app_switch_mode() and app_reset_camera() below: the
+// "switch into this mode on an already-loaded filesystem" sequence
+// (geometry_init()/camera_init()/schedule_event(), camera_init()'s
+// initial_view argument FALSE, the "" short-pan message instead of
+// "new_fs"'s slow root fly-in). Factored out because Reset needs to run
+// this exact body for the *current* mode, which app_switch_mode()'s own
+// mode == globals.fsv_mode guard exists specifically to reject.
+static void
+run_mode_entry(FsvMode mode)
+{
+	geometry_init(mode);
+	camera_init(mode, /* initial_view */ FALSE);
+	globals.fsv_mode = mode;
+	schedule_event((void (*)())initial_camera_pan, (char *)"", 1);
+}
+
 // app.h: Vis menu -> mode switch. Port of fsv.c's fsv_set_mode() for
 // every case *except* FSV_NONE (enter_mode() above is that one) --
-// callbacks.c's on_vis_*_activate() is the GTK analogue of this half:
-// same geometry_init()/camera_init()/schedule_event() sequence, with
-// camera_init()'s initial_view argument FALSE (this is not the
-// filesystem's first appearance) and the "" pan message instead of
-// "new_fs" (a short pan from wherever the camera already is, not the
-// slow root fly-in).
+// callbacks.c's on_vis_*_activate() is the GTK analogue of this half.
 void
 app_switch_mode(int mode_int)
 {
@@ -202,15 +238,40 @@ app_switch_mode(int mode_int)
 	if (globals.fsv_mode == mode)
 		return; // matches callbacks.c's on_vis_*_activate guard
 
-	geometry_init(mode);
-	camera_init(mode, /* initial_view */ FALSE);
-	globals.fsv_mode = mode;
 	// fsv_set_mode()'s `about(ABOUT_END)` ("ensure that About presentation
 	// is not up") is deliberately not ported here: this frontend has no
 	// About/splash 3D presentation to dismiss in the first place (Task
 	// 3.3's about.c deviation) -- stubs.c's about() is an unconditional
 	// FALSE no-op, so the call would be permanently inert.
-	schedule_event((void (*)())initial_camera_pan, (char *)"", 1);
+	run_mode_entry(mode);
+}
+
+// app.h: fsn-mode Task A3's camera rail -- "Reset" button. Same body as
+// app_switch_mode(), minus its "already in this mode" guard (Reset's
+// whole point is to re-enter the mode we're already in).
+void
+app_reset_camera(void)
+{
+	if (g_scanning || globals.fsv_mode == FSV_NONE)
+		return;
+
+	// If bird's-eye view is active, back it out through the camera's own
+	// dormant API first rather than leaving birdseye_view_active TRUE
+	// behind camera_init()'s fresh, non-birdseye pose (camera_init() does
+	// not itself touch that flag -- verified by reading src/camera.c --
+	// so a bare run_mode_entry() here would silently desync
+	// birdseye_view_active from what the rail, and any subsequent
+	// "Birds eye" click, believe the state to be). No new camera math:
+	// camera_birdseye_view( ) already exists and already knows how to
+	// restore a "before bird's-eye" pose; camera_init() below simply
+	// overrides that restored pose immediately afterward, same as it
+	// would if the user manually exited bird's-eye view first.
+	if (window_birdseye_active()) {
+		camera_birdseye_view(FALSE);
+		window_birdseye_set_active(FALSE);
+	}
+
+	run_mode_entry(globals.fsv_mode);
 }
 
 // Port of fsv.c's fsv_load(). Returns false if the scan produced nothing
@@ -724,6 +785,7 @@ run_record_mode(const char *outdir, double duration_seconds)
 		ui_dockspace_draw();
 		ui_panels_draw();
 		ui_dialogs_draw();
+		ui_rail_draw(); // fsn-mode Task A3: camera control rail
 		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 
@@ -1174,6 +1236,7 @@ main(int argc, char **argv)
 		// docks or reads the main-menu-bar-shrunk viewport rect the way
 		// ui_panels_draw()'s panel does.
 		ui_dialogs_draw();
+		ui_rail_draw(); // fsn-mode Task A3: camera control rail
 		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 		submit_frame();

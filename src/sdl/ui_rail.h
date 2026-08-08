@@ -13,6 +13,26 @@
 // "common.h".
 #pragma once
 
+// fsn-mode Task A3: the left-hand camera control rail -- Reset / Go back /
+// Birds eye / Front view buttons plus Tilt/Height vertical sliders, wiring
+// src/camera.h's camera_look_at_previous()/camera_birdseye_view()/
+// camera_scrollbar_moved() (dormant in this frontend until now) the same
+// way src/window.c's GTK toolbar already does. An ordinary dockable ImGui
+// window (docking is enabled globally -- see main.cpp's ImGuiConfigFlags_
+// DockingEnable), not force-docked into ui_panels.cpp's dockspace the way
+// the Directory Tree panel is; the user can drag it wherever, same as any
+// other floating ImGui window. Call once per frame, anywhere after
+// ui_main_draw() (its menu bar shrinks ImGui::GetMainViewport()'s
+// WorkPos/WorkSize, which this window's first-use-ever placement reads).
+// No-op while a scan is running, before the first filesystem has loaded,
+// or while hidden via the View menu (ui_rail_set_visible()) -- same three
+// conditions ui_panels_draw() already gates the Directory Tree panel on.
+void ui_rail_draw(void);
+
+// View menu (ui_main.cpp): whether the rail is currently shown.
+bool ui_rail_get_visible(void);
+void ui_rail_set_visible(bool visible);
+
 // Draws the bottom-center "ages:" legend bar -- 7 color swatches, each
 // with its bucket's label underneath (src/fsn-style.h's
 // fsn_age_buckets[]) -- anchored to the bottom-center of the main
