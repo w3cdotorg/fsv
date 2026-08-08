@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#include "animation.h" /* morph_break_all( ), scheduled_events_clear( ) */
 #include "dirtree.h"
 #include "filelist.h"
 #include "geometry.h" /* geometry_free( ) */
@@ -296,6 +297,31 @@ scanfs( const char *dir )
         GNode **node_table;
 	guint handler_id;
 	char *name;
+
+	/* Purge the animation queues before anything is freed.
+	 *
+	 * A Rescan/Change Root can land at any moment, including in the
+	 * middle of the intro camera fly-in or ~1s after an expand/collapse,
+	 * and both leave records in animation.c's queues that point straight
+	 * into the tree torn down just below:
+	 *
+	 *   - colexp.c's deployment morphs hold `var` = &DIR_NODE_DESC(dnode)
+	 *     ->deployment and `data` = dnode. morph_iteration( ) runs first
+	 *     in fsv_animation_tick( ), so the very next frame would write a
+	 *     double into a freed DirNodeDesc and then call
+	 *     colexp_progress_cb( ) with the freed dnode.
+	 *   - camera.c's pan morphs end in pan_end_cb( ), which schedules
+	 *     post_pan_end( ) with a GNode * one frame out; that walks the
+	 *     node's children in filelist_show_entry( ).
+	 *
+	 * Neither queue can be *finished* instead of broken -- finishing is
+	 * precisely what fires those callbacks. Order matters: this must
+	 * precede the frees below so the queues never briefly hold dangling
+	 * pointers, and it is unconditional (not inside the fstree != NULL
+	 * branch) because the queues are the thing being emptied, not the
+	 * tree. */
+	morph_break_all( );
+	scheduled_events_clear( );
 
 	if (globals.fstree != NULL) {
 		/* Free existing geometry and filesystem tree */

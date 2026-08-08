@@ -225,6 +225,64 @@ morph_break( double *var )
 }
 
 
+/* Stops *every* ongoing morph. Like morph_break( ) (and unlike
+ * morph_finish( )), no variable is updated and neither the step nor the
+ * end callbacks are called -- which is the entire point: the queued
+ * morphs' `var` pointers and `data` pointers reference the filesystem
+ * tree, and the one caller is the code that is about to destroy that
+ * tree. Finishing them would write through those pointers and hand the
+ * about-to-be-freed nodes to callbacks (colexp.c's colexp_progress_cb( ),
+ * camera.c's pan_end_cb( )); breaking them just drops the records. */
+void
+morph_break_all( void )
+{
+	Morph *morph, *mnext;
+	GList *mq_llink;
+
+	for (mq_llink = morph_queue; mq_llink != NULL; mq_llink = mq_llink->next) {
+		/* Free the morph record, and any subsequent stages
+		 * (multi-stage morphs are chained off ->next, and only
+		 * the head of each chain is in the queue) */
+		morph = (Morph *)mq_llink->data;
+		while (morph != NULL) {
+			mnext = morph->next;
+			xfree( morph );
+			morph = mnext;
+		}
+	}
+
+	g_list_free( morph_queue );
+	morph_queue = NULL;
+}
+
+
+/* Drops every pending scheduled event without executing it. Companion to
+ * morph_break_all( ), and needed for the same reason: a scheduled event
+ * carries an arbitrary data pointer, and the ones queued by camera.c
+ * (post_pan_end( ), one frame after a pan ends) carry a GNode * into the
+ * filesystem tree. Running them after the tree is gone dereferences freed
+ * memory; the events are all "finish what the animation started", so
+ * dropping them when the animation's subject no longer exists is the
+ * correct outcome, not a lost side effect.
+ *
+ * Kept separate from morph_break_all( ) rather than folded into it
+ * because the two queues are independent mechanisms with independent
+ * public entry points (morph_full( ) / schedule_event( )); callers that
+ * need to reset the animation subsystem call both, adjacently -- see
+ * scanfs( ). */
+void
+scheduled_events_clear( void )
+{
+	GList *seq_llink;
+
+	for (seq_llink = schevent_queue; seq_llink != NULL; seq_llink = seq_llink->next)
+		xfree( seq_llink->data );
+
+	g_list_free( schevent_queue );
+	schevent_queue = NULL;
+}
+
+
 /* Driver routine for variable morphing.
  * Return value indicates whether state change occurred or not */
 static boolean

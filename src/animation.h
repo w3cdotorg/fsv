@@ -56,6 +56,13 @@ void morph_full( double *var, MorphType type, double target_value, double durati
 void morph( double *var, MorphType type, double target_value, double duration );
 void morph_finish( double *var );
 void morph_break( double *var );
+/* Queue-wide teardown, for use when the data the queued animations refer
+ * to is about to be freed (scanfs( )'s Rescan/Change Root path). Both
+ * drop their queues *without* running any callback or writing through any
+ * morph variable -- morph_break( ) semantics, applied to everything. Call
+ * them as a pair; see the comments in animation.c. */
+void morph_break_all( void );
+void scheduled_events_clear( void );
 void redraw( void );
 
 
