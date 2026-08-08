@@ -337,6 +337,40 @@ node_absname( GNode *node )
 }
 
 
+/* Display form of node_absname( ): valid UTF-8, normalized to NFC.
+ *
+ * node_absname( ) itself must stay byte-exact -- every lstat( )/
+ * chdir( ) in the program goes through it -- so this is a separate
+ * entry point, with its own static buffer, for the handful of places
+ * that only *show* a path (the SDL frontend's status bar and context
+ * menu; Dear ImGui has no combining-mark composition, unlike GTK's
+ * Pango). Composing one short path costs a few microseconds and these
+ * callers fire on hover/selection changes, not per node per frame --
+ * the 3D labels take the far cheaper route of a per-node display name
+ * computed once at scan time (see scanfs.c's display_name( )). */
+const char *
+node_absname_display( GNode *node )
+{
+	static char *dispname = NULL;
+	const char *absname;
+	char *valid = NULL;
+
+	absname = node_absname( node );
+
+	if (!g_utf8_validate( absname, -1, NULL )) {
+		valid = g_utf8_make_valid( absname, -1 );
+		absname = valid;
+	}
+
+	if (dispname != NULL)
+		g_free( dispname );
+	dispname = g_utf8_normalize( absname, -1, G_NORMALIZE_NFC );
+	g_free( valid );
+
+	return dispname != NULL ? dispname : node_absname( node );
+}
+
+
 /* This does roughly the opposite of node_absname( ): given an (absolute)
  * filename, return the corresponding node if it is present in the current
  * filesystem tree (NULL otherwise) */
@@ -657,9 +691,9 @@ get_node_info( GNode *node )
 
 	absname = node_absname( node );
 
-	/* Name */
-	if (strlen( NODE_DESC(node)->name ) > 0)
-		cstr = NODE_DESC(node)->name;
+	/* Name (display form -- this struct feeds dialogs, not syscalls) */
+	if (strlen( NODE_DNAME(node) ) > 0)
+		cstr = NODE_DNAME(node);
 	else
 		cstr = _("/. (root)");
 	ninfo.name = xstrredup( ninfo.name, cstr );

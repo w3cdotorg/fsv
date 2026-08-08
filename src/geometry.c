@@ -1015,7 +1015,7 @@ mapv_apply_label( GNode *node )
 	else
 		label_pos.z = MAPV_GEOM_PARAMS(node)->height;
 
-	text_draw_straight( NODE_DESC(node)->name, &label_pos, &label_dims );
+	text_draw_straight( NODE_DNAME(node), &label_pos, &label_dims );
 }
 
 
@@ -2282,7 +2282,7 @@ treev_apply_label( GNode *node, double r0, boolean is_leaf )
 		label_pos.r = r0 + TREEV_GEOM_PARAMS(node)->leaf.distance;
 		label_pos.theta = TREEV_GEOM_PARAMS(node)->leaf.theta;
 		label_pos.z = height + TREEV_GEOM_PARAMS(node->parent)->platform.height;
-		text_draw_straight_rotated( NODE_DESC(node)->name, &label_pos, &leaf_label_dims );
+		text_draw_straight_rotated( NODE_DNAME(node), &label_pos, &leaf_label_dims );
 	}
 	else {
 		/* Label directory platform, inside its inner edge */
@@ -2291,7 +2291,7 @@ treev_apply_label( GNode *node, double r0, boolean is_leaf )
 		label_pos.z = 0.0;
 		platform_label_dims.r = ((2.0 - MAGIC_NUMBER) * TREEV_PLATFORM_SPACING_DEPTH);
 		platform_label_dims.theta = TREEV_GEOM_PARAMS(node)->platform.arc_width - (180.0 * TREEV_PLATFORM_SPACING_WIDTH / PI) / label_pos.r;
-		text_draw_curved( NODE_DESC(node)->name, &label_pos, &platform_label_dims );
+		text_draw_curved( NODE_DNAME(node), &label_pos, &platform_label_dims );
 	}
 }
 

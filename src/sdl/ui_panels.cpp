@@ -355,9 +355,12 @@ filelist_show_entry(GNode *node)
 static void
 draw_dir_node(GNode *dnode)
 {
-	const NodeDesc *nd = NODE_DESC(dnode);
-	const char *name = (nd->name != nullptr && nd->name[0] != '\0') ?
-	    nd->name : "/ (root)"; // dirtree.c's own empty-name fallback
+	// NODE_DNAME(), not NODE_DESC(dnode)->name: NFC-normalized, guaranteed-valid UTF-8
+	// (see scanfs.c's display_name()) -- ImGui draws UTF-8 directly and
+	// has no combining-mark composition of its own.
+	const char *dname = NODE_DNAME(dnode);
+	const char *name = (dname != nullptr && dname[0] != '\0') ?
+	    dname : "/ (root)"; // dirtree.c's own empty-name fallback
 
 	// Dirs sort before every other type (scanfs.c's compare_node, "must
 	// always go before leafs" -- its own comment), so both this check
@@ -412,7 +415,7 @@ draw_dir_node(GNode *dnode)
 			camera_look_at(dnode);
 		} else {
 			geometry_highlight_node(dnode, FALSE);
-			window_statusbar(SB_RIGHT, node_absname(dnode));
+			window_statusbar(SB_RIGHT, node_absname_display(dnode));
 			if (dnode != g_shown_dir)
 				populate_file_list(dnode);
 		}
@@ -460,7 +463,7 @@ static void
 draw_file_list_section(void)
 {
 	ImGui::TextUnformatted(g_shown_dir != nullptr ?
-	    node_absname(g_shown_dir) : "(no directory selected)");
+	    node_absname_display(g_shown_dir) : "(no directory selected)");
 
 	// Port of filelist.c's filelist_reset_access(): the file list is
 	// only meaningfully browsable while its directory's contents are
@@ -521,7 +524,7 @@ draw_file_list_section(void)
 				ImGui::TableNextColumn();
 				const bool selected = (child == g_filelist_selected);
 				ImGui::PushID(child);
-				if (ImGui::Selectable(nd->name, selected,
+				if (ImGui::Selectable(NODE_DNAME(child), selected,
 				    ImGuiSelectableFlags_SpanAllColumns)) {
 					// Port of filelist.c's filelist_select_cb(): every
 					// click -- file or directory -- flies the camera
@@ -529,7 +532,7 @@ draw_file_list_section(void)
 					// this for already-open directories).
 					camera_look_at(child);
 					geometry_highlight_node(child, FALSE);
-					window_statusbar(SB_RIGHT, node_absname(child));
+					window_statusbar(SB_RIGHT, node_absname_display(child));
 					g_filelist_selected = child;
 				}
 				ImGui::PopID();

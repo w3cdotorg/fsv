@@ -109,6 +109,9 @@
 #define DIR_NODE_DESC(dnode)	((DirNodeDesc *)(dnode)->data)
 #define NODE_IS_DIR(node)	(NODE_DESC(node)->type == NODE_DIRECTORY)
 #define NODE_IS_METANODE(node)	(NODE_DESC(node)->type == NODE_METANODE)
+/* The name to *show* the user: NFC-normalized, guaranteed-valid UTF-8.
+ * Falls back to the raw name for any node scanfs.c didn't fill in. */
+#define NODE_DNAME(node)	(NODE_DESC(node)->dname != NULL ? NODE_DESC(node)->dname : NODE_DESC(node)->name)
 #define DIR_COLLAPSED(dnode)	(DIR_NODE_DESC(dnode)->deployment < EPSILON)
 #define DIR_EXPANDED(dnode)	(DIR_NODE_DESC(dnode)->deployment > (1.0 - EPSILON))
 
@@ -190,6 +193,11 @@ struct _NodeDesc {
 	NodeType	type;		/* Type of node */
 	unsigned int	id;		/* Unique ID number */
 	const char	*name;		/* Base name (w/o directory) */
+	/* Display form of name: valid UTF-8, Unicode-normalized to NFC.
+	 * Never use it to touch the filesystem or to compare/sort nodes --
+	 * `name` above is the real, byte-exact directory entry, and stays
+	 * that way. See scanfs.c's display_name( ) and NODE_DNAME( ). */
+	const char	*dname;
 	int64		size;		/* Size (bytes) */
 	int64		size_alloc;	/* Size allocation on storage medium */
 	uid_t		user_id;	/* Owner UID */
@@ -299,6 +307,7 @@ double xgettime( void);
 const char *i64toa( int64 number );
 const char *abbrev_size( int64 size );
 const char *node_absname( GNode *node );
+const char *node_absname_display( GNode *node );
 GNode *node_named( const char *absname );
 const struct NodeInfo *get_node_info( GNode *node );
 const char *rgb2hex( RGBcolor *color );

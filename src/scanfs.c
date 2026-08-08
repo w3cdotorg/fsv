@@ -50,6 +50,63 @@ static int64 size_counts[NUM_NODE_TYPES];
 static int stat_count = 0;
 
 
+/* Display form of a directory entry's name, interned in the same
+ * string chunk the raw name lives in (so it has the same lifetime and
+ * costs one free, not one per node).
+ *
+ * Two things happen here, both of which have to happen exactly once
+ * per node rather than once per frame:
+ *
+ *  - Normalization to NFC. macOS (HFS+ and APFS) hands back decomposed
+ *    UTF-8: "cafe\xcc\x81.txt", i.e. 'e' followed by U+0301 COMBINING
+ *    ACUTE ACCENT, where Linux filesystems store the precomposed
+ *    "caf\xc3\xa9.txt". Neither tmaptext.c's fixed-cell glyph grid nor
+ *    Dear ImGui does combining-mark composition, so without this an
+ *    accented macOS filename renders as "cafe" plus a stray accent
+ *    cell. Composing at display time keeps `name` byte-exact for the
+ *    filesystem calls and comparisons that need it (node_absname( ),
+ *    the wildcard matching in color.c, compare_node( ) below).
+ *
+ *  - Validation. Filenames are arbitrary bytes, not necessarily UTF-8
+ *    at all (a latin1-era name, a Shift-JIS archive unpacked on
+ *    Linux). g_utf8_make_valid( ) replaces the undecodable bytes with
+ *    U+FFFD, which keeps every downstream consumer -- GTK's tree
+ *    views, ImGui, g_utf8_next_char( ) -- on defined behavior.
+ *
+ * Returns `name` itself when it is already valid, already NFC (the
+ * common case: pure ASCII), so identical strings aren't stored twice. */
+static const char *
+display_name( const char *name )
+{
+	const char *result;
+	char *valid = NULL;
+	char *nfc;
+
+	if (!g_utf8_validate( name, -1, NULL )) {
+		valid = g_utf8_make_valid( name, -1 );
+		name = valid;
+	}
+
+	nfc = g_utf8_normalize( name, -1, G_NORMALIZE_NFC );
+	if (nfc == NULL) {
+		/* Can't happen for valid UTF-8, but this is filename data */
+		result = valid != NULL ? g_string_chunk_insert( name_strchunk, valid ) : name;
+		g_free( valid );
+		return result;
+	}
+
+	if ((valid == NULL) && !strcmp( nfc, name ))
+		result = name; /* unchanged -- don't intern a second copy */
+	else
+		result = g_string_chunk_insert( name_strchunk, nfc );
+
+	g_free( nfc );
+	g_free( valid );
+
+	return result;
+}
+
+
 /* Official stat function. Returns 0 on success, -1 on error */
 static int
 stat_node( GNode *node )
@@ -136,6 +193,7 @@ process_dir( const char *dir, GNode *dnode )
 		node = g_node_prepend_data( dnode, &any_node_desc );
 		NODE_DESC(node)->id = node_id;
 		NODE_DESC(node)->name = g_string_chunk_insert( name_strchunk, dir_entries[i]->d_name );
+		NODE_DESC(node)->dname = display_name( NODE_DESC(node)->name );
 		if (stat_node( node )) {
 			/* Stat failed */
 			g_node_unlink( node );
@@ -355,6 +413,7 @@ scanfs( const char *dir )
 	NODE_DESC(globals.fstree)->id = node_id++;
 	name = g_path_get_dirname( root_dir );
 	NODE_DESC(globals.fstree)->name = g_string_chunk_insert( name_strchunk, name );
+	NODE_DESC(globals.fstree)->dname = display_name( NODE_DESC(globals.fstree)->name );
 	g_free( name );
 	DIR_NODE_DESC(globals.fstree)->tnode = NULL; /* needed in dirtree_entry_new( ) */
 
@@ -365,6 +424,7 @@ scanfs( const char *dir )
 	NODE_DESC(root_dnode)->id = node_id++;
 	name = g_path_get_basename( root_dir );
 	NODE_DESC(root_dnode)->name = g_string_chunk_insert( name_strchunk, name );
+	NODE_DESC(root_dnode)->dname = display_name( NODE_DESC(root_dnode)->name );
 	g_free(name);
 	// TODO: Invalidate VBO's, need to upload new ones.
 	stat_node( root_dnode );

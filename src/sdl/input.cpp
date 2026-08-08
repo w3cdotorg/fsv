@@ -233,7 +233,7 @@ update_highlight(bool btn1_down)
 			geometry_highlight_node(g_indicated_node, btn1_down ? TRUE : FALSE);
 		else
 			geometry_highlight_node(NULL, FALSE);
-		window_statusbar(SB_RIGHT, node_absname(g_indicated_node));
+		window_statusbar(SB_RIGHT, node_absname_display(g_indicated_node));
 	}
 }
 

@@ -33,6 +33,7 @@ extern "C" {
 #include "colexp.h" /* --record: colexp( ), scripted directory expand */
 #include "color.h"
 #include "dirtree.h" /* --record: dirtree_entry_expanded( ) */
+#include "fontatlas.h" /* font_atlas_find_font( ): the panels' TTF too */
 #include "fsv-platform.h"
 #include "geometry.h"
 #include "scanfs.h"
@@ -965,6 +966,41 @@ main(int argc, char **argv)
 		// unless it opts out with ImGuiWindowFlags_NoDocking).
 		ImGuiIO &io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+		// Panel font (post-port UTF-8 work, see docs/PORTING.md).
+		// ImGui's built-in ProggyClean is a baked ASCII-only bitmap,
+		// so every accented filename in the tree/file-list panels
+		// came out as '?' -- the same defect the 3D labels had. Load
+		// the *same* face src/fontatlas.c rasterized the label atlas
+		// from, so the two never disagree about which typeface (or
+		// which fallback) is in use.
+		//
+		// No glyph ranges: since 1.92 ImGui loads glyphs on demand
+		// whenever the backend sets ImGuiBackendFlags_RendererHasTextures
+		// (imgui.h: "specifying glyph ranges is only useful/necessary
+		// if your backend doesn't support [it]"), which
+		// imgui_impl_sdlgpu3.cpp does. So this covers all of Unicode
+		// the font itself covers, not just Latin Extended-A.
+		int font_index = 0;
+		const char *font_path = font_atlas_find_font(&font_index);
+		if (font_path != nullptr) {
+			ImFontConfig font_cfg;
+			font_cfg.FontNo = font_index; // face within a .ttc
+			// Report an unreadable font by returning NULL rather
+			// than firing IM_ASSERT_USER_ERROR: a missing/corrupt
+			// system font must degrade to the default font, not
+			// abort the program.
+			font_cfg.Flags |= ImFontFlags_NoLoadError;
+			if (io.Fonts->AddFontFromFileTTF(font_path, 15.0f, &font_cfg) == nullptr) {
+				SDL_Log("fsv: could not load %s for the panels; "
+				    "falling back to ImGui's ASCII-only default font",
+				    font_path);
+				io.Fonts->AddFontDefault();
+			}
+		} else {
+			// font_atlas_find_font() already logged the miss once.
+			io.Fonts->AddFontDefault();
+		}
 
 		// .ini persistence policy: point it at a stable, absolute path
 		// instead of leaving ImGui's default ("imgui.ini", relative to

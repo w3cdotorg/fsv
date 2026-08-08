@@ -217,8 +217,8 @@ dirtree_entry_new( GNode *dnode )
 	g_assert( NODE_IS_DIR(dnode) );
 
 	parent_tnode = DIR_NODE_DESC(dnode->parent)->tnode;
-	if (strlen( NODE_DESC(dnode)->name ) > 0)
-		name = NODE_DESC(dnode)->name;
+	if (strlen( NODE_DNAME(dnode) ) > 0)
+		name = NODE_DNAME(dnode);
 	else
 		name = _("/. (root)");
 	expanded = g_node_depth( dnode ) <= 2;

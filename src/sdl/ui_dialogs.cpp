@@ -475,7 +475,7 @@ ui_dialogs_open_properties(void *node_ptr)
 		// panel already does this rather than calling filelist.c.
 		for (GNode *c = node->children; c != nullptr; c = c->next) {
 			PropContentsRow row;
-			row.name = NODE_DESC(c)->name;
+			row.name = NODE_DNAME(c);
 			row.is_dir = NODE_IS_DIR(c);
 			const int64 sz = row.is_dir ?
 			    DIR_NODE_DESC(c)->subtree.size : NODE_DESC(c)->size;

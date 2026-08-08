@@ -157,7 +157,7 @@ draw_context_menu(void)
 
 		GNode *node = static_cast<GNode *>(g_context_menu_node);
 		if (node != nullptr) {
-			ImGui::TextDisabled("%s", node_absname(node));
+			ImGui::TextDisabled("%s", node_absname_display(node));
 			ImGui::Separator();
 
 			if (ImGui::MenuItem("Look At"))

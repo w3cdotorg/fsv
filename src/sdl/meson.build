@@ -17,7 +17,8 @@
 # Neither file is folded into libfsvcore: both now call gpu.h, which each
 # frontend implements, and libfsvcore's other consumers (fsv-scan,
 # test_scanfs) have no renderer to link against.
-core_gl_src = files('stubs.c', '../geometry.c', '../tmaptext.c')
+core_gl_src = files('stubs.c', '../geometry.c', '../tmaptext.c',
+                    '../fontatlas.c')
 
 # The compiled shader artifacts (Task 3.1) are baked into the binary as
 # byte arrays rather than loaded from disk — see the rationale at the top

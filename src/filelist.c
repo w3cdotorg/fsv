@@ -129,7 +129,7 @@ filelist_populate( GNode *dnode )
 
 		gtk_list_store_set(store, &it,
 				   FILELIST_ICON_COLUMN, icon->pixbuf,
-				   FILELIST_NAME_COLUMN, NODE_DESC(node)->name,
+				   FILELIST_NAME_COLUMN, NODE_DNAME(node),
 				   FILELIST_NODE_COLUMN, node,
 				   -1);
 

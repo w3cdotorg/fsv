@@ -10,25 +10,35 @@
  */
 
 /* Ported to src/gpu.h for the SDL_GPU / Metal port (see docs/PORTING.md
- * Task 3.4): this file keeps every bit of font-atlas generation and
- * glyph-layout math it always had -- xbm_pixels( ), get_char_dims( ),
- * get_char_tex_coords( ), and the three text_draw_*( ) entry points are
- * untouched apart from the vertex struct now living in gpu.h (so both
- * frontends agree on its layout). What moved out is exactly the GL calls:
+ * Task 3.4): this file keeps the glyph-layout math it always had --
+ * get_char_dims( ), get_char_tex_coords( ), and the three
+ * text_draw_*( ) entry points are untouched apart from the vertex
+ * struct now living in gpu.h (so both frontends agree on its layout).
+ * What moved out is exactly the GL calls:
  * texture upload, shader program, and the VBO/EBO draw, which are now
  * gpu_text_init( )/gpu_text_draw( )/etc., implemented once per frontend
  * (src/sdl/gpu.cpp for SDL_GPU, src/ogl-gpu-compat.c for GTK/epoxy) --
- * the same split geometry.c went through in Task 3.3. */
+ * the same split geometry.c went through in Task 3.3.
+ *
+ * Post-port (see docs/PORTING.md, "UTF-8 / accented characters"): the
+ * font atlas itself moved out too, into fontatlas.c, and the strings
+ * handed to text_draw_*( ) are now walked by Unicode codepoint rather
+ * than by byte. Everything here is still fixed-cell monospace layout:
+ * one codepoint is one cell, whatever the atlas source. */
 
 #include "common.h"
 #include "tmaptext.h"
 
+#include "fontatlas.h"
 #include "gpu.h"
 
-/* Bitmap font definition */
-#define char_width 16
-#define char_height 32
-#include "xmaps/charset.xbm"
+/* Glyph cell dimensions. The atlas itself (and the codepoint -> cell
+ * mapping) is fontatlas.c's business now: it either rasterizes a real
+ * TrueType face or falls back to the ASCII-only XBM charset this file
+ * used to embed directly, but either way the cells are this size and
+ * laid out in rows of font_atlas_cols( ). */
+#define char_width  FONT_CELL_WIDTH
+#define char_height FONT_CELL_HEIGHT
 
 
 /* Text can be squeezed to at most half its normal width */
@@ -38,36 +48,9 @@
 /* Normal character aspect ratio */
 static const double char_aspect_ratio = (double)char_width / (double)char_height;
 
-
-/* Simple XBM parser - bits to bytes. Caller assumes responsibility for
- * freeing the returned pixel buffer */
-static byte *
-xbm_pixels( const byte *xbm_bits, int pixel_count )
-{
-	int in_byte = 0;
-	int bitmask = 1;
-	int i;
-	byte *pixels;
-
-	pixels = NEW_ARRAY(byte, pixel_count);
-
-	for (i = 0; i < pixel_count; i++) {
-		/* Note: a 1 bit is black */
-		if ((int)xbm_bits[in_byte] & bitmask)
-			pixels[i] = 0;
-		else
-			pixels[i] = 255;
-
-		if (bitmask & 128) {
-			++in_byte;
-			bitmask = 1;
-		}
-		else
-			bitmask <<= 1;
-	}
-
-	return pixels;
-}
+/* Atlas dimensions, as reported by font_atlas_build( ) */
+static int charset_w = 1;
+static int charset_h = 1;
 
 
 /* Initializes texture-mapping state for drawing text */
@@ -81,9 +64,48 @@ text_init( void )
 	 * gpu_text_init( ) -- see the note there and in docs/PORTING.md
 	 * about the sampler differing (by design) between the two
 	 * backends. */
-	charset_pixels = xbm_pixels( charset_bits, charset_width * charset_height );
-	gpu_text_init( charset_pixels, charset_width, charset_height );
+	charset_pixels = font_atlas_build( &charset_w, &charset_h );
+	gpu_text_init( charset_pixels, charset_w, charset_h );
 	xfree( charset_pixels );
+}
+
+
+/* Decodes a UTF-8 string into one atlas cell index per *codepoint*
+ * (not per byte -- the whole point of this: an accented character is
+ * one glyph, and a codepoint the atlas doesn't have is one '?', not
+ * one '?' per byte). Returns the number of cells, and stores a
+ * caller-owned array of them in *cells.
+ *
+ * Filenames are arbitrary bytes, so this can and does get handed
+ * invalid UTF-8 -- scanfs.c's display names are sanitized
+ * (g_utf8_make_valid( )), but text_draw_*( ) is public API. Anything
+ * that doesn't decode is consumed one byte at a time and drawn as the
+ * '?' glyph, which both terminates and stays in step with the byte
+ * count. */
+static size_t
+text_glyph_cells( const char *text, int **cells )
+{
+	const char *p;
+	int *buf;
+	size_t n = 0;
+
+	buf = NEW_ARRAY(int, strlen( text ) + 1);
+	for (p = text; *p != '\0'; ) {
+		gunichar uc = g_utf8_get_char_validated( p, -1 );
+		if ((uc == (gunichar)-1) || (uc == (gunichar)-2)) {
+			/* Not valid UTF-8 -- one '?', one byte */
+			buf[n++] = font_atlas_cell( '?' );
+			++p;
+		}
+		else {
+			buf[n++] = font_atlas_cell( uc );
+			p = g_utf8_next_char( p );
+		}
+	}
+
+	*cells = buf;
+
+	return n;
 }
 
 
@@ -140,31 +162,24 @@ get_char_dims( int len, const XYvec *max_dims, XYvec *cdims )
 
 
 /* Returns the texture-space coordinates of the bottom-left and upper-right
- * corners of the specified character (glyph) */
+ * corners of the specified glyph cell (as returned by font_atlas_cell( )) */
 static void
-get_char_tex_coords( int c, XYvec *t_c0, XYvec *t_c1 )
+get_char_tex_coords( int cell, XYvec *t_c0, XYvec *t_c1 )
 {
-	static const XYvec t_char_dims = {
-		(double)char_width / (double)charset_width,
-		(double)char_height / (double)charset_height
-	};
 	XYvec gpos;
-	int g;
+	int cols;
 
 	/* Get position of lower-left corner of glyph
-	 * (in bitmap coordinates, w/origin at top-left)
-	 * Note: The following code is character-set-specific */
-	g = c;
-	if ((g < 32) || (g > 127))
-		g = 63; /* question mark */
-	gpos.x = (double)(((g - 32) & 31) * char_width);
-	gpos.y = (double)(((g - 32) >> 5) * char_height);
+	 * (in bitmap coordinates, w/origin at top-left) */
+	cols = font_atlas_cols( );
+	gpos.x = (double)((cell % cols) * char_width);
+	gpos.y = (double)((cell / cols) * char_height);
 
 	/* Texture coordinates */
-	t_c0->x = gpos.x / (double)charset_width;
-	t_c1->y = gpos.y / (double)charset_height;
-	t_c1->x = t_c0->x + t_char_dims.x;
-	t_c0->y = t_c1->y + t_char_dims.y;
+	t_c0->x = gpos.x / (double)charset_w;
+	t_c1->y = gpos.y / (double)charset_h;
+	t_c1->x = t_c0->x + (double)char_width / (double)charset_w;
+	t_c0->y = t_c1->y + (double)char_height / (double)charset_h;
 }
 
 
@@ -204,9 +219,10 @@ text_draw_straight( const char *text, const XYZvec *text_pos, const XYvec *text_
 {
 	XYvec cdims;
 	XYvec t_c0, t_c1, c0, c1;
+	int *cells;
 	size_t len;
 
-	len = strlen( text );
+	len = text_glyph_cells( text, &cells );
 	get_char_dims( len, text_max_dims, &cdims );
 
 	/* Corners of first character */
@@ -217,7 +233,7 @@ text_draw_straight( const char *text, const XYZvec *text_pos, const XYvec *text_
 
 	FsvTextVertex *tv = NEW_ARRAY(FsvTextVertex, len * 4);
 	for (size_t i = 0; i < len; i++) {
-		get_char_tex_coords( text[i], &t_c0, &t_c1 );
+		get_char_tex_coords( cells[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Each char defined by corners in zigzag order
 		// Lower left {pos, texcoords}
@@ -234,6 +250,7 @@ text_draw_straight( const char *text, const XYZvec *text_pos, const XYvec *text_
 	}
 	draw_text_vertices(tv, len);
 	xfree(tv);
+	xfree(cells);
 }
 
 
@@ -247,9 +264,10 @@ text_draw_straight_rotated( const char *text, const RTZvec *text_pos, const XYve
 	XYvec t_c0, t_c1, c0, c1;
 	XYvec hdelta, vdelta;
 	double sin_theta, cos_theta;
+	int *cells;
 	size_t len;
 
-	len = strlen( text );
+	len = text_glyph_cells( text, &cells );
 	get_char_dims( len, text_max_dims, &cdims );
 
 	sin_theta = sin( RAD(text_pos->theta) );
@@ -270,7 +288,7 @@ text_draw_straight_rotated( const char *text, const RTZvec *text_pos, const XYve
 
 	FsvTextVertex *tv = NEW_ARRAY(FsvTextVertex, len * 4);
 	for (size_t i = 0; i < len; i++) {
-		get_char_tex_coords( text[i], &t_c0, &t_c1 );
+		get_char_tex_coords( cells[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Lower left
 		tv[j] = (FsvTextVertex){{c0.x, c0.y, text_pos->z}, {t_c0.x, t_c0.y}};
@@ -290,6 +308,7 @@ text_draw_straight_rotated( const char *text, const RTZvec *text_pos, const XYve
 	}
 	draw_text_vertices(tv, len);
 	xfree(tv);
+	xfree(cells);
 }
 
 
@@ -304,13 +323,14 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 	double char_arc_width, theta;
 	double sin_theta, cos_theta;
 	double text_r;
+	int *cells;
 	size_t len;
 
 	/* Convert curved dimensions to straight equivalent */
 	straight_dims.x = (PI / 180.0) * text_pos->r * text_max_dims->theta;
 	straight_dims.y = text_max_dims->r;
 
-	len = strlen( text );
+	len = text_glyph_cells( text, &cells );
 	get_char_dims( len, &straight_dims, &cdims );
 
 	/* Radius of center of text line */
@@ -335,7 +355,7 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 		bwsl.x = 0.5 * (- cdims.y * cos_theta + cdims.x * sin_theta);
 		bwsl.y = 0.5 * (- cdims.y * sin_theta - cdims.x * cos_theta);
 
-		get_char_tex_coords( text[i], &t_c0, &t_c1 );
+		get_char_tex_coords( cells[i], &t_c0, &t_c1 );
 		size_t j = i * 4;
 		// Lower left
 		tv[j] = (FsvTextVertex){{char_pos.x - fwsl.x, char_pos.y - fwsl.y, text_pos->z},
@@ -354,6 +374,7 @@ text_draw_curved( const char *text, const RTZvec *text_pos, const RTvec *text_ma
 	}
 	draw_text_vertices(tv, len);
 	xfree(tv);
+	xfree(cells);
 }
 
 // Set the text color
