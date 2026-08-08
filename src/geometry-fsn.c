@@ -53,6 +53,9 @@ static double fsn_extent_h = 0.0;
  * end of fsn_geometry_init( ) */
 static double fsn_min_x, fsn_max_x, fsn_min_y, fsn_max_y;
 
+/* Bumped on every layout pass -- see fsn_layout_generation( ) */
+static unsigned int fsn_generation = 0;
+
 
 /**** LAYOUT **************************************************/
 
@@ -259,6 +262,7 @@ fsn_geometry_init( GNode *root )
 	fsn_extent_d = fsn_max_y - fsn_min_y;
 
 	fsn_root = root;
+	++fsn_generation;
 	geometry_queue_rebuild( root );
 }
 
@@ -279,6 +283,13 @@ GNode *
 fsn_layout_root( void )
 {
 	return fsn_root;
+}
+
+
+unsigned int
+fsn_layout_generation( void )
+{
+	return fsn_generation;
 }
 
 

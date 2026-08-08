@@ -159,14 +159,19 @@ fsn_apply_label( GNode *dnode )
  * from under us -- so this keeps its own copy rather than caching the
  * returned pointer.
  *
- * The key is only ever compared, never dereferenced, and
- * fsn_geometry_draw( ) drops the whole cache whenever the layout root
- * changes, which covers every mode switch and rescan. The one residual
- * is a rescan where the allocator hands back the identical address for
- * both the new root and the new current node -- which, being the same
- * directory rescanned, would compose the same path string anyway. Not
- * worth a generation counter for a decorative ground label. */
+ * The key is only ever compared, never dereferenced, and it is a PAIR:
+ * the node pointer and the layout generation it was taken in
+ * (fsn_layout_generation( ), bumped by every fsn_geometry_init( )).
+ * The pointer alone is not enough. fsn_geometry_draw( ) below also
+ * drops the cache whenever the layout root changes, but a Change Root
+ * or a Rescan frees the whole tree and lays out a new one, and GLib's
+ * slice allocator will happily hand the new tree's nodes the addresses
+ * the old tree's nodes had -- so a stale key can compare equal to a
+ * live, entirely different node, and the ground label would then show
+ * the old tree's path. Folding the generation in makes the two keys
+ * distinguishable by construction instead of by luck. */
 static GNode *path_text_node = NULL;
+static unsigned int path_text_generation = 0;
 static char *path_text_cache = NULL;
 
 /* Drops the cached path string. Called when the layout goes away, so a
@@ -205,10 +210,13 @@ fsn_draw_path_text( void )
 	if (p == NULL || node == NULL)
 		return;
 
-	if (node != path_text_node || path_text_cache == NULL) {
+	if (node != path_text_node ||
+	    fsn_layout_generation( ) != path_text_generation ||
+	    path_text_cache == NULL) {
 		fsn_path_text_invalidate( );
 		path_text_cache = xstrdup( node_absname_display( node ) );
 		path_text_node = node;
+		path_text_generation = fsn_layout_generation( );
 	}
 
 	pos.x = p->x;
@@ -310,7 +318,16 @@ fsn_geometry_draw( boolean high_detail )
 	 * taken from. Deliberately here and not in fsn_geometry_free( ) --
 	 * that lives in the layout half, which libfsvcore links and this
 	 * file is absent from, so it cannot call into here without breaking
-	 * the split. */
+	 * the split.
+	 *
+	 * This is the cheap check, not the load-bearing one: `root` is
+	 * itself a GNode * and a rescan of the same directory can (and
+	 * routinely does) get the same address back, so this comparison
+	 * alone would miss a genuine tree change. The cache key carries the
+	 * layout generation for exactly that reason -- see
+	 * fsn_draw_path_text( )'s note above. Both are kept: this one drops
+	 * the allocation promptly when the mode changes, the generation
+	 * makes correctness independent of the allocator. */
 	if (root != drawn_root) {
 		fsn_path_text_invalidate( );
 		drawn_root = root;

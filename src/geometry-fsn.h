@@ -98,6 +98,17 @@ void fsn_geometry_free( void );
 GNode *fsn_layout_root( void );
 const FsnPedestal *fsn_layout_get( GNode *node );
 
+/* Incremented by every fsn_geometry_init( ) call, i.e. once per layout
+ * pass. Exists so that a consumer caching something keyed on a GNode *
+ * can tell "the same node" from "a different node the allocator happened
+ * to hand back at the same address" -- GLib's slice allocator reuses
+ * freed node addresses aggressively, and after a Rescan or a Change Root
+ * a stale key can compare equal to a live pointer that means something
+ * else entirely. Comparing generations as well makes that impossible
+ * rather than merely unlikely. Wraps after 2^32 layout passes, which
+ * would require one rescan per second for 136 years. */
+unsigned int fsn_layout_generation( void );
+
 /* Fills in the wire running from `node`'s parent directory to `node`.
  * Returns FALSE (leaving *wire untouched) for a node that has no such
  * wire: the root directory, the metanode, and any non-directory. */
