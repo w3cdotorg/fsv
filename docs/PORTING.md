@@ -2928,6 +2928,121 @@ literal `xcodebuild` invocation (Task 6.1 already proved the Xcode
 wrapper builds; this task only changed its README pointer text, not the
 project itself).
 
+## Final whole-branch review fix round (2026-08-08)
+
+A review of the branch as a whole (rather than task by task) found five
+issues; all five are fixed. Full report, including the AddressSanitizer
+output quoted below:
+[`.superpowers/sdd/2026-08-06-macos-metal-port/final-fix-report.md`](../.superpowers/sdd/2026-08-06-macos-metal-port/final-fix-report.md).
+
+### Critical: in-flight animations survived Rescan/Change Root — **upstream-PR candidate**
+
+`scanfs()` frees every `NodeDesc`/`DirNodeDesc` and destroys the whole
+`GNode` tree when a new root is scanned, but `animation.c`'s two
+queues were never purged. Both hold pointers straight into that tree:
+
+- `colexp.c`'s deployment morphs (`src/colexp.c:207`/`:213`) set
+  `morph->var = &DIR_NODE_DESC(dnode)->deployment` — i.e. *inside* a
+  `DirNodeDesc` — and `morph->data = dnode`. `morph_iteration()` is the
+  first thing `fsv_animation_tick()` does, so the very next frame after
+  the rescan wrote a `double` into freed memory and then handed the
+  freed `dnode` to `colexp_progress_cb()`.
+- `camera.c`'s pan morphs end in `pan_end_cb()` (`src/camera.c:957`),
+  which schedules `post_pan_end()` with a `GNode *` one frame out; that
+  reaches `filelist_show_entry()`, which walks the node's children and
+  leaves this frontend's `g_shown_dir` dangling.
+
+Fix: `morph_break_all()` and `scheduled_events_clear()` in
+`src/animation.c`, called from `scanfs()` **before** the frees, so the
+queues never even briefly hold dangling pointers. Both apply
+`morph_break()`'s existing semantics queue-wide — drop the records
+without running any step/end callback and without writing through any
+morph variable. *Finishing* the queues instead (`morph_finish()`) is
+exactly what would fire the dangerous callbacks, so it is not an
+option here.
+
+**This is shared core code, in files the GTK frontend also builds
+(`animation.c`, `scanfs.c`) — the GTK arm has the same bug and gets the
+same fix.** Nothing about it is SDL- or Metal-specific: it is a
+straightforward use-after-free in upstream `jabl/fsv`, reachable from
+File → Change Root during any camera pan or collapse/expand animation.
+Like the `lib/nvstore.c` stub found in Task 5.3, this is a good
+candidate to send upstream on its own, independent of the port.
+
+Proven with AddressSanitizer, not just reasoned about — expand a
+directory, then Rescan 0.3s later (synthetic menu clicks via
+`SDL_PushEvent`, the harness style Task 5.1 established):
+
+```
+==40579==ERROR: AddressSanitizer: heap-use-after-free on address 0x61100007dad0
+WRITE of size 8 at 0x61100007dad0 thread T0
+    #0 morph_iteration animation.c:355        <- *(morph->var) = INTERPOLATE(...)
+    #1 fsv_animation_tick animation.c:470
+freed by thread T0 here:
+    #1 node_data_free scanfs.c:285            <- g_slice_free(DirNodeDesc, p)
+    #5 scanfs scanfs.c:328
+    #6 load_filesystem(char const*, FsvMode) main.cpp:248
+SUMMARY: AddressSanitizer: heap-use-after-free animation.c:355 in morph_iteration
+```
+
+The same scenario post-fix, plus three other expand/rescan timings and
+the Rescan-during-the-4s-intro-fly-in case, are all ASan-clean.
+
+### Important: SDL frontend state invalidation
+
+`input.cpp`'s `g_indicated_node` (and the pending `ContextMenuRequest`,
+which holds the same kind of pointer) survived a rescan, so a
+`BUTTON_UP` arriving afterwards fed a freed node to `camera_look_at()`.
+New `input_reset()` clears both plus the `SDL_CaptureMouse()` grab;
+`load_filesystem()` calls it, and `camera_pan_break()`, before
+`scanfs()`. The `camera_pan_break()` call is belt-and-suspenders — the
+core's own `morph_break_all()` would take the same morphs out a moment
+later — but it is `camera.c`'s documented entry point, and
+`morph_break()` is silent on a variable that is not being morphed, so
+there is no double-free. It must precede `globals.fsv_mode = FSV_NONE`,
+which its `switch` would `SWITCH_FAIL` on.
+
+### Important: hover picks coalesced to one per main-loop iteration
+
+Every no-button mouse-motion event ran `gpu_pick()` — a full offscreen
+id-colour render plus a fence wait, 1.85–9.29ms measured in Task 4.2 —
+and one `SDL_PollEvent()` drain can hold a dozen motion events. The
+motion handler now records the last hover position; `main()` calls the
+new `input_flush_hover_pick()` once per iteration, after the drain.
+Measured with a 40-event synthetic motion flood in a single drain:
+
+| build | picks in that iteration | resulting highlight |
+|---|---|---|
+| before | 40 | `…/src/geometry.c` |
+| after | **1** | `…/src/geometry.c` |
+
+Same highlight, 40× fewer GPU round-trips. The click path
+(`BUTTON_DOWN`) and the "pointless dragging" branch deliberately still
+pick inline — see `input.h` and `input.cpp` for why each.
+
+### Important: macOS runtime dependencies documented
+
+`otool -L` on the released binary shows
+`/opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib` and
+`/opt/homebrew/opt/glib/lib/libglib-2.0.0.dylib`. Neither the tarball
+nor `make-bundle.sh`'s `.app` bundles them, but `USAGE.txt` said "run
+directly" unqualified. The `requires: brew install glib sdl3` line is
+now in the release `USAGE.txt` (`.github/workflows/ci.yml`), README's
+Install section and `packaging/xcode/README.md`'s bundle section.
+**Actually bundling the dylibs** (`install_name_tool`/`dylibbundler`
+into `Contents/Frameworks`) remains deferred, and is the real fix if
+this ever needs to be distributed to people who don't have Homebrew.
+
+### Minor: `--record` no longer offers dead menu items
+
+`--record`'s capture loop draws the real menu bar and pumps real
+events, but never calls `app_apply_pending_root_change()` — so File →
+Rescan/Change Root queued a request that was silently discarded at
+exit. They are greyed out during a recording now (new
+`app_is_recording()`), the same way they already are during a scan.
+Teaching the recording loop to run `scanfs()` mid-capture was rejected:
+it would free the tree the recording script's cues hold `GNode *` into.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -2994,3 +3109,7 @@ code is kept.
 | 2026-08-08 | `make-bundle.sh` accepts a direct binary path as an alternative to a meson builddir | the script previously only understood a builddir layout, so it always failed when bundled into a release tarball, where the binary sits flat next to it instead |
 | 2026-08-08 | README's Controls table describes the real gestures read from `src/sdl/input.cpp`, not the task brief's own pre-reading assumption ("double-click activate/warp") | there is no double-click action anywhere in the 3D viewport, in this port or upstream — `viewport.c`'s original code and this file's port of it both treat a double-click as two ordinary clicks; porting an imagined gesture into user-facing docs would misinform users about behavior that doesn't exist |
 | 2026-08-08 | Old "Misc notes / OpenGL versions" section kept verbatim, moved under a collapsed `<details>` rather than deleted | it documents real, still-true constraints on the GTK/OpenGL frontend (core-profile context negotiation, GLSL version floor), which this port didn't touch and doesn't obsolete |
+| 2026-08-08 | Purge the morph/scheduled-event queues at the *top* of `scanfs()`, before the frees, rather than at `dirtree_clear()` | the queues are what is being emptied, not the tree, so doing it first means they never briefly hold pointers to freed memory; it also makes the purge unconditional instead of dependent on `globals.fstree != NULL` |
+| 2026-08-08 | `morph_break_all()` and `scheduled_events_clear()` kept as two functions, not one | two independent queues with two independent public entry points (`morph_full()`, `schedule_event()`); one name cannot honestly describe both, and the only caller wants both adjacently anyway |
+| 2026-08-08 | Hover picks coalesced per main-loop iteration; the click path and the "pointless drag" branch left picking inline | a hover flood is many events resolving to one visible position, so only the last matters; a click is a single event whose pick must resolve before the same event decides whether to open a context menu, and the drag branch's question ("did the cursor leave the node it was pressed on") is one every intermediate position can answer differently |
+| 2026-08-08 | `--record` greys out File → Rescan/Change Root instead of teaching the recording loop to apply them | applying one mid-capture would free the tree the recording script's own cues hold `GNode *` into; a menu item that cannot do its job should not look like it can |
