@@ -136,7 +136,17 @@ camera_init( FsvMode mode, boolean initial_view )
 	double d, d1, d2;
 
 	/* A mode switch, a rescan or a Reset re-poses the camera outright;
-	 * whatever the user was flying toward is gone with it */
+	 * whatever the user was flying toward is gone with it.
+	 *
+	 * Note the ordering this sits in: fsv_set_mode( ) (and the SDL
+	 * frontend's enter_mode( )) run geometry_init( ) for the NEW mode,
+	 * then this, then assign globals.fsv_mode -- so the
+	 * camera_update_scrollbars( ) inside camera_flight_end( ) dispatches
+	 * on the OLD mode while the geometry parameters already belong to
+	 * the new one. Harmless, and not by accident: a flight can only be
+	 * in progress if the old mode is FSV_FSN, whose scrollbar arm is the
+	 * null state and reads no geometry at all. Worth re-checking if FSN
+	 * ever grows a real scroll model. */
 	camera_flight_end( );
 
 	camera->fov = 60.0;
