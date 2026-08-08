@@ -72,7 +72,13 @@ const char *app_root_dir(void);
 // same body app_switch_mode() runs, but without its mode ==
 // globals.fsv_mode guard, which exists specifically to reject what Reset
 // wants to do (re-enter the *current* mode). No-op while a scan is
-// running or before the first filesystem has loaded.
+// running or before the first filesystem has loaded. If bird's-eye view
+// is active, this backs it out first (camera_birdseye_view(FALSE)) and
+// then cancels the resulting in-flight morph with camera_pan_break() --
+// NOT equivalent to the user manually exiting bird's-eye view first (that
+// lets the restore morph run to completion over several seconds); see
+// main.cpp's implementation comment for why the cancel is required
+// before camera_init() runs.
 void app_reset_camera(void);
 
 // fsn-mode Task A3: the scroll state camera_update_scrollbars() last

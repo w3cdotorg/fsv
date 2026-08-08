@@ -72,11 +72,14 @@ ui_rail_set_visible(bool visible)
 // camera.c calls around every camera-owned pan (look-at, bird's-eye
 // view) — see camera.c's camera_look_at_full()/camera_birdseye_view()/
 // post_pan_end(). window_access_enabled() (src/sdl/stubs.c) is this
-// frontend's read side of that same flag.
+// frontend's read side of that same flag. No app_is_scanning() check
+// here: ui_rail_draw()'s own early return below already guarantees a
+// scan isn't running by the time this is called, so re-checking it here
+// would be dead weight, not defense in depth.
 static bool
 rail_access_ok(void)
 {
-	return !app_is_scanning() && window_access_enabled();
+	return window_access_enabled();
 }
 
 // One vertical Tilt/Height slider. Reads the camera-pushed ScrollState

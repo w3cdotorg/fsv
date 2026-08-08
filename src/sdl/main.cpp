@@ -263,12 +263,42 @@ app_reset_camera(void)
 	// birdseye_view_active from what the rail, and any subsequent
 	// "Birds eye" click, believe the state to be). No new camera math:
 	// camera_birdseye_view( ) already exists and already knows how to
-	// restore a "before bird's-eye" pose; camera_init() below simply
-	// overrides that restored pose immediately afterward, same as it
-	// would if the user manually exited bird's-eye view first.
+	// restore a "before bird's-eye" pose.
+	//
+	// NOT the same as the user manually exiting bird's-eye view first,
+	// though: a manual exit lets that restore morph run to completion
+	// (several seconds) before anything else touches the camera. Here,
+	// camera_init() (inside run_mode_entry(), below) fires on the very
+	// next line and raw-overwrites camera->theta/phi/distance/near_clip/
+	// far_clip and the mode's target fields *without* cancelling
+	// whatever morph is still mid-flight on those exact variables --
+	// camera_init() only ever assigns, it never calls morph_break(). The
+	// pan_part master morph camera_birdseye_view( ) also just started
+	// would otherwise survive too, and morph_iteration( ) (src/
+	// animation.c) runs once per main-loop tick *before* this frame's
+	// scheduled events -- including the schedule_event( ) below -- get a
+	// chance to run, so the still-live backout morph would re-apply an
+	// interpolated (birdseye-ish) value on top of camera_init( )'s fresh
+	// pose for one frame, and the subsequently scheduled initial_camera_
+	// pan( ) would then compute its own pan from that corrupted starting
+	// point instead of the clean reset pose. camera_pan_break( ) is the
+	// same call camera_look_at_full( )/camera_birdseye_view( ) themselves
+	// already make before installing a *new* set of morphs on these same
+	// variables -- confirmed by reading it: it switches on globals.
+	// fsv_mode (still the pre-run_mode_entry() mode here, which is what
+	// we want) and breaks exactly camera->theta/phi/distance/fov/
+	// near_clip/far_clip/pan_part plus that mode's target fields, a
+	// superset of what camera_birdseye_view(FALSE) just started morphing
+	// -- so this fully neutralizes it. Deliberately not morph_break_all()
+	// (src/animation.h): that call's own doc comment scopes it to "the
+	// code that is about to destroy that [filesystem] tree" (scanfs()'s
+	// teardown), and would also silently cancel any unrelated in-flight
+	// colexp() expand/collapse animation -- a wider blast radius than
+	// this Reset button has any business causing.
 	if (window_birdseye_active()) {
 		camera_birdseye_view(FALSE);
 		window_birdseye_set_active(FALSE);
+		camera_pan_break();
 	}
 
 	run_mode_entry(globals.fsv_mode);
