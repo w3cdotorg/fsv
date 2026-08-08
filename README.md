@@ -53,7 +53,12 @@ every platform. `[dir]` defaults to the current directory if omitted.
 - **Prebuilt binaries**: every push builds macOS (arm64) and Linux
   (x86_64) binaries; tagged releases (`v*`) attach both as `.tar.gz`
   assets on the [GitHub Releases](../../releases) page — see
-  [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The macOS
+  binary still needs Homebrew's libraries at runtime (`brew install glib
+  sdl3`): it links them by their `/opt/homebrew/opt/…` install paths and
+  they are not bundled, so this applies to an `.app` built from it too.
+  Without them it exits immediately with a dyld "Library not loaded"
+  error.
 
 ### Linux
 

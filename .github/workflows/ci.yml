@@ -293,6 +293,13 @@ jobs:
             README.md,
             LICENSE.md      project docs
 
+          Requires: brew install glib sdl3
+
+          The binary links against Homebrew's libglib-2.0 and libSDL3 by
+          their /opt/homebrew/opt/... install paths; they are not bundled,
+          so both the bare binary and an fsv.app built by make-bundle.sh
+          need them present on the machine that runs it.
+
           Shaders are compiled offline and embedded in the binary (see
           docs/PORTING.md, Task 3.2) -- nothing under shaders/ is needed at
           runtime, so it is not included here.

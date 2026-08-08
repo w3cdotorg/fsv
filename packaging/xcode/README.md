@@ -70,6 +70,15 @@ the bundling step useful to people who never open Xcode at all. See
 `packaging/macos/make-bundle.sh --help`-style usage comments at the
 top of the script for the `[builddir] [output.app]` arguments.
 
+The bundle is **not** self-contained: `make-bundle.sh` copies the binary
+in as-is, and that binary links Homebrew's `libglib-2.0` and `libSDL3`
+by their `/opt/homebrew/opt/…` install paths (`otool -L fsv.app/Contents/
+MacOS/fsv`). So `fsv.app` runs on a machine that has `brew install glib
+sdl3`, and fails to launch with a dyld "Library not loaded" error on one
+that doesn't. Relocating those dylibs into `Contents/Frameworks` with
+`install_name_tool`/`dylibbundler` would make it distributable; that is
+deliberately out of scope for now (see `docs/PORTING.md`).
+
 No `fsv.icns` is checked in — the only icon asset in this repo is
 `src/xmaps/fsv-icon.xpm`, a legacy GTK XPM that isn't a viable `.icns`
 source without a hand-drawn multi-resolution PNG set. If someone adds
