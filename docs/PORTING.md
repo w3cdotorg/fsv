@@ -4619,6 +4619,218 @@ rebuilt, `meson test` **4/4 on each**.
   `theta` and `target` untouched) and the new Shift key handling is inert
   there; `--screenshot` renders unchanged in both FSN and MapV.
 
+### Task B3 verification (selection spotlight + FSN polish — Milestone B complete)
+
+**Files:** `src/gpu.h` (new `FSV_DEPTH_LESS_NOWRITE`), `src/sdl/gpu.cpp`
+(`pipeline_for()`'s new depth/blend branch, `NUM_DEPTH_TESTS` 4→5),
+`src/ogl-gpu-compat.c` (matching, currently-unreachable case),
+`src/fsn-style.h` (`FSN_LANDSCAPE_CLASSIC`, the `FSN_SPOTLIGHT_*`
+constants and the `fsn_spotlight_rings[]` table), `src/geometry-fsn-draw.c`
+(`fsn_node_visible()`, `fsn_gldraw_spotlight_ring()`, `fsn_draw_spotlight()`,
+wired into `fsn_geometry_draw()`), `src/color.c`/`.h`
+(`landscape_explicit()`/`landscape_set_auto()`), `src/sdl/main.cpp`
+(`enter_fsn_mode_landscape()`), `src/camera.c` (`camera_birdseye_view()`'s
+going-down arm).
+
+**The decal, and why it is stacked rings rather than a true gradient.**
+The brief's ideal is a triangle-fan radial gradient via per-vertex alpha.
+`FsvVertex` (`src/gpu.h`) has only `pos`/`normal` — no per-vertex color —
+so, exactly like Task A1's banded sky, that gradient is not expressible
+through `gpu_draw()` as it stands, and adding a new vertex format/pipeline/
+shader pair purely for a decorative ground decal would be exactly the
+contract growth the brief asks to avoid. Instead `fsn_draw_spotlight()`
+draws `FSN_SPOTLIGHT_RING_COUNT` (6) concentric filled ellipses, largest
+(faintest) first, each a flat-alpha `FSV_TRIANGLE_FAN`; standard "over"
+alpha compositing across the six accumulates a stepped approximation of
+the target falloff (composited alpha roughly 0.05/0.12/0.20/0.29/0.41/0.52
+outermost-to-innermost, against the brief's ~0.55 center target).
+
+**Where the ellipse sits.** `fsn_layout_get(node)` already carries the
+selected node's own `x`/`z` ground position (both directories' pedestals
+and files' boxes are fully positioned by `geometry-fsn.c`'s placement
+pass) — no new accessor was needed. What differs between the two node
+kinds is the *surface* the ellipse lies on: a directory stands on the
+true ground (world `z == 0`), but a file stands on its *parent's*
+pedestal top (world `z == parent_ped->h`) — read via a second
+`fsn_layout_get(node->parent)` call. `FSN_SPOTLIGHT_LIFT` (0.5, its own
+constant rather than reusing `FSN_TEXT_LIFT`) keeps the decal off
+whichever surface that is. Sizing: `FSN_SPOTLIGHT_FILE_SCALE` (2.0×
+the box footprint) for a file, `FSN_SPOTLIGHT_DIR_SCALE` (1.15×) for a
+directory — both eyeballed per the brief.
+
+**The one new pipeline variant, and why it needed no new gpu.h entry
+point.** `FSV_DEPTH_LESS_NOWRITE` extends `FsvDepthTest` (mirroring
+Task A1's `FSV_DEPTH_ALWAYS_NOWRITE` addition): depth test LESS, write
+off. Because `gpu_draw()` already picks its pipeline from whatever
+`gpu_set_depth_test()` last set, tying alpha blending (the text
+pipeline's SRC_ALPHA/ONE_MINUS_SRC_ALPHA factors) to this one enum value
+in `pipeline_for()` meant the spotlight needed nothing beyond the
+existing `gpu_set_color()`/`gpu_set_lighting()`/`gpu_set_depth_test()`/
+`gpu_draw()` contract — no `gpu_spotlight()`, no new topology flag. The
+brief flagged both options; this was the smaller one. `ogl-gpu-compat.c`
+gained a documented, currently-unreachable `GL_LESS` case for the same
+reason `FSV_DEPTH_ALWAYS_NOWRITE` did: FSN has no GTK menu entry, so
+nothing there ever passes this value, but a future GTK landscape/decal
+should not silently inherit the wrong depth func from the `default:`
+case.
+
+**A real visibility bug caught by testing the "collapse the parent" case
+literally, not just filing it as done.** The first `fsn_node_visible()`
+walked from `node->parent` up to the root, hiding the spotlight whenever
+*any* ancestor was collapsed — including the node's own immediate
+parent. That is backwards for a **file**: `fsn_draw_recursive()` draws a
+directory's own box *and* own files unconditionally, before it ever
+checks its own `collapsed` flag; that flag only gates the loop that
+recurses into the directory's *child directories*. So collapsing a
+directory hides its subdirectories (transitively) but never its own
+files, and never itself. Confirmed both directions with the real
+draw path (see below): selecting a file directly under `src/`
+(`color.c`) and collapsing `src` itself left the spotlight showing
+(`src` is `color.c`'s own directory, and `src`'s own files always draw
+once `src` itself is reached — which it always is, being the root);
+selecting a *directory* (`src/sdl`) and collapsing its parent (`src`)
+correctly hid the spotlight (and the `sdl` pedestal itself — nothing
+recurses into a collapsed directory's children at all). The fixed
+`fsn_node_visible()` starts its ancestor walk one generation higher for
+a file than for a directory, with the difference spelled out in its own
+comment.
+
+**Auto-landscape.** `color.c` gained `landscape_explicit()` (persisted
+nvstore boolean, `landscape_set()`'s one and only caller being the
+Display menu) and `landscape_set_auto()` (same apply-and-persist body,
+factored into a shared `landscape_apply()`, but leaves the explicit flag
+untouched). `src/sdl/main.cpp`'s `enter_fsn_mode_landscape()` runs on
+every entry into `FSV_FSN` (both `enter_mode()`'s and `run_mode_entry()`'s
+`globals.fsv_mode = mode;` line) and auto-selects `FSN_LANDSCAPE_CLASSIC`
+unless the flag is already set. Leaving FSN restores nothing — no
+"landscape before FSN" is saved anywhere, so whatever FSN leaves selected
+(whether auto or explicit) simply persists afterward; this asymmetry is
+intentional (YAGNI) and documented at the call site, not an oversight.
+
+**Birdseye fold-in.** `camera_birdseye_view()`'s going-down (`else`) arm
+restores `camera->theta` to `pre_cam->theta` with a plain `morph()`,
+exactly like the going-up arm's `new_cam->theta` target did before
+Task B2's fix round — and `morph()` interpolates the raw number, not the
+angle, so a flight-wrapped `camera->theta` (e.g. left at 3.673 after
+several full turns) would restore via the long way around. Fixed with
+the same `unwrap_theta_toward( pre_cam->theta )` call the going-up arm
+already makes, gated to `FSV_FSN` for the same reason that arm's call
+is: DiscV/MapV/TreeV never wrap theta the way a flight does, and their
+own pre-existing "long way round" behavior after a manual revolve
+(recorded in the Task B2 fix-round note) is out of scope here.
+
+**Verification.**
+
+1. **Both arms build clean, `meson test` 4/4 on each.** SDL/macOS
+   (`ninja -C builddir-sdl`, incremental and from-scratch). GTK: fresh
+   `debian:bookworm` container, this repo's CI apt list, `meson setup
+   -Dfrontend=gtk && ninja` (53/53 targets) `&& meson test` → 4/4, run
+   twice — once mid-task to confirm the base spotlight/pipeline work
+   didn't regress the GTK build, once at the end after the
+   `fsn_node_visible()` fix and after all throwaway debug code below was
+   removed.
+2. **Headed FSN on this repo's own `src/`.** A throwaway, env-var-gated
+   block in `src/sdl/main.cpp`'s `--screenshot` path (same convention as
+   Tasks A2/A3/B2: `FSV_TEST_SELECT`/`FSV_TEST_COLLAPSE`/`FSV_TEST_PICK`/
+   `FSV_TEST_BIRDSEYE`, resolving paths via `common.c`'s `node_named()`
+   and driving `colexp()`/`camera_look_at()`/`camera_birdseye_view()`
+   directly — never committed, removed before this task's commits) plus
+   a temporary `fprintf` in `fsn_draw_spotlight()`:
+   - **Select a file** (`src/color.c`, a root-level file): flying the
+     camera to frame `color.c`'s own tiny 64-unit footprint
+     (`fsn_look_at()`'s `SQRT_2 * max(w,d)` diameter rule) puts the
+     camera nose-first against the packed box row with no ground in
+     frame at all — an honest finding about that zoom rule on a densely
+     packed real source tree, not a spotlight bug (recorded as a
+     concern below). Framing the camera on the *parent* directory
+     instead (while leaving the actual selection on the file) gives a
+     legible shot: a soft, pale, elliptical glow pools at the base of
+     `color.c`'s box on the grey pedestal surface, brightest near the
+     box and fading outward over the six rings — cropped/zoomed
+     screenshots read exactly like the reference's "soft white
+     elliptical light pool," just smaller in an unzoomed frame because
+     this repo's own files are modest in size. Confirmed the glow moves
+     when a different file is selected (checked against the logged
+     `cx`/`cz`/`base_z` from `fsn_layout_get()`).
+   - **Select a directory** (`src/sdl`): the ellipse is only 1.15× the
+     pedestal's own footprint, and the pedestal is a fully opaque block
+     standing on exactly that footprint, so almost the entire decal is
+     self-occluded by the pedestal it surrounds — only a thin, correctly
+     visible rim peeks out at the pedestal's outward corners/edges in
+     the oblique default view. Subtler than the file case by
+     construction (a directory's own footprint dominates its ellipse far
+     more than a file's does), not a bug.
+   - **Click on nothing (sky/ground):** traced through
+     `src/sdl/input.cpp` rather than screenshotted — `g_indicated_node`
+     is set to `node_at_cursor()`'s result on press, but
+     `camera_look_at()` (the only writer of `globals.current_node`) on
+     button-up is gated on `g_indicated_node != NULL`; a click resolving
+     to id 0 leaves it NULL, so `camera_look_at()` never runs and
+     `globals.current_node` — and therefore the spotlight — is
+     unchanged. There is no deselect gesture in this port today.
+   - **Collapse the selected node's parent:** see the visibility-bug
+     writeup above — both the directory case (spotlight and pedestal
+     both vanish) and the file-under-root case (spotlight correctly
+     survives collapsing root, since root's own files always draw) were
+     exercised via `FSV_TEST_COLLAPSE` and confirmed by screenshot.
+3. **Pick-through.** `FSV_TEST_PICK="650,420"` (a pixel inside the
+   visible glow from the file screenshot above) called `gpu_pick()`
+   directly: it returned a small, ordinary node id (13 — the pedestal
+   under the decal) with **no** `fsn_draw_spotlight()` debug line
+   printed during that call's internal offscreen render (one debug line
+   total per frame, from the *normal* pass that ran afterward) —
+   confirming the decal's own `gpu_render_mode() != FSV_RENDER_NORMAL`
+   self-check keeps it out of the select pass entirely, exactly like
+   `fsn_gldraw_wire()`'s pattern elsewhere in the same file.
+4. **Auto-landscape.** A standalone harness (same isolation technique as
+   `tests/test_color_persistence.c`: `$HOME` redirected before anything
+   touches `~/.fsvrc`, linked straight against `libfsvcore`'s real
+   `color.c`, not added to `meson.build`) reproduced
+   `enter_fsn_mode_landscape()`'s one-line body (that function itself is
+   C++/SDL-only and wasn't linked) and ran the brief's exact scenario:
+   fresh config → `landscape_get()==0` (classic) after the simulated FSN
+   entry, `landscape_explicit()==FALSE`; `landscape_set(2)` (simulated
+   menu pick of "slate") → `landscape_explicit()==TRUE`; a second
+   simulated FSN entry → `landscape_get()` stays `2` (slate sticks); a
+   fresh `landscape_init()` (simulated relaunch) → both the preset and
+   the explicit flag reload correctly from `~/.fsvrc`. All four
+   assertions passed.
+5. **Birdseye fold-in.** `FSV_TEST_BIRDSEYE=1` set `camera->theta = 3.673`
+   directly (via `camera.h`'s exported `extern Camera *camera`), then
+   called `camera_birdseye_view(true)` (drained to settle at
+   `theta==270`, the going-up arm's already-proven unwrap) and
+   `camera_birdseye_view(false)`: **immediately** after the call (before
+   the restore morph has run at all) `camera->theta` read **−90.0** —
+   `unwrap_theta_toward(3.673)` applied to 270 (`|270 − 3.673| = 266.3 >
+   180`, so shifted by one turn to −90, `|−90 − 3.673| = 93.7 ≤ 180`,
+   stop) — then settled at **3.673** once the morph completed, i.e. a
+   monotonic 93.7° arc, not the 266° long way. Matches Task B2's own
+   verification style for the going-up arm and `fsn_look_at()` exactly.
+6. **All throwaway harness code removed before the commits below** —
+   confirmed by re-diffing `src/sdl/main.cpp` and
+   `src/geometry-fsn-draw.c` against the previous commit and rebuilding
+   both arms clean one final time.
+
+### Concerns / disclosed gaps
+
+- **`fsn_look_at()`'s file-zoom diameter (Task B1, not touched here)
+  makes a real click-to-fly on a file in a densely packed directory land
+  the camera nose-first against the box row**, as noted above — a real
+  UX rough edge surfaced by this task's own verification, not a
+  spotlight defect, and out of B3's scope to fix (it is `camera.c`'s
+  framing rule, not the decal).
+- **The spotlight is not deployment-aware.** If the selected node's
+  ancestor chain is mid-collapse/expand morph (`deployment` strictly
+  between 0 and 1), `fsn_draw_spotlight()` draws at the node's static
+  layout height regardless — unlike `fsn_gldraw_wire()`, which scales its
+  child endpoint by `deployment` by hand. A visible glitch only during
+  the brief animation window, and only for a node whose ancestor is
+  *also* the one currently being expanded/collapsed; accepted as YAGNI
+  for a decorative decal rather than threading deployment through
+  `fsn_draw_spotlight()`.
+- **"Night" landscape remains uncalibrated** (Task A1's own disclosed
+  gap; untouched here, and auto-landscape only ever selects "classic").
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -4708,3 +4920,9 @@ code is kept.
 | 2026-08-08 | fsn-mode Task B1 fix round: FSN's ground path text caches its composed string, keyed on the `GNode *` it came from, with invalidation in `fsn_geometry_draw()` rather than `fsn_geometry_free()` | `node_absname_display()`'s own contract (`src/common.c`) is "hover/selection changes, not per node per frame", and this call was per frame; the invalidation cannot live in `fsn_geometry_free()` because that is the layout half, which `libfsvcore` links and the draw file is absent from — a call in that direction would not link. Measured at 3 cache misses over 300 recorded frames with two scripted `camera_look_at_full()` cues |
 | 2026-08-08 | fsn-mode Task B1 fix round: `tests/fixture` gained `dir-c` (a second top-level directory) and `dir-a/dir-d` + `dir-a/dir-e` | the FSN layout's ground-width slicing was untestable on the old fixture: with one child, `FSN_DIR_SPAN`'s `max(own width, children's total)` rule has no effect and a broken implementation passes — confirmed by breaking it deliberately before the fixture grew and watching the test still pass. Three siblings under `dir-a` make its subtree several times wider than its own pedestal, which is what makes the rule observable. `test_scanfs`'s bound is a floor (`>= 6`), so it is unaffected by design |
 | 2026-08-08 | fsn-mode Task B1 fix round: file-box height left unclamped against its pedestal's height, with the comment corrected instead | box height *is* the file's size; clamping it against the pedestal it happens to stand on would render two identically-sized files at different heights depending on which directory they are in, which misinforms worse than a tall box on a short slab |
+| 2026-08-08 | fsn-mode Task B3: selection spotlight drawn as `FSN_SPOTLIGHT_RING_COUNT` (6) stacked flat-alpha ellipses instead of a true per-vertex alpha gradient | same root cause as Task A1's banded sky: `FsvVertex`/`gpu_draw()` carry no per-vertex color, only a uniform fill color; a real gradient would need a new vertex format, pipeline and shader pair for one decorative decal |
+| 2026-08-08 | fsn-mode Task B3: added `FSV_DEPTH_LESS_NOWRITE` (`gpu.h`) and tied alpha blending to that one depth-test value in `pipeline_for()`, rather than adding a `gpu_spotlight()` entry point or a separate blend flag on `gpu_draw()` | the spotlight is the only caller that needs depth-test-on/write-off *and* blending together; `gpu_set_depth_test()` already selects `gpu_draw()`'s pipeline per call, so no new gpu.h surface was needed at all — the smaller of the two extensions the task brief offered |
+| 2026-08-08 | fsn-mode Task B3: a file's spotlight sits on its *parent's* pedestal top (world `z == parent_ped->h`), a directory's on the true ground (`z == 0`) — both read via `fsn_layout_get()`, no new layout accessor | matches what "the ground under the selected node" actually means physically: a file's local ground is the pedestal it stands on, not the world floor several generations below it |
+| 2026-08-08 | fsn-mode Task B3: `fsn_node_visible()`'s ancestor walk starts one generation higher for a file than for a directory | `fsn_draw_recursive()` draws a directory's own box *and own files* unconditionally, before checking its own `collapsed` flag — that flag only gates recursion into *child directories* — so a file's visibility depends on its parent being *reached*, not on the parent's own collapsed state, while a directory's visibility depends on its parent not being collapsed directly. Getting this backwards (checking the immediate parent's collapsed flag for a file too) was the task's own first draft, caught by literally testing "collapse the selected node's parent" for both node kinds rather than trusting the more intuitive-sounding rule |
+| 2026-08-08 | fsn-mode Task B3: FSN auto-landscape persists a separate `landscape_explicit` nvstore boolean rather than inferring "explicit" from whether `landscape` differs from the built-in default | the built-in default ("slate") is itself a legitimate explicit choice a user could make from the menu, indistinguishable from "never chosen" by value alone; a dedicated flag is the only way to tell the two apart |
+| 2026-08-08 | fsn-mode Task B3: leaving FSN mode restores no prior landscape (no "landscape before FSN" is saved) | keeping the feature to what the brief asked for (auto-*entering* FSN) — a restore-on-exit would need its own saved-state slot and its own interaction with the explicit flag for arguably little benefit, since the landscape menu remains one click away in any mode |
