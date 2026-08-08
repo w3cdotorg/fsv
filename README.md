@@ -182,6 +182,18 @@ Menu highlights (menu bar at the top of the window):
 - **GTK frontend testing**: the GTK arm only builds a real GUI on Linux
   (macOS lacks a usable `GL/glu.h`), so its interactive behavior needs a
   Linux machine or container to exercise visually.
+- **Text coverage**: filenames are rendered per Unicode codepoint and
+  normalized to NFC, so accented Latin names (`café.txt`,
+  `Übung_größe.txt`, `œuvre.txt`) display correctly in both the 3D
+  labels and the panels — including the decomposed (NFD) form macOS
+  filesystems hand back. Coverage beyond Latin/Latin-1/Latin
+  Extended-A is the *font's*, not fsv's: the 3D label atlas is
+  rasterized from a system monospace face (Courier New/Menlo on macOS,
+  DejaVu/Liberation Mono on Linux) over those ranges only, so a CJK or
+  emoji filename shows one `?` per codepoint in the 3D view. If no such
+  font is found at all, fsv falls back to its built-in ASCII-only
+  bitmap charset and logs it once (every non-ASCII character then
+  renders as `?`).
 
 <details>
 <summary>GTK/OpenGL frontend notes (OpenGL versions and compatibility)</summary>

@@ -3252,6 +3252,141 @@ shipped as part of a task rather than afterward.
     addition the same way the scroll-wheel and double-click rows
     already are.
 
+- **UTF-8 / accented characters** (`src/fontatlas.c` + `src/fontatlas.h`
+  (new), `src/tmaptext.c`, `src/scanfs.c`, `src/common.[ch]`,
+  `src/sdl/main.cpp`, `lib/stb_truetype.[ch]` (vendored)). Reported
+  against this port: a file named `cosmique français […].mp3` rendered
+  on its 3D pedestal as `cosmique franc??ais` — one `?` per non-ASCII
+  *byte*. Three separate defects, all fixed here.
+
+  1. **The atlas was ASCII-only.** `tmaptext.c` embedded
+     `src/xmaps/charset.xbm`: a baked 512×128 XBM, 96 fixed 16×32 cells,
+     codes 32..127, with `get_char_tex_coords()` hardcoding
+     `cell = c - 32` and folding everything outside that range to `?`.
+     There was no glyph for `é` to find. Replaced by `fontatlas.c`,
+     which rasterizes a real monospace TrueType face with stb_truetype
+     into the *same fixed-cell layout* — same 16×32 cells, same 32 cells
+     per row, so `char_aspect_ratio` (and therefore `geometry.c`'s label
+     squeeze/fit math through `get_char_dims()`) is bit-for-bit
+     unaffected — over ASCII + Latin-1 Supplement + Latin Extended-A +
+     the dash/curly-quote block + `€` (336 cells, a 512×352 atlas). The
+     glyph scale is chosen so one character *advance* fits the cell
+     width, then clamped so ascender-to-descender fits the cell height;
+     glyphs are centered and clipped to their own cell so a tall
+     accented capital can never bleed into a neighbor.
+     `gpu_text_init()`'s contract (one 8-bit coverage buffer + width +
+     height) already took arbitrary dimensions, so **neither backend
+     changed**: the GTK/epoxy compat path and the SDL_GPU path upload
+     the new atlas exactly as they uploaded the old one.
+  2. **Strings were walked by byte.** `text_draw_straight()`/
+     `_straight_rotated()`/`_curved()` indexed `text[i]` and used
+     `strlen()` as the character count. Now a single shared helper,
+     `text_glyph_cells()`, decodes the string *once per draw* into one
+     atlas cell per codepoint (`g_utf8_get_char_validated()` /
+     `g_utf8_next_char()` — GLib was already a hard dependency), and
+     that count is what `get_char_dims()` fits. An uncovered codepoint
+     is one `?`, not one per byte; invalid UTF-8 (filenames are
+     arbitrary bytes) is consumed one byte at a time as `?` rather than
+     walked off the end of the buffer.
+  3. **macOS hands back NFD.** HFS+ and APFS return decomposed UTF-8:
+     `café.txt` arrives as `cafe` + U+0301 COMBINING ACUTE ACCENT.
+     Neither a fixed-cell glyph grid nor ImGui composes combining
+     marks, so even with the glyph coverage above it would have
+     rendered as `cafe` plus a stray accent cell. `scanfs.c`'s new
+     `display_name()` composes to NFC (`g_utf8_normalize()`) and
+     sanitizes invalid bytes (`g_utf8_make_valid()`), storing the
+     result in a new `NodeDesc::dname` field — interned in the same
+     `GStringChunk` the raw name already lives in, so it has the same
+     lifetime and costs one free rather than one per node, and
+     returning the *same pointer* when the name is already valid NFC
+     (the ASCII case, i.e. almost always).
+
+  **Where the normalization happens, and why it is not per frame.**
+  `NodeDesc::name` stays byte-exact — every `lstat()`/`chdir()`
+  (`node_absname()`), the wildcard matching in `color.c` and every
+  sort/compare still use it. `dname` is display-only, read through the
+  `NODE_DNAME()` macro (`src/common.h`), and computed exactly once per
+  node at scan time. That matters because the label draw path runs
+  every frame for every visible node: normalizing there — the obvious
+  "display-time" reading — would re-shape every label string 60 times a
+  second. Scan time is the cache. The ImGui panels (`ui_panels.cpp`'s
+  tree rows and file-list rows, `ui_dialogs.cpp`'s Properties contents)
+  read the same cached field, so they cost nothing extra either. The
+  one genuinely per-call normalization is `node_absname_display()`
+  (`common.c`), used only by the status bar and the context menu's path
+  line — short strings, on hover/selection changes.
+  - GTK's own panels never needed any of this (Pango composes combining
+    marks and renders the raw UTF-8 fine), but `dirtree.c`/`filelist.c`
+    were switched to `NODE_DNAME()` anyway: it is also the
+    *guaranteed-valid* UTF-8 form, which is what GTK's tree views
+    actually require.
+
+  **Font discovery** (`font_atlas_find_font()`, one ordered list, first
+  existing file wins, result remembered): macOS
+  `/System/Library/Fonts/Supplemental/Courier New.ttf`, then
+  `/System/Library/Fonts/Menlo.ttc` (a collection —
+  `stbtt_GetFontOffsetForIndex()` picks the face), then
+  `Andale Mono.ttf`; Linux DejaVu Sans Mono and Liberation Mono under
+  the Debian/Ubuntu, Fedora and Arch paths. If none exists, the atlas
+  falls back to the original XBM charset and says so once
+  (`g_message()`) — degraded, never fatal, and the old ASCII behavior
+  exactly.
+
+  **ImGui panels** got the same defect from the other direction:
+  ImGui's built-in ProggyClean is itself a baked ASCII-only bitmap.
+  `main.cpp` now loads the *same* discovered face with
+  `AddFontFromFileTTF()` (15px, `FontNo` = the .ttc face index), so the
+  panels and the 3D labels can never disagree about the typeface. No
+  glyph ranges are passed: since 1.92 ImGui loads glyphs on demand when
+  the backend advertises `ImGuiBackendFlags_RendererHasTextures`, which
+  `imgui_impl_sdlgpu3.cpp` does — so the panels actually cover more than
+  the 3D atlas does (they render CJK if the face has it). No font
+  found, or the file unreadable (`ImFontFlags_NoLoadError`, so a
+  corrupt system font degrades instead of tripping
+  `IM_ASSERT_USER_ERROR`) → `AddFontDefault()`, i.e. the ASCII-only
+  default font, logged once.
+
+  **stb_truetype is vendored twice, deliberately.** `lib/stb_truetype.h`
+  is a verbatim copy of `subprojects/imgui/imstb_truetype.h` (upstream
+  v1.26 plus ImGui's warning fixes), compiled by the one-line
+  `lib/stb_truetype.c` into `libmisc`. `fontatlas.c` is plain C shared
+  by both frontends and must never include an ImGui header; the two
+  copies stay independently updatable.
+
+  ### Verification
+
+  - Both arms build clean: `ninja -C builddir-sdl` (macOS/Metal) and a
+    `debian:bookworm` container `meson setup -Dfrontend=gtk` + `ninja` —
+    zero warnings from any file this change touches, `meson test` 3/3 on
+    both.
+  - **3D labels, before/after on the same fixture** (`--mapv
+    --screenshot`, ten files with accented/CJK/emoji names): before,
+    `cosmique fran??ais.mp3`, `caf??.txt`, `??uvre.txt`,
+    `nfd_cafe??.txt`, `?????????.txt` (nine `?` for three CJK
+    codepoints), `????song.mp3` (four `?` for one emoji). After:
+    `cosmique français.mp3`, `café.txt`, `œuvre.txt`, `nfd_café.txt`,
+    `???.txt` (three), `?song.mp3` (one). `--treev` shows the same for
+    the rotated-leaf and curved-platform label paths
+    (`Ångström_ñ_ç.txt`, `Übung_größe.txt`, `dossier_créé`).
+  - **The NFD case specifically**: a file created as
+    `nfd_cafe\xcc\x81.txt` (verified on disk as `…63 61 66 65 cc 81…`,
+    i.e. genuinely decomposed) renders as `nfd_café.txt` in both the 3D
+    labels and the panel rows.
+  - **Panels**: headed run, screen-captured — tree row `dossier_créé`,
+    file-list rows `café.txt`, `cosmique français.mp3`,
+    `français école.mp3`, `nfd_café.txt`, `Ångström_ñ_ç.txt`,
+    `Übung_größe.txt`, `œuvre.txt`, and `???.txt` / `?song.mp3` for the
+    unsupported ones.
+  - **Fallback path**, exercised in a container with `/usr/share/fonts`
+    removed: logs the "no monospace TrueType font found" message once,
+    builds the 512×128 XBM atlas, and maps every non-ASCII codepoint
+    (U+00E9, U+0153, U+65E5) to the single `?` cell — the exact
+    pre-change behavior.
+  - Idle CPU of the headed process unchanged at 0.3–0.5%; the label path
+    does no normalization at all (see `dname` above) and one extra small
+    allocation per label per draw (the cell array, alongside the vertex
+    array `text_draw_*()` already allocated).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -3322,3 +3457,7 @@ code is kept.
 | 2026-08-08 | `morph_break_all()` and `scheduled_events_clear()` kept as two functions, not one | two independent queues with two independent public entry points (`morph_full()`, `schedule_event()`); one name cannot honestly describe both, and the only caller wants both adjacently anyway |
 | 2026-08-08 | Hover picks coalesced per main-loop iteration; the click path and the "pointless drag" branch left picking inline | a hover flood is many events resolving to one visible position, so only the last matters; a click is a single event whose pick must resolve before the same event decides whether to open a context menu, and the drag branch's question ("did the cursor leave the node it was pressed on") is one every intermediate position can answer differently |
 | 2026-08-08 | `--record` greys out File → Rescan/Change Root instead of teaching the recording loop to apply them | applying one mid-capture would free the tree the recording script's own cues hold `GNode *` into; a menu item that cannot do its job should not look like it can |
+| 2026-08-08 | 3D label glyphs rasterized from a system font at startup rather than baking a wider XBM charset into the repo | a baked atlas would have to be regenerated by hand for every range anyone ever wants, and 336 cells of hand-drawn bitmap is not reviewable; stb_truetype is ~5k lines already vendored for ImGui, and the XBM stays as the zero-dependency fallback |
+| 2026-08-08 | NFC normalization cached in `NodeDesc::dname` at scan time, not applied at draw time | the 3D label path runs per visible node per frame; normalizing there would re-shape every string 60×/s. Storing it beside (never *instead of*) the byte-exact `name` keeps every filesystem call, wildcard match and sort untouched |
+| 2026-08-08 | Glyph coverage stops at Latin Extended-A (+ dashes/quotes/€) for the 3D atlas | the atlas is a fixed-cell grid sized up front; CJK would need thousands of cells and a proportional-width layout engine. Uncovered codepoints degrade to one `?` each, which is honest and cheap. The ImGui panels have no such limit (1.92 loads glyphs on demand) |
+| 2026-08-08 | `lib/stb_truetype.h` is a second, verbatim copy of ImGui's `imstb_truetype.h` rather than an include of it | `src/fontatlas.c` is plain C compiled into *both* frontends, and the GTK arm has no ImGui at all; a copy keeps the two updatable independently and the C arm free of any `subprojects/imgui/` dependency |
