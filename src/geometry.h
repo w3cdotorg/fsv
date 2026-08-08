@@ -86,6 +86,11 @@ double geometry_treev_platform_r0( GNode *dnode );
 double geometry_treev_platform_theta( GNode *dnode );
 double geometry_treev_max_leaf_height( GNode *dnode );
 void geometry_treev_get_extents( GNode *dnode, RTvec *ext_c0, RTvec *ext_c1 );
+/* Sets fill color + lighting for one node's geometry: its real color
+ * when rendering, its flat id color when the renderer is resolving a
+ * pick. Every mode's node geometry must go through this -- see the
+ * definition in geometry.c. */
+void geometry_node_set_color( GNode *node );
 void geometry_queue_rebuild( GNode *dnode );
 void geometry_init( FsvMode mode );
 void geometry_draw( boolean high_detail );

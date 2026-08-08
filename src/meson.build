@@ -64,7 +64,8 @@ if frontend == 'gtk' and gtkdep_found and host_machine.system() != 'darwin'
   srcs = ['about.c', 'animation.c', 'callbacks.c', 'camera.c', 'colexp.c',
     'color.c', 'common.c', 'dialog.c', 'dirtree.c', 'filelist.c',
     'fontatlas.c', 'fsv.c',
-    'geometry.c', 'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c',
+    'geometry.c', 'geometry-fsn.c', 'gui.c', 'ogl.c', 'ogl-gpu-compat.c',
+    'scanfs.c',
     'tmaptext.c',
     'viewport.c', 'window.c']
   executable('fsv', sources: [srcs, gr],

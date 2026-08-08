@@ -58,9 +58,15 @@ static unsigned int highlight_node_id;
 /* Sets the fill color and lighting state for the node about to be drawn:
  * its real color when rendering, or its flat id color when the renderer
  * is resolving a pick (unlit, so the id survives the fragment shader
- * untouched). */
-static void
-node_set_color(GNode *node)
+ * untouched).
+ *
+ * Exported (it was static until fsn-mode Task B1) so that
+ * src/geometry-fsn.c, which is a separate translation unit for size
+ * reasons alone, gets the *same* select-pass encoding and the same
+ * highlight boost rather than a second copy that could drift -- and
+ * because highlight_node_id above is this file's private state. */
+void
+geometry_node_set_color(GNode *node)
 {
 	float color[4];
 	color[3] = 1.0;	 // Alpha
@@ -138,7 +144,7 @@ draw_lit(FsvTopology topology, const FsvVertex *vert, size_t vert_cnt,
 	}
 	else {
 		g_assert(node != NULL);
-		node_set_color(node);
+		geometry_node_set_color(node);
 	}
 
 	gpu_draw(topology, vert, vert_cnt, NULL, 0);
@@ -916,7 +922,7 @@ mapv_gldraw_node( GNode *node )
 	    16, 17, 18, 18, 17, 19   // Top face
 	};
 
-	node_set_color(node);
+	geometry_node_set_color(node);
 	gpu_draw(FSV_TRIANGLES, vertex_data, G_N_ELEMENTS(vertex_data),
 		 elements, G_N_ELEMENTS(elements));
 }
@@ -1900,7 +1906,7 @@ treev_gldraw_platform( GNode *dnode, double r0 )
 	g_assert(s2 + (seg_count - 1) * 4 + 3 < vert_cnt);
 	g_assert(idx_len <= vert_cnt * 2);
 
-	node_set_color(dnode);
+	geometry_node_set_color(dnode);
 	gpu_draw(FSV_TRIANGLES, vert, vert_cnt, idx, idx_len);
 
 	xfree(vert);
@@ -2016,7 +2022,7 @@ treev_gldraw_leaf( GNode *node, double r0, boolean full_node )
 	    12, 13, 14, 14, 13, 15   // Left
 	};
 
-	node_set_color(node);
+	geometry_node_set_color(node);
 	gpu_draw(FSV_TRIANGLES, vside, G_N_ELEMENTS(vside), elems,
 		 G_N_ELEMENTS(elems));
 }

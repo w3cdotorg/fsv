@@ -239,3 +239,14 @@ geometry_free_recursive(GNode *dnode)
 {
 	(void)dnode;
 }
+
+/* Exported by geometry.c since fsn-mode Task B1 so that geometry-fsn.c
+ * shares one select-pass color encoding rather than keeping a second
+ * copy. tests/test_fsn_layout.c compiles geometry-fsn.c in directly (it
+ * is frontend-side, so libfsvcore does not carry it) and therefore needs
+ * this to link, even though its layout pass never draws anything. */
+void
+geometry_node_set_color(GNode *node)
+{
+	(void)node;
+}
