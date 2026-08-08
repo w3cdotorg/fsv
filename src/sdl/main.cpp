@@ -24,6 +24,7 @@
 #include "ui_dialogs.h"
 #include "ui_main.h"
 #include "ui_panels.h"
+#include "ui_rail.h"
 #include <cstring>
 #include <string>
 extern "C" {
@@ -723,6 +724,7 @@ run_record_mode(const char *outdir, double duration_seconds)
 		ui_dockspace_draw();
 		ui_panels_draw();
 		ui_dialogs_draw();
+		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 
 		ImDrawData *draw_data = ImGui::GetDrawData();
@@ -1172,6 +1174,7 @@ main(int argc, char **argv)
 		// docks or reads the main-menu-bar-shrunk viewport rect the way
 		// ui_panels_draw()'s panel does.
 		ui_dialogs_draw();
+		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 		submit_frame();
 

@@ -127,6 +127,31 @@ main(void)
 
 	color_config_destroy(&reloaded);
 
+	/* fsn-mode Task A2: SPECTRUM_FSN_BUCKETS round-trips through
+	 * ~/.fsvrc too -- same "set, write, reload, assert" shape as the
+	 * by_wpattern regression above, but exercising color.c's
+	 * tokens_timestamp_spectrum_type[] (a STRING-token nvstore array,
+	 * so the new enumerator's *position* in that array -- not its
+	 * numeric value in SpectrumType -- is what actually gets persisted;
+	 * see color.h's own doc comment on SPECTRUM_FSN_BUCKETS). Reuses
+	 * `cfg`/`reloaded` (both already destroyed above) as fresh scratch
+	 * configs rather than declaring new ones. */
+	color_get_config(&cfg);
+	cfg.by_timestamp.spectrum_type = SPECTRUM_FSN_BUCKETS;
+	color_set_config(&cfg, COLOR_BY_TIMESTAMP);
+	color_write_config();
+	color_config_destroy(&cfg);
+
+	assert(color_get_mode() == COLOR_BY_TIMESTAMP);
+
+	color_init(); /* simulated relaunch, same as above */
+
+	assert(color_get_mode() == COLOR_BY_TIMESTAMP);
+
+	color_get_config(&reloaded);
+	assert(reloaded.by_timestamp.spectrum_type == SPECTRUM_FSN_BUCKETS);
+	color_config_destroy(&reloaded);
+
 	fprintf(stderr, "test_color_persistence: all OK\n");
 	return 0;
 }

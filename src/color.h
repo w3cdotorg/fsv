@@ -36,6 +36,16 @@ typedef enum {
 	SPECTRUM_RAINBOW,
         SPECTRUM_HEAT,
 	SPECTRUM_GRADIENT,
+	/* fsn-mode Task A2: the original fsn's 7-bucket "ages:" legend --
+	 * absolute, fixed-cutoff age buckets (src/fsn-style.h's
+	 * fsn_age_buckets[]), not a continuous windowed spectrum like the
+	 * three above. Inserted here, before SPECTRUM_NONE, is safe on
+	 * disk: color.c's nvstore round-trip persists SpectrumType by
+	 * STRING token (tokens_timestamp_spectrum_type[]), never the raw
+	 * enum int, so an existing ~/.fsvrc's "rainbow"/"heat"/"gradient"
+	 * strings still resolve to the same values regardless of where a
+	 * new enumerator lands. */
+	SPECTRUM_FSN_BUCKETS,
 	SPECTRUM_NONE
 } SpectrumType;
 
@@ -74,6 +84,12 @@ struct ColorConfig {
 void color_config_destroy( struct ColorConfig *ccfg );
 ColorMode color_get_mode( void );
 void color_get_config( struct ColorConfig *ccfg );
+/* fsn-mode Task A2: cheap peek at the live by_timestamp.spectrum_type,
+ * for src/sdl/ui_rail.cpp's ui_legend_draw( ) to check every frame
+ * without paying for a full color_get_config( )/color_config_destroy( )
+ * deep copy (which also clones the by_wpattern group list) just to read
+ * one enum field. Mirrors color_get_mode( )'s existing shape. */
+SpectrumType color_timestamp_spectrum_type( void );
 void color_assign_recursive( GNode *dnode );
 void color_set_mode( ColorMode mode );
 RGBcolor color_spectrum_color( SpectrumType type, double x, void *data );

@@ -97,4 +97,57 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
 	},
 };
 
+/* One entry in fsn's 7-bucket "ages:" legend (task-A2-brief.md's
+ * reference screenshot, 35037135976_0d90f4a3d5_z.jpg -- a bottom status
+ * bar reading "ages: 1 wk 2 wk 1 mo 3 mo 6 mo 1 yr > 1 yr", each label
+ * on its own colored swatch). Consumed two ways: src/color.c's
+ * SPECTRUM_FSN_BUCKETS coloring path steps a file's age (now minus its
+ * chosen timestamp) through max_age_s to pick a color; src/sdl/
+ * ui_rail.cpp's ui_legend_draw( ) just iterates the whole table to draw
+ * the swatch+label bar verbatim. Same header-only shape as
+ * FsnLandscape/fsn_landscapes[] above, for the same reason (shared by a
+ * C translation unit -- color.c -- and a C++ one -- ui_rail.cpp -- with
+ * no meson.build change needed for either). */
+typedef struct {
+	const char *label;  /* legend text, e.g. "1 wk" */
+	double max_age_s;   /* inclusive upper bound of this bucket's file
+	                      * age, in seconds; meaningless for the last
+	                      * entry (index FSN_AGE_BUCKET_COUNT - 1),
+	                      * which is the catch-all "> 1 yr" bucket for
+	                      * any age past the second-to-last cutoff */
+	float rgb[3];        /* linear 0..1, fed straight into
+	                       * gpu_set_color( )/ImGui color widgets --
+	                       * same convention as FsnLandscape's fields */
+} FsnAgeBucket;
+
+#define FSN_AGE_BUCKET_COUNT 7
+
+/* Colors sampled directly from the reference screenshot's legend
+ * swatches (task-A2-brief.md's 35037135976_0d90f4a3d5_z.jpg), not
+ * eyeballed by look alone: cropped the "ages:" bar (approx.
+ * x=148..284, y=497..506) and took the per-channel median pixel value
+ * over each swatch's x-range in Python/PIL, which is fairly robust
+ * against the white bold-text glyphs and JPEG ringing sitting on top of
+ * each swatch's flat fill. Rounded to a clean-looking value near each
+ * median, same spirit as fsn_landscapes[] above.
+ *
+ * Note on the last bucket: the brief's own first-pass guess (before
+ * this sampling) called it "grey" -- that guess does not survive a
+ * close look at the actual pixels (median ~(87,44,68), and a 8x crop of
+ * just that swatch shows a visibly dark plum/wine color, not a neutral
+ * grey) or the plausible IRIS GL palette (a `-1` "no more buckets"
+ * sentinel rendered as an increasingly dark, increasingly desaturated
+ * continuation of the purple hue used one bucket up, rather than a
+ * jump to a completely different, achromatic color). Corrected to the
+ * sampled dark plum. */
+static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
+	{ "1 wk",   7.0 * 86400.0, { 0.565f, 0.235f, 0.208f } }, /* maroon-red, ~(144,60,53) */
+	{ "2 wk",  14.0 * 86400.0, { 0.510f, 0.337f, 0.149f } }, /* orange-brown, ~(130,86,38) */
+	{ "1 mo",  30.0 * 86400.0, { 0.569f, 0.561f, 0.153f } }, /* olive-yellow, ~(145,143,39) */
+	{ "3 mo",  91.0 * 86400.0, { 0.225f, 0.375f, 0.361f } }, /* dark teal-green, ~(57,96,92) */
+	{ "6 mo", 182.0 * 86400.0, { 0.212f, 0.290f, 0.551f } }, /* deep blue, ~(54,74,141) */
+	{ "1 yr", 365.0 * 86400.0, { 0.404f, 0.192f, 0.518f } }, /* purple, ~(103,49,132) */
+	{ "> 1 yr",          -1.0, { 0.341f, 0.173f, 0.269f } }, /* dark plum (catch-all; max_age_s unused), ~(87,44,68) */
+};
+
 #endif /* FSV_FSN_STYLE_H */

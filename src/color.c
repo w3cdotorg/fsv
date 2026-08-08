@@ -87,6 +87,10 @@ static const char *tokens_timestamp_spectrum_type[] = {
 	"rainbow",
 	"heat",
 	"gradient",
+	"fsnbuckets", /* fsn-mode Task A2: SPECTRUM_FSN_BUCKETS -- index
+	               * must match that enumerator's position in
+	               * color.h's SpectrumType, same hand-kept-in-sync
+	               * convention as every other token array here */
 	NULL
 };
 static const char key_timestamp_timestamp_type[] = "timestamptype";
@@ -214,6 +218,15 @@ color_get_mode( void )
 }
 
 
+/* fsn-mode Task A2: see color.h's doc comment -- a cheap peek at the
+ * live spectrum type for ui_legend_draw( ) to poll every frame. */
+SpectrumType
+color_timestamp_spectrum_type( void )
+{
+	return color_config.by_timestamp.spectrum_type;
+}
+
+
 /* Returns (a copy of) the current color configuration. Note: It is the
  * responsibility of the caller to call color_config_destroy( ) on the
  * returned copy when it is no longer needed */
@@ -229,6 +242,35 @@ static const RGBcolor *
 node_type_color( GNode *node )
 {
 	return &color_config.by_nodetype.colors[NODE_DESC(node)->type];
+}
+
+
+/* fsn-mode Task A2: returns the color for a file whose chosen timestamp
+ * is `age_seconds` in the past, stepping through fsn_age_buckets[]
+ * (src/fsn-style.h) in order and returning the first bucket whose
+ * max_age_s the age does not exceed; the last bucket ("> 1 yr") is the
+ * catch-all for anything older than the second-to-last cutoff. */
+static const RGBcolor *
+fsn_bucket_color( double age_seconds )
+{
+	static RGBcolor bucket_colors[FSN_AGE_BUCKET_COUNT];
+	static boolean initialized = FALSE;
+	int i;
+
+	if (!initialized) {
+		for (i = 0; i < FSN_AGE_BUCKET_COUNT; i++) {
+			bucket_colors[i].r = fsn_age_buckets[i].rgb[0];
+			bucket_colors[i].g = fsn_age_buckets[i].rgb[1];
+			bucket_colors[i].b = fsn_age_buckets[i].rgb[2];
+		}
+		initialized = TRUE;
+	}
+
+	for (i = 0; i < FSN_AGE_BUCKET_COUNT - 1; i++)
+		if (age_seconds <= fsn_age_buckets[i].max_age_s)
+			return &bucket_colors[i];
+
+	return &bucket_colors[FSN_AGE_BUCKET_COUNT - 1];
 }
 
 
@@ -260,6 +302,15 @@ time_color( GNode *node )
 
 		SWITCH_FAIL
 	}
+
+	/* fsn-mode Task A2: fsn's bucket ages are fixed, absolute cutoffs
+	 * from *now* (7d/14d/30d/91d/182d/365d), exactly what the original
+	 * fsn's "ages:" legend bar showed -- not the user-adjustable
+	 * oldest/newest window the continuous rainbow/heat/gradient
+	 * spectrums below use. Deliberately ignores
+	 * color_config.by_timestamp.old_time/new_time for that reason. */
+	if (color_config.by_timestamp.spectrum_type == SPECTRUM_FSN_BUCKETS)
+		return fsn_bucket_color( difftime( time( NULL ), node_time ) );
 
 	/* Temporal position value (0 = old, 1 = new) */
 	x = difftime( node_time, color_config.by_timestamp.old_time ) / difftime( color_config.by_timestamp.new_time, color_config.by_timestamp.old_time );
@@ -389,6 +440,29 @@ color_spectrum_color( SpectrumType type, double x, void *data )
 		color.r = zero_color->r + x * (one_color->r - zero_color->r);
 		color.g = zero_color->g + x * (one_color->g - zero_color->g);
 		color.b = zero_color->b + x * (one_color->b - zero_color->b);
+		return color;
+
+		case SPECTRUM_FSN_BUCKETS:
+		/* This function's x=[0,1] continuous-position contract has no
+		 * real meaning for fsn's buckets (absolute ages, not a
+		 * windowed spectrum -- see fsn_bucket_color( ) above); this
+		 * case exists so the two callers that unconditionally sample
+		 * color_spectrum_color( ) across x -- generate_spectrum_colors( )'s
+		 * SPECTRUM_NUM_SHADES table and src/sdl/ui_dialogs.cpp's Color
+		 * Setup preview strip -- get a real color instead of hitting
+		 * SWITCH_FAIL, by stepping through the 7 bucket colors in
+		 * order as x increases. The preview strip this actually
+		 * drives ends up showing exactly the 7 bucket colors in
+		 * order, which is a reasonable enough substitute for "preview
+		 * of what this spectrum choice looks like". */
+		{
+			int i = (int)(x * (double)FSN_AGE_BUCKET_COUNT);
+			if (i >= FSN_AGE_BUCKET_COUNT)
+				i = FSN_AGE_BUCKET_COUNT - 1;
+			color.r = fsn_age_buckets[i].rgb[0];
+			color.g = fsn_age_buckets[i].rgb[1];
+			color.b = fsn_age_buckets[i].rgb[2];
+		}
 		return color;
 
 		SWITCH_FAIL
