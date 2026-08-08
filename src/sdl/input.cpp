@@ -158,18 +158,29 @@ static Uint8 g_capture_button = 0;
 // camera_flight_active() every time because the two can legitimately
 // disagree for the rest of a drag: camera.c ends the flight on its own
 // when something else claims the camera (a camera_look_at() from a
-// left-click, the rail's Bird's Eye), and the middle button may still be
-// physically held at that point -- this flag is what stops the motion
-// handler from silently resurrecting the flight on the next event.
+// left-click, the rail's Bird's Eye, a mode switch), and the middle
+// button may still be physically held at that point -- this flag is what
+// stops the motion handler from silently resurrecting the flight on the
+// next event. It is reconciled against camera.c at the top of
+// input_handle_event(); see reconcile_flight_state().
 //
 // g_flight_press_* is the press point the offsets are measured from, in
 // the same PIXEL space as g_prev_x/g_prev_y (see pixel_scale() above).
 // It is an anchor, not a running position: camera_flight_update() takes
 // an absolute offset from the press point, not a per-event delta, which
 // is exactly what makes the gesture a velocity control.
+//
+// g_flight_off_* is the last offset handed to camera_flight_update(),
+// kept so that a Shift press or release can re-apply the *current*
+// pointer position under the new modifier. Without it, Shift would only
+// take effect on the next motion event -- so holding the pointer still
+// and pressing Shift would do nothing at all until the user jiggled the
+// mouse, which is precisely the situation a velocity control invites.
 static bool g_flying = false;
 static double g_flight_press_x = 0.0;
 static double g_flight_press_y = 0.0;
+static double g_flight_off_x = 0.0;
+static double g_flight_off_y = 0.0;
 
 // Deferred hover pick -- see input_flush_hover_pick() below. Coordinates
 // are PIXEL space (pixel_scale()-multiplied), the space node_at_cursor()
@@ -299,6 +310,46 @@ stop_flight(void)
 	camera_flight_end();
 }
 
+// Pushes the last known pointer offset back into camera.c under the
+// current Shift state. Called both from the motion handler (with a fresh
+// offset) and from the Shift key handlers (with the cached one).
+static void
+apply_flight_offset(void)
+{
+	const bool shift_key = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+	camera_flight_update(g_flight_off_x, g_flight_off_y,
+	    shift_key ? TRUE : FALSE);
+}
+
+// TRUE when this key event is a Shift press/release that a flight in
+// progress should react to.
+static bool
+flight_shift_key(const SDL_Event *ev)
+{
+	return g_flying &&
+	    (ev->key.key == SDLK_LSHIFT || ev->key.key == SDLK_RSHIFT);
+}
+
+// camera.c ends a flight on its own whenever something else takes the
+// camera: camera_look_at_full() (a left-click on a pedestal, a tree row,
+// Go Back, the rail's Look At), camera_birdseye_view() (the rail's
+// Bird's Eye) and camera_init() (a mode switch, Reset, a rescan). None of
+// those go through this file, so g_flying would stay true with no flight
+// behind it -- and every branch gated on it would then misfire. The
+// Escape handler is the visible one: it would consume the keypress on a
+// do-nothing stop_flight() instead of collapsing the current directory,
+// so Escape appeared dead for as long as the middle button stayed down.
+//
+// Reconciling once at the top of the dispatcher fixes all of those paths
+// at once rather than one branch at a time. Only this direction needs
+// reconciling: camera.c never *starts* a flight by itself.
+static void
+reconcile_flight_state(void)
+{
+	if (g_flying && !camera_flight_active())
+		g_flying = false;
+}
+
 static void
 begin_capture(Uint8 button)
 {
@@ -325,6 +376,9 @@ void
 input_handle_event(const SDL_Event *ev)
 {
 	ImGuiIO &io = ImGui::GetIO();
+
+	// fsn-mode Task B2. Before anything branches on g_flying.
+	reconcile_flight_state();
 
 	switch (ev->type) {
 
@@ -460,6 +514,12 @@ input_handle_event(const SDL_Event *ev)
 			g_flying = true;
 			g_flight_press_x = x;
 			g_flight_press_y = y;
+			// The pointer is *at* the press point, so the offset
+			// starts at zero -- not at whatever the previous
+			// flight left behind, which a Shift pressed before the
+			// first motion event would otherwise re-apply.
+			g_flight_off_x = 0.0;
+			g_flight_off_y = 0.0;
 			camera_flight_begin();
 		}
 
@@ -571,11 +631,13 @@ input_handle_event(const SDL_Event *ev)
 				// drag. Shift is read live (not latched at the
 				// press) so it can be pressed and released
 				// mid-flight to switch between speed and
-				// altitude without letting go of the button.
-				const bool shift_key =
-				    (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
-				camera_flight_update(x - g_flight_press_x,
-				    y - g_flight_press_y, shift_key ? TRUE : FALSE);
+				// altitude without letting go of the button (the
+				// KEY_DOWN/KEY_UP cases below re-apply the
+				// cached offset, so that works even with the
+				// pointer parked).
+				g_flight_off_x = x - g_flight_press_x;
+				g_flight_off_y = y - g_flight_press_y;
+				apply_flight_offset();
 				// No camera_flight_tick() here: a motion event
 				// only sets the rates. The main loop integrates
 				// them, so the camera keeps moving between
@@ -659,7 +721,36 @@ input_handle_event(const SDL_Event *ev)
 	// like every other keyboard shortcut in this app (menu accelerators,
 	// etc.) -- there is no press/release split here the way the mouse's
 	// select-vs-fly-to gesture has one.
+	// fsn-mode Task B2: Shift toggles the flight's y axis between speed
+	// and altitude. The motion handler already reads SDL_GetModState()
+	// live, which covers pressing Shift *while moving*; these two cases
+	// cover pressing or releasing it with the pointer parked, when no
+	// motion event is coming at all -- exactly the situation a velocity
+	// control invites, since holding still is a legitimate way to fly.
+	// Same entry point either way: the cached offset re-applied under
+	// the new modifier.
+	//
+	// Deliberately handled ahead of the Escape case's ImGui gates. A
+	// modifier arriving mid-flight is unambiguous -- flight_shift_key()
+	// requires g_flying, and this file is holding a mouse capture the
+	// whole time a flight is in progress -- and it consumes nothing
+	// anyone else wants: no other branch in this file, and no ImGui
+	// path this app enables, acts on a bare Shift. At every other
+	// moment it is a no-op and the ordinary Escape handling below runs
+	// untouched. SDL_GetModState() is read inside apply_flight_offset()
+	// rather than derived from the event, so releasing one Shift while
+	// the other is still held correctly stays "Shift down".
+	case SDL_EVENT_KEY_UP:
+		if (flight_shift_key(ev))
+			apply_flight_offset();
+		break;
+
 	case SDL_EVENT_KEY_DOWN: {
+		if (flight_shift_key(ev)) {
+			apply_flight_offset();
+			break;
+		}
+
 		if (ev->key.key != SDLK_ESCAPE)
 			break;
 
@@ -835,6 +926,8 @@ input_reset(void)
 	stop_flight();
 	g_flight_press_x = 0.0;
 	g_flight_press_y = 0.0;
+	g_flight_off_x = 0.0;
+	g_flight_off_y = 0.0;
 }
 
 ContextMenuRequest
