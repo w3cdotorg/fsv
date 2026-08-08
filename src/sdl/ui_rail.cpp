@@ -259,9 +259,11 @@ draw_mark_row(int index, Mark &m, bool access_ok)
 		    ImGuiInputTextFlags_AutoSelectAll);
 		if (ImGui::IsItemDeactivated()) {
 			// Commits on Enter or on losing focus either way (both
-			// deactivate the item in the same frame); an
-			// all-whitespace/empty edit is discarded rather than
-			// leaving the mark unnamed.
+			// deactivate the item in the same frame); an empty edit
+			// (the field cleared to nothing) is discarded rather than
+			// leaving the mark unnamed. Does not trim/reject a
+			// whitespace-only edit -- that's a real (if odd) label a
+			// user could deliberately type, not worth guarding against.
 			if (g_edit_buf[0] != '\0')
 				m.name = g_edit_buf;
 			g_editing_index = -1;

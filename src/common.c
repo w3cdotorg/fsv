@@ -396,6 +396,18 @@ node_named( const char *absname )
 			 * a slash or a terminating null) */
 			len = 0;
 		}
+		else if ((absname[len] != '/') && (absname[len] != '\0')) {
+			/* root_name is a byte-prefix of absname, but not at a
+			 * path-component boundary -- e.g. root "/data/project1"
+			 * against absname "/data/project10/README.txt". That is
+			 * NOT "absname is under this root", just two names that
+			 * happen to share a prefix, so treat it the same as no
+			 * match at all. (The len == 1 case above -- root_name is
+			 * exactly "/" -- needs no such check: a lone separator has
+			 * no "name" of its own to falsely prefix-match, and every
+			 * absolute path is genuinely under it.) */
+			return NULL;
+		}
                 /* Copy the rest of the string into working space */
 		absname_partial_copy = xstrdup( &absname[len] );
 	}

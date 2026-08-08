@@ -33,6 +33,11 @@
  *      and a path that doesn't exist in the tree resolves to NULL. This
  *      is what the Marks panel's persisted paths rely on to survive a
  *      relaunch.
+ *  10. node_from_absname( )/node_named( ) require a real path-component
+ *      boundary right after the root's own prefix, not just a byte
+ *      prefix match -- a root "/data/project1" must not accept
+ *      "/data/project10/README.txt" as one of its own. Code review
+ *      fix round (2026-08-09).
  *
  * LINKING. src/geometry-fsn.c is gpu-free by construction and therefore
  * part of libfsvcore, so this links exactly like test_scanfs -- core
@@ -255,6 +260,26 @@ main(void)
 		}
 
 		assert(node_from_absname("/no/such/path/at/all") == NULL);
+	}
+
+	/* 10. Byte-prefix-but-no-boundary: paste "dir-a/file2.bin" (a real
+	 * path under the root) directly onto the root's own absname with NO
+	 * separator in between. The resulting string byte-prefixes the
+	 * root's absname exactly (root_name is a prefix of it), but does not
+	 * land on a path-component boundary right after that prefix -- the
+	 * character there is 'd' (from "dir-a"), not '/' or '\0'. Before the
+	 * boundary check, node_named( ) stripped the root prefix regardless
+	 * and matched the *leftover* bytes ("dir-a/file2.bin") against the
+	 * real tree, resolving to dir-a's actual file2.bin -- a wrong node,
+	 * not even NULL. This is the same class of mistake a root
+	 * "/data/project1" vs a sibling "/data/project10/..." would make. */
+	{
+		char *root_abs2 = xstrdup(node_absname(root));
+		char bogus[512];
+
+		snprintf(bogus, sizeof(bogus), "%sdir-a/file2.bin", root_abs2);
+		assert(node_from_absname(bogus) == NULL);
+		xfree(root_abs2);
 	}
 
 	/* No layout yet */
