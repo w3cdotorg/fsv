@@ -3387,6 +3387,189 @@ shipped as part of a task rather than afterward.
     allocation per label per draw (the cell array, alongside the vertex
     array `text_draw_*()` already allocated).
 
+## fsn mode
+
+Work recreating the look and feel of the original SGI `fsn` (landscape
+sky/ground, wire connectors, spotlight, control rail) on top of the
+completed Metal port above. Tracked in
+`.superpowers/sdd/2026-08-08-fsn-mode/` (plan + per-task briefs/reports);
+this section carries the same per-task verification notes the
+milestone-A/B/C task list above does, one `###` per task.
+
+### Task A1 verification (landscape sky/ground presets)
+
+**Files:** `src/fsn-style.h` (new — `FsnLandscape`, `fsn_landscapes[]`,
+`FSN_LANDSCAPE_COUNT`, `FSN_LANDSCAPE_OFF`); `src/gpu.h`
+(`gpu_set_landscape()` declaration); `src/sdl/gpu.cpp` (real
+implementation + `draw_landscape()`); `src/ogl-gpu-compat.c` (no-op);
+`src/color.h`/`.c` (`landscape_get()`/`_set()`/`_init()`, nvstore key
+`landscape`); `src/sdl/main.cpp` + `src/window.c` (call `landscape_init()`
+alongside `color_init()`); `src/sdl/ui_main.cpp` (Display → Landscape
+menu); `tools/fsv-headless-stubs.c` (link-only stub, see below).
+
+**Colors: eyeballed, not upstream-verified.** Neither reference
+screenshot ships with the repo's own assets — they're the two jpgs named
+in the task brief (`3060c037-...jpg`, an overview + main "fsn" window;
+`35037135976_...jpg`, inside-a-directory with the spotlight). Both were
+sampled pixel-by-pixel with Python/PIL along a geometry-free vertical
+strip of the 3D viewport (`x=480,y=252..322` in the first; `x=180,
+y=170..238` in the second) to get real RGB values instead of guessing
+from a thumbnail. Both read a **vivid, saturated sky blue** (~RGB
+2,138,211) at the top of the visible viewport fading to a **pale
+cyan-white** (~RGB 140,250,248) at the horizon, over a **medium green**
+ground (~RGB 65,140,90) — not the near-black navy top the plan's own
+first draft guessed at. That guess undersold the brightness because it
+assumed the visible sky band reaches toward the zenith; in both
+references the camera is pitched down enough that the visible sky is a
+shallow band well above the horizon, nowhere near dark. "night" has no
+reference screenshot at all (both captures are daylight) and keeps the
+plan's original guess, flagged in `fsn-style.h` for correction once real
+reference material turns up. "slate" is not a guess — it is
+`src/sdl/gpu.cpp`'s existing Task 2.2 clear color
+(`{0.08, 0.10, 0.12}`), copied byte-for-byte so it reproduces today's
+look exactly (confirmed below, not just visually).
+
+**Two implementation departures from the brief's own sketch**, both
+because the actual `gpu.h` contract doesn't have the primitives the
+sketch assumed — documented in full at `draw_landscape()`'s definition
+in `src/sdl/gpu.cpp`, summarized here:
+
+1. *"vertex-colored gradient quad"* isn't expressible: `FsvVertex` is
+   `{pos, normal}` only, and the scene fragment shader takes its fill
+   color from a uniform (`gpu_set_color()`), never a vertex attribute.
+   Adding a per-vertex-color path would mean a new vertex format, a new
+   pipeline, and a new compiled shader pair (MSL + SPIR-V, the whole
+   Task 3.1 offline toolchain) for a two-triangle effect. Instead the
+   sky is 32 flat-colored horizontal strips (`SKY_BANDS`), each an
+   ordinary `gpu_draw()` call with a CPU-lerped color between
+   `sky_top`/`sky_horizon` — smaller surface, no shader work, and the
+   banding is not visible in a screenshot at that band count.
+2. *"depth-write off"* isn't a per-draw knob either —
+   `pipeline_for()` always sets `enable_depth_write = true` for every
+   (primitive, depth-test, target) combination in the existing scene
+   pipeline. Rather than add a pipeline variant, the sky bands are drawn
+   through an *identity* projection/modelview (so their object-space x/y
+   land directly in NDC — a screen-space quad) at `z = 0.999`, just
+   under the `1.0` far value `gpu_scene_end()` clears the depth buffer
+   to. Every real draw that follows is nearer than that in any normal
+   camera configuration, and `FSV_DEPTH_LESS` (every pipeline's compare
+   op here) passes and overwrites whenever the new fragment is nearer —
+   so the sky depth-writes but never occludes, with no second pipeline.
+
+**Ground plane placement.** `geometry_mapv_node_z0()` (`src/geometry.c`)
+puts the *bottom* of the root MapV node at world `z=0` and stacks every
+directory upward from there (`+z` is world "up" — see
+`g_base_modelview`'s own comment in `gpu.cpp`); a ground quad at exactly
+`z=0` would sit in the same plane as that bottom face. The ground is
+drawn at `z = -6` (`GROUND_Z_OFFSET`) instead — under 5% of
+`mapv_leaf_height` (128), so not visually distinguishable at any of
+MapV's own scales, and confirmed by screenshot (below) to show no
+z-fighting at the box/ground seam. This is one global ground plane for
+*every* mode right now, not yet scoped to `FSV_FSN` (Task B3's job):
+TreeV shares MapV's `z=0` floor convention closely enough that the
+ground renders correctly under it too (confirmed by screenshot), but
+**DiscV's ground does not render at all** — `setup_modelview_matrix()`'s
+`FSV_DISCV` case applies a fixed `Ry(90°)·Rz(90°)` reorientation instead
+of using `camera->phi`/`theta` directly the way MapV/TreeV do, which
+(empirically, not just in theory) puts DiscV's effective "up" axis
+somewhere the world-space ground plane never intersects its frustum. Not
+a bug in this task's code — DiscV was already documented as not sharing
+MapV's z=0 floor convention — just an explicit note that "ground
+everywhere" currently means "ground under MapV and TreeV", and DiscV
+gets sky only until Task B3 scopes this properly.
+
+**Select-pass discipline.** `gpu_scene_begin()` checks
+`g_render_mode == FSV_RENDER_NORMAL` before calling `draw_landscape()` at
+all — `g_render_mode` is already correct at that point because
+`gpu_pick()` sets `FSV_RENDER_SELECT` *before* it calls
+`gpu_scene_begin()`. So in a pick pass neither the sky nor the ground
+draws a single pixel, id-colored or otherwise; the select target stays
+at its `(0,0,0,0)` clear for any pixel over either one, which
+`viewport_node_for_id()` reads back as id 0 ("nothing there") — exactly
+like clicking on empty background before this task. Verified directly
+(not just by code reading): a temporary debug hook called `gpu_pick()`
+at a known-sky pixel and a known-node pixel in the same `--screenshot`
+run. DiscV, "classic" landscape on: pick at the top of the frame (pure
+sky in the corresponding visible screenshot) → id `0`; pick at the
+center (the large disc visible in the same shot) → id `1`. MapV on a
+real directory, "classic" landscape on: sky/ground pixel → id `0`; a
+node box → id `17`. Re-running the same two picks with "slate" instead
+of "classic" returned the identical ids, confirming the landscape
+preset has zero effect on picking, as intended. The hook was removed
+before committing — it is not part of this task's shipped diff.
+
+**Persistence.** Same nvstore pattern `color_write_config()`/
+`color_read_config()` already established, alongside it in
+`src/color.c`: `landscape_set()` calls `gpu_set_landscape()` immediately
+and writes the `landscape` key (int token by preset name — `"classic"` /
+`"night"` / `"slate"`) via `nvs_write_int_token()`; `landscape_init()`
+(called once at startup, right after `color_init()`, in both
+`src/sdl/main.cpp` and `src/window.c`) reads it back the same way
+`color_init()`/`color_read_config()` do, defaulting to `"slate"` (index
+2) when the key is absent — i.e. every `~/.fsvrc` written before this
+task keeps today's exact look with no migration needed. Verified with a
+standalone harness linked against `libfsvcore` the same way
+`tests/test_color_persistence.c` is (not added to `tests/meson.build` —
+the task's own verification bar pins the suite at "3/3", so this stayed
+a one-off, not a fourth test): `landscape_init()` with no config file →
+`landscape_get() == 2`; `landscape_set(0)` → `~/.fsvrc` gains a
+plain-text `landscape classic` line; a second `landscape_init()` call in
+the same process (the same "simulate a relaunch" trick
+`test_color_persistence.c` uses) → `landscape_get() == 0`. Confirms both
+directions: on-disk format and reload.
+
+**Headless-link fix required.** `src/color.c` is part of `libfsvcore`
+(built for both frontends' unit tests and `tools/fsv-scan`, with no GTK
+or SDL_GPU present), and now calls `gpu_set_landscape()` — a symbol
+neither `src/sdl/gpu.cpp` nor `src/ogl-gpu-compat.c` contributes to that
+build. `tools/fsv-headless-stubs.c` gained a one-line no-op stub for it,
+the same shape as its existing `window_set_color_mode()` stub; without
+this, `tests/test_scanfs`, `tests/test_color_persistence` and
+`tools/fsv-scan` would all fail to link the moment `color.c` grew the
+new call. Caught by actually rebuilding and running `meson test` rather
+than assuming the change was additive.
+
+**Screenshot verification** (`tests/fixture` and a real directory —
+this repo's own `src/`), all read back with PIL, not just eyeballed in a
+terminal:
+
+- **Sky gradient**: `--discv` (phi=0, a level camera with no ground
+  intersection — see above) on `src/` gives a full-frame, clean
+  vivid-blue-to-pale-cyan gradient with no visible banding at 32 bands.
+- **Ground + no z-fighting**: `--mapv` and `--treev` on `tests/fixture`
+  both render solid, correctly-colored green ground filling the frame
+  around the scene geometry; a 4x pixel-zoomed crop of the MapV
+  box/ground seam and the TreeV platform/ground seam both show a clean
+  edge, no mottling/dithering artifact.
+- **Combined horizon shot**: MapV's and TreeV's *resting* default camera
+  elevation (`mapv_camera_phi()` returns a fixed 52.5°; TreeV's
+  equivalent settles at 30°) points the *entire* vertical FOV below
+  horizontal at this app's fixed 60° FOV/1280×800 aspect, so neither
+  mode's out-of-the-box `--screenshot` ever shows both sky and ground in
+  the same frame — this is a pre-existing, fixed camera characteristic
+  of this port (there is no "front view" camera reset implemented at
+  all, dormant or otherwise), not something this task changed. Confirmed
+  the sky+ground+horizon composition the reference screenshots show by
+  temporarily forcing a shallower elevation (`camera->phi = 15`,
+  test-only, not shipped): the resulting shot shows a crisp horizon line
+  with the vivid-blue-to-pale sky above and green ground below for
+  "classic", the same composition darker for "night", and no visible
+  horizon at all for "slate" (uniform flat color, as intended).
+- **"slate" byte-exact regression check**: stashed this task's changes,
+  rebuilt, took a `--mapv` screenshot of `tests/fixture` with no
+  `~/.fsvrc` present (pre-A1 binary); restored the changes, rebuilt, took
+  the same screenshot with the default (`landscape` key absent → "slate")
+  config. Diffed the two BMPs with PIL/numpy: **zero differing pixels**.
+  "slate" is not merely similar to the pre-change look, it is pixel-for-
+  pixel identical.
+
+**Both arms build clean.** SDL/macOS: `ninja -C builddir-sdl`, 3/3 tests.
+GTK: fresh `debian:bookworm` container, the CI job's own package list
+(`meson ninja-build libglib2.0-dev libcglm-dev libgtk-3-dev libepoxy-dev
+gettext file libglu1-mesa-dev`), `meson setup -Dfrontend=gtk`, `ninja`
+(47/47 targets, `src/fsv` links, only pre-existing unrelated
+`G_LOG_DOMAIN` redefinition warnings), `meson test` → 3/3.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -3461,3 +3644,7 @@ code is kept.
 | 2026-08-08 | NFC normalization cached in `NodeDesc::dname` at scan time, not applied at draw time | the 3D label path runs per visible node per frame; normalizing there would re-shape every string 60×/s. Storing it beside (never *instead of*) the byte-exact `name` keeps every filesystem call, wildcard match and sort untouched |
 | 2026-08-08 | Glyph coverage stops at Latin Extended-A (+ dashes/quotes/€) for the 3D atlas | the atlas is a fixed-cell grid sized up front; CJK would need thousands of cells and a proportional-width layout engine. Uncovered codepoints degrade to one `?` each, which is honest and cheap. The ImGui panels have no such limit (1.92 loads glyphs on demand) |
 | 2026-08-08 | `lib/stb_truetype.h` is a second, verbatim copy of ImGui's `imstb_truetype.h` rather than an include of it | `src/fontatlas.c` is plain C compiled into *both* frontends, and the GTK arm has no ImGui at all; a copy keeps the two updatable independently and the C arm free of any `subprojects/imgui/` dependency |
+| 2026-08-08 | fsn-mode Task A1: sky drawn as `SKY_BANDS` (32) flat-colored horizontal strips instead of a real vertex-colored gradient quad | `FsvVertex`/`gpu_draw()` have no per-vertex color channel — fill color is a uniform (`gpu_set_color()`) — so a true gradient would need a new vertex format, a dedicated pipeline and a new compiled shader pair (MSL+SPIR-V); 32 flat bands is invisible banding in a screenshot at zero shader-toolchain cost |
+| 2026-08-08 | fsn-mode Task A1: sky drawn through a temporary identity projection/modelview at `z=0.999` NDC (screen-space) instead of a depth-write-off pipeline variant | `pipeline_for()` always sets `enable_depth_write=true` for every existing (primitive, depth-test, target) combination; parking the sky just under `gpu_scene_end()`'s `1.0` depth-clear value means every real draw's smaller depth still passes `FSV_DEPTH_LESS` and overwrites it, with no new pipeline needed |
+| 2026-08-08 | fsn-mode Task A1: ground plane is one global overlay shared by every mode (MapV/TreeV/DiscV alike), not yet scoped to `FSV_FSN` | Task B3 owns per-mode scoping; scoping early would be dead code until then. Confirmed by screenshot that MapV/TreeV render it correctly and DiscV does not (its fixed `Ry(90°)Rz(90°)` camera reorientation doesn't share MapV's z=0-up convention) — documented as a known interim gap rather than worked around |
+| 2026-08-08 | fsn-mode Task A1: landscape persistence (`landscape_get/_set/_init`) lives in `src/color.c`/`color.h` rather than a new module | identical shape to the color config already there (nvstore-backed, read once at startup, written immediately on change) — a new file would duplicate the open/close-per-call pattern for no isolation benefit |
