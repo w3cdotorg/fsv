@@ -150,6 +150,18 @@ gpu_set_landscape( int index )
 }
 
 
+/* fsn-mode Task C1: the overview mini-map is an ImGui/SDL_GPU window
+ * (src/sdl/ui_overview.cpp) with no GTK counterpart, so this frontend
+ * never draws an overview pass and every consumer of this predicate
+ * takes its main-view branch. See gpu.h's doc comment and docs/
+ * PORTING.md's "fsn mode" section. */
+int
+gpu_overview_pass( void )
+{
+	return 0;
+}
+
+
 FsvRenderMode
 gpu_render_mode( void )
 {

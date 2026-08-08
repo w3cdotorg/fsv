@@ -4811,8 +4811,149 @@ own pre-existing "long way round" behavior after a manual revolve
    `src/geometry-fsn-draw.c` against the previous commit and rebuilding
    both arms clean one final time.
 
+### Task C1 verification (overview window — picture-in-picture mini-map)
+
+Upstream fsn's "overview" window (reference screenshot
+`3060c037-069f-4715-a01e-c30e53e505a2.jpg`, top-right): a small live map
+of the whole landscape seen from straight above, with a marker at the
+camera's own position. FSN mode only, toggled from **View → Overview**
+(greyed out in the other modes), default on.
+
+**Where the pieces live.** `src/geometry-fsn.c` gains two pure-math
+accessors (`fsn_layout_bounds()`, the landscape's ground box in absolute
+world coordinates — the extents alone cannot frame a landscape that does
+not straddle the origin — and `fsn_layout_nearest()`, point → pedestal,
+descending exactly as far as the draw pass does). `src/sdl/gpu.cpp` gains
+`gpu_overview_render()`, the **fourth** offscreen render path in that
+file after `gpu_pick()`, `--screenshot` and `--record`.
+`src/sdl/ui_overview.cpp` owns the ImGui window, the click mapping and
+the re-render policy.
+
+**Texture binding.** ImGui 1.92.9b's SDL_GPU backend takes a raw
+`SDL_GPUTexture*` as its `ImTextureID` and supplies its own sampler
+(`imgui_impl_sdlgpu3.cpp`: `texture_sampler_binding.texture =
+(SDL_GPUTexture*)(intptr_t)pcmd->GetTexID()`, sampler =
+`bd->CurrentSampler`). Verified by reading the vendored backend rather
+than assumed — **before 2025/08/08 the same backend wanted a pointer to
+an `SDL_GPUTextureSamplerBinding`**, and handing one API the other's
+value crashes. `ImGui::Image()` takes an `ImTextureRef`, which has an
+implicit constructor from `ImTextureID`, so the cast is the whole story;
+the texture carries `SDL_GPU_TEXTUREUSAGE_SAMPLER` alongside
+`COLOR_TARGET`.
+
+**Resolution: fixed, 512x320** (`FSN_OVERVIEW_WIDTH/HEIGHT`,
+`src/fsn-style.h`), letterboxed into whatever size the user drags the
+window to. Window-sized would mean destroying and recreating both the
+color texture *and* its depth buffer on every drag frame; 512x320 is
+already more pixels than the 320x200 default window shows, and 16:10
+makes that default close to pixel-for-pixel.
+
+**Not routed through `g_capture_texture`.** Unlike the other three
+offscreen paths, the overview has its own texture *and* its own depth
+buffer, both cached until `gpu_shutdown()`, and `gpu_scene_begin()`/
+`gpu_scene_end()` branch on `g_overview_frame` **before** consulting the
+capture state. Two consequences, both deliberate: an overview render
+nested inside a `--record` frame still picks the R8G8B8A8 pipelines that
+match its own texture (the record texture is in the swapchain's format,
+target index 0), and `ensure_depth_texture()`'s single window-sized depth
+texture is never made to flip-flop between two sizes twice a frame.
+
+**Re-render policy: only when something it shows has moved.**
+`ui_overview_render()` compares a key of {mode, `fsn_layout_generation()`,
+the camera's six pose numbers, a walk-summed total of every drawn
+directory's `deployment`} against the last render's. The deployment sum
+is the awkward member and is there on purpose: expanding or collapsing a
+directory from the context menu changes the map with no camera movement
+at all, and `src/animation.h` has no "a morph is running" predicate to
+ask instead. It costs one float-summing tree walk on frames that are
+being drawn anyway, next to the two full walks `geometry_draw()` already
+performs.
+
+**Scene only, and thinner than the main view.** No ImGui inside the
+texture; no sky (a stack of screen-space quads would simply cover a
+top-down map) and no ground quad (the pass's clear color *is* the
+ground, pinned to the "night" preset — whose ground is the same green as
+"classic"; only its sky, which the overview never shows, differs); no
+labels or path text (`geometry_draw(FALSE)`, exactly as `gpu_pick()`);
+and no selection spotlight, which is skipped by `geometry-fsn-draw.c`
+itself on a new `gpu_overview_pass()` predicate. That predicate is
+deliberately **not** a third `FsvRenderMode` value: the overview paints
+real colors, so all four existing `gpu_render_mode() == FSV_RENDER_NORMAL`
+tests must keep answering "normal" during it. The GTK shim returns 0.
+
+**Marker.** A flat arrowhead at the camera's ground position — derived
+by solving `setup_modelview_matrix()`'s own transform for the eye point,
+`camera = target + distance * (cos φ cos θ, cos φ sin θ, sin φ)` — 
+pointing back along `-(cos θ, sin θ)`, drawn with the depth test off so a
+pedestal it stands over cannot hide it. Sized as a fraction of the framed
+half-width (constant on screen at any landscape scale) and **clamped into
+the framed rectangle**: the frame is the landscape's box, not the box
+extended to include the camera, so that flying does not continuously
+rescale the map — "stable map, moving marker" — and a camera pulled back
+outside the tree pins its marker to the edge instead of vanishing. The
+reference's marker is a small black X; this is a yellow arrow, because it
+has to read against nodes colored by type/timestamp and because an arrow
+also carries the heading (documented as a deliberate departure in
+`fsn-style.h`).
+
+**Click-to-look-at**, no drag-navigation (YAGNI, per the plan): click in
+the image → item-relative UV → the *same* world rectangle the last render
+framed (`gpu_overview_frame_rect()`, not a recomputation) → 
+`fsn_layout_nearest()` → `camera_look_at()`. The only subtlety is the
+vertical flip: world +y is NDC +y is the texture's *top* row, so `v == 0`
+maps to `max_y`.
+
+Verified:
+
+1. **Both arms build**, `meson test` **4/4 on each** — macOS/SDL native
+   and a Debian bookworm container's `-Dfrontend=gtk` (53/53 targets).
+   `tests/test_fsn_layout.c` grew invariants 7 and 8 for the two new
+   accessors, including the not-origin-centered property a framing
+   consumer would otherwise get wrong and the collapsed-subtree case.
+2. **Headed FSN on `src/`**: the overview shows the three-pedestal
+   landscape from above, file-box grids and both wires visible, marker at
+   the camera. Screenshots `c1_overview_full.png` (whole window) and the
+   pair `c1_overview_marker_start.png` / `c1_overview_marker_turned.png`
+   — after a scripted 6-second revolve the marker has walked from the
+   bottom edge (pointing +y, into the landscape) round to the left edge,
+   **turned 90° to keep pointing back at the tree**: it moves *and*
+   rotates. `c1_overview_after_flight.png` shows the same after a
+   `camera_look_at()` flight to `src/sdl`.
+3. **Click-to-look-at**: a synthetic click at logical (1200, 60), pushed
+   as real SDL events through `ImGui_ImplSDL3_ProcessEvent()`, logged
+   `overview: click (1734.7, 1693.9) -> xmaps` and the camera target then
+   morphed (0,0) → (416.0, 1623.9), i.e. it genuinely flew to that
+   pedestal.
+4. **Idle**: **0 overview renders over 119 consecutive forced frames**
+   with the camera settled (temporary counter, removed before the
+   commits). During a flight it re-renders every frame, as intended.
+   Hiding the window: **0 renders over 40 frames of live camera motion**.
+   In MapV: **0 renders over 40 frames of motion**, and the window is not
+   drawn at all.
+5. **Pick regression, interleaved in the same frame.** A 7-point
+   `gpu_pick()` sweep across the window's center row returned
+   `86 99 80 89 88 101 0` with the camera parked (no overview render that
+   frame) and **byte-identical ids** while the overview was re-rendering
+   on every frame — the two offscreen paths do not disturb each other.
+   `--screenshot` still renders in all four modes (FSN/MapV/TreeV/DiscV);
+   `--record` wrote 330 FSN frames with the overview composited in.
+6. **All throwaway harness code removed before the commits below** —
+   `src/sdl/main.cpp` and `src/sdl/ui_overview.cpp` re-diffed against the
+   previous commit and both arms rebuilt clean afterwards.
+
 ### Concerns / disclosed gaps
 
+- **The overview never appears in `--screenshot` output.** That path
+  renders the scene alone with no ImGui pass (by design, since Task 2.2),
+  and the overview is an ImGui window. `--record` composites ImGui and
+  does show it. Not a defect, but it means the mini-map cannot be
+  regression-checked by the cheap headless screenshot the rest of this
+  port leans on.
+- **The mini-map's framing ignores the camera.** A camera far outside the
+  landscape pins its marker to the frame edge rather than zooming the map
+  out to include it — the deliberate trade for a map that does not
+  rescale under every flight, but it does mean the marker's *distance*
+  from the tree is not readable while it is clamped.
 - **`fsn_look_at()`'s file-zoom diameter (Task B1, not touched here)
   makes a real click-to-fly on a file in a densely packed directory land
   the camera nose-first against the box row**, as noted above — a real

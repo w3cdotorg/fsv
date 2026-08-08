@@ -79,3 +79,36 @@ bool gpu_screenshot_end(const char *path);
 SDL_GPUCommandBuffer *gpu_record_begin(int width, int height);
 SDL_GPUTexture *gpu_record_texture(void);
 bool gpu_record_end(const char *path);
+
+// fsn-mode Task C1: renders the FSN landscape from straight above, at a
+// fixed FSN_OVERVIEW_WIDTH x FSN_OVERVIEW_HEIGHT (src/fsn-style.h), into
+// a cached texture ImGui shows in the overview window
+// (src/sdl/ui_overview.cpp), with a marker at the live camera's ground
+// position. Scene only: no ImGui, no labels, no spotlight.
+//
+// MUST be called inside a frame, on that frame's command buffer
+// (i.e. after gpu_frame_begin()/gpu_record_begin() and before
+// gpu_frame_end()), and before the ImGui pass that samples the result --
+// SDL_GPU orders passes within a command buffer, so a render issued here
+// is guaranteed complete by the time ImGui's pass reads the texture. It
+// is NOT part of the visible scene pass and does not disturb it: it opens
+// and closes its own render pass, against its own color and depth
+// targets, leaving --screenshot/--record's capture state untouched (see
+// gpu.cpp's g_overview_texture comment).
+//
+// Returns false, having drawn nothing, when there is no FSN layout to
+// frame, when the current mode is not FSV_FSN, or when called outside a
+// frame. The caller decides *when* to call it -- the overview is
+// redrawn on camera/layout change, not every frame.
+bool gpu_overview_render(void);
+
+// The mini-map texture, or nullptr until gpu_overview_render() has
+// succeeded at least once (before that it holds undefined pixels and
+// must not be shown).
+SDL_GPUTexture *gpu_overview_texture(void);
+
+// The world-space ground rectangle (x0,x1) x (y0,y1) that the last
+// successful gpu_overview_render() framed -- what src/sdl/ui_overview.cpp
+// maps a click inside the image back through. Any argument may be NULL.
+// All zero before the first successful render.
+void gpu_overview_frame_rect(double *x0, double *x1, double *y0, double *y1);

@@ -23,6 +23,9 @@
 //          -> Camera Rail       == addition (fsn-mode Task A3, src/sdl/ui_rail.cpp);
 //                                 GTK's toolbar (src/window.c) has no show/hide
 //                                 toggle either
+//          -> Overview          == port of upstream fsn's own Show -> overview
+//                                 entry (fsn-mode Task C1, src/sdl/ui_overview.cpp);
+//                                 FSN mode only, greyed out elsewhere
 //   Colors -> By node type/timestamp/wildcards == on_color_by_*_activate() -> color_set_mode()
 //          -> Setup...        == on_color_setup_activate() -> dialog_color_setup()
 //                                 (Task 5.3, src/sdl/ui_dialogs.cpp)
@@ -44,6 +47,7 @@
 #include "app.h"
 #include "input.h"
 #include "ui_dialogs.h"
+#include "ui_overview.h"
 #include "ui_panels.h"
 #include "ui_rail.h"
 
@@ -283,6 +287,19 @@ ui_main_draw(void)
 			const bool rail_visible = ui_rail_get_visible();
 			if (ImGui::MenuItem("Camera Rail", nullptr, rail_visible))
 				ui_rail_set_visible(!rail_visible);
+			// fsn-mode Task C1: the picture-in-picture overview
+			// map. Upstream fsn *did* have a show/hide entry for
+			// this one (its Show menu), so unlike the two above
+			// this toggle is a port rather than an addition --
+			// though the menu it lives in is this frontend's.
+			// Greyed out outside FSN mode: a top-down map of a
+			// pedestal landscape has nothing to show in
+			// DiscV/MapV/TreeV, and ui_overview_draw() declines to
+			// draw the window there for the same reason.
+			const bool overview_visible = ui_overview_get_visible();
+			if (ImGui::MenuItem("Overview", nullptr,
+			    overview_visible, mode == FSV_FSN))
+				ui_overview_set_visible(!overview_visible);
 			ImGui::EndMenu();
 		}
 

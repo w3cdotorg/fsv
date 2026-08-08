@@ -325,7 +325,16 @@ fsn_gldraw_spotlight_ring( double cx, double cy, double z,
  * color, id or otherwise, would blend partial coverage into whatever id
  * color is already there and corrupt the read-back. Checked here
  * (gpu_render_mode( )) rather than by the caller, matching
- * fsn_gldraw_wire( )'s own self-check a few functions up. */
+ * fsn_gldraw_wire( )'s own self-check a few functions up.
+ *
+ * OVERVIEW PASS (Task C1): skipped there too, for a different reason --
+ * legibility, not correctness. The glow is FSN_SPOTLIGHT_DIR_SCALE times
+ * the selected pedestal's own footprint, which at the mini-map's scale
+ * covers a good part of the visible landscape as a shapeless pale smear
+ * over the very pedestals it is meant to point at. The overview marks
+ * the *camera*, not the selection (see src/sdl/ui_overview.cpp). Checked
+ * here for the same reason as the select-pass test above: the decision
+ * belongs to the draw that knows what it is drawing. */
 static void
 fsn_draw_spotlight( void )
 {
@@ -335,6 +344,9 @@ fsn_draw_spotlight( void )
 	int i;
 
 	if (gpu_render_mode( ) != FSV_RENDER_NORMAL)
+		return;
+
+	if (gpu_overview_pass( ))
 		return;
 
 	if (globals.fsv_mode != FSV_FSN || node == NULL)

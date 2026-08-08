@@ -52,6 +52,12 @@ typedef struct {
  * color.c's parallel tokens_landscape[] -- see that array's own comment. */
 #define FSN_LANDSCAPE_CLASSIC 0
 
+/* Index of the "night" preset. Named for the same reason as
+ * FSN_LANDSCAPE_CLASSIC above; its one consumer is the overview mini-map
+ * (see FSN_OVERVIEW_* below), which the plan pins to the night palette
+ * regardless of the main view's own landscape choice. */
+#define FSN_LANDSCAPE_NIGHT 1
+
 /* Colors eyeballed from the two reference screenshots (task-A1-brief.md's
  * "Spec sources"): 3060c037-069f-4715-a01e-c30e53e505a2.jpg (overview +
  * "fsn" window, oblique view, wires) and 35037135976_0d90f4a3d5_z.jpg
@@ -105,6 +111,57 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
 		{ 0.08f, 0.10f, 0.12f },
 	},
 };
+
+/* ---- Overview mini-map (fsn-mode Task C1) --------------------------
+ *
+ * The picture-in-picture window in the top-right of reference screenshot
+ * 3060c037-069f-4715-a01e-c30e53e505a2.jpg: the whole landscape seen
+ * from straight above on a flat green field, wires fanning out from the
+ * root, and a small dark marker where the camera is standing.
+ *
+ * The mini-map is rendered into a fixed-size offscreen texture (src/sdl/
+ * gpu.cpp's gpu_overview_render( )) which ImGui then scales to whatever
+ * size the user has dragged the window to. Fixed rather than
+ * window-sized deliberately: a resolution that tracked the window would
+ * have to destroy and recreate the texture (and its depth buffer) on
+ * every drag frame, and 512x320 is already more pixels than the window's
+ * default size shows. 16:10, so the default window is close to
+ * pixel-for-pixel. */
+#define FSN_OVERVIEW_WIDTH  512
+#define FSN_OVERVIEW_HEIGHT 320
+
+/* Blank margin around the landscape's own bounding box, as a fraction of
+ * the larger ground dimension, so pedestals at the very edge are not
+ * clipped by the viewport border. Eyeballed against the reference
+ * screenshot's inset, whose landscape sits well clear of its frame. */
+#define FSN_OVERVIEW_MARGIN 0.08
+
+/* The camera marker: an isoceles triangle pointing the way the camera is
+ * looking, centered on the camera's ground position. Its size is a
+ * fraction of the framed area's half-width rather than a world-unit
+ * constant, so it stays the same size on screen whatever the landscape's
+ * scale -- a fixed world size would be a speck over a big tree and would
+ * swamp a small one.
+ *
+ * COLOR. The reference's marker is a small black X on the green field.
+ * This port draws a bright yellow arrow instead, for two reasons: it has
+ * to read against the pedestals themselves (light grey in the reference,
+ * but any color at all here, since this port colors nodes by type or
+ * timestamp), and unlike an X an arrow also shows the heading, which is
+ * the half of the camera's state a click-to-look-at user most wants back.
+ * Marked as a deliberate departure rather than an eyeballed value. */
+#define FSN_OVERVIEW_MARKER_FRAC 0.055
+#define FSN_OVERVIEW_MARKER_R 1.00f
+#define FSN_OVERVIEW_MARKER_G 0.90f
+#define FSN_OVERVIEW_MARKER_B 0.10f
+
+/* Vertical headroom left above the tallest object when placing the
+ * top-down camera, in world units. Only has to be positive (an
+ * orthographic projection has no perspective to gain or lose by
+ * distance); it exists so the near clip plane sits strictly above the
+ * geometry rather than exactly on it. */
+#define FSN_OVERVIEW_HEADROOM 64.0
+
 
 /* One entry in fsn's 7-bucket "ages:" legend (task-A2-brief.md's
  * reference screenshot, 35037135976_0d90f4a3d5_z.jpg -- a bottom status

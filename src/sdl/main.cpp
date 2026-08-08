@@ -23,6 +23,7 @@
 #include "input.h"
 #include "ui_dialogs.h"
 #include "ui_main.h"
+#include "ui_overview.h"
 #include "ui_panels.h"
 #include "ui_rail.h"
 #include <cstring>
@@ -605,6 +606,17 @@ submit_frame(void)
 		if (!empty_draw)
 			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
 
+		// Pass 0 (fsn-mode Task C1, FSN mode only, and only when
+		// something it shows has moved): the overview mini-map, into
+		// its own small texture with its own depth buffer. It has to
+		// happen on this command buffer and before the ImGui pass
+		// below, which samples that texture -- SDL_GPU orders passes
+		// within a command buffer, so "earlier pass writes, later pass
+		// reads" needs no explicit synchronization. Before the scene
+		// pass rather than between it and ImGui only for readability;
+		// the two are independent.
+		ui_overview_render();
+
 		// Pass 1: the 3-D scene. Clears color + depth.
 		draw_scene();
 
@@ -842,6 +854,7 @@ run_record_mode(const char *outdir, double duration_seconds)
 		ui_panels_draw();
 		ui_dialogs_draw();
 		ui_rail_draw(); // fsn-mode Task A3: camera control rail
+		ui_overview_draw(); // fsn-mode Task C1: overview mini-map
 		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 
@@ -857,6 +870,13 @@ run_record_mode(const char *outdir, double duration_seconds)
 
 		if (!empty_draw)
 			ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, cmd);
+
+		// fsn-mode Task C1: the overview mini-map, into its own
+		// texture, before both passes below -- see submit_frame()'s
+		// copy of this call for the ordering rules. Kept in the
+		// recording loop too so a demo video of FSN mode shows the
+		// same window a live session does.
+		ui_overview_render();
 
 		draw_scene();
 
@@ -1311,6 +1331,11 @@ main(int argc, char **argv)
 		// ui_panels_draw()'s panel does.
 		ui_dialogs_draw();
 		ui_rail_draw(); // fsn-mode Task A3: camera control rail
+		// fsn-mode Task C1: the overview mini-map window. Reads the
+		// main-menu-bar-shrunk viewport rect for its first-use-ever
+		// top-right placement, so it belongs after ui_main_draw() --
+		// same constraint as the panels above.
+		ui_overview_draw();
 		ui_legend_draw(); // fsn-mode Task A2: ages legend, by_timestamp+buckets only
 		ImGui::Render();
 		submit_frame();
