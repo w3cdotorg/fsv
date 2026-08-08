@@ -107,3 +107,35 @@ struct ContextMenuRequest {
 // model), so an unconsumed request is simply overwritten by the next
 // right-click rather than queued.
 ContextMenuRequest input_take_context_menu_request(void);
+
+// ---- Open-file request seam (fsn-mode Task C3) -------------------------
+//
+// FSN mode's double-click-opens-a-file gesture (upstream fsn's original
+// "execute or view a file"): input.cpp is the one place that already
+// resolves the double-clicked node and, in FSV_FSN mode, decides whether
+// its NodeType is eligible for the system opener (see input.cpp's
+// node_open_eligible()) -- the same way it already decides "directory"
+// for the toggle branch just above this one. src/sdl/ui_dialogs.cpp is
+// the one place that knows how to draw an ImGui modal and, once
+// confirmed, call SDL_OpenURL(). Same one-way, write-here-read-there
+// shape as ContextMenuRequest above: input.cpp writes, ui_dialogs.cpp
+// reads/clears, never the reverse.
+//
+// `node` is `void *` (really `GNode *`), matching ContextMenuRequest's
+// own convention -- keeps this header common.h-free. ui_dialogs.cpp
+// dereferences it for exactly one frame (to snapshot the display name
+// and the raw filesystem path into owned strings before the confirm
+// modal's first draw) and never holds onto the pointer itself, the same
+// "paths, not pointers, once anything outlives a frame" discipline
+// src/sdl/ui_rail.cpp's Marks panel (Task C2) already follows.
+struct OpenFileRequest {
+	bool pending;
+	void *node; // GNode*
+};
+
+// Returns the most recent double-click-open request and clears the
+// pending flag. Call once per frame from ui_dialogs_draw(); at most one
+// request is ever pending (matches input_take_context_menu_request()'s
+// own model), so an unconsumed request is simply overwritten by the next
+// double-click rather than queued.
+OpenFileRequest input_take_open_file_request(void);

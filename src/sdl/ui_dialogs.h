@@ -16,6 +16,14 @@
 // compile error rather than a silent no-op.
 #pragma once
 
+// fsn-mode Task C3: loads the persisted "open_files_allowed" nvstore
+// bool (whether the double-click-opens-a-file confirmation modal should
+// be skipped) from ~/.fsvrc. Same startup slot and the same
+// nvstore-backed pattern as src/color.c's color_init()/landscape_init()
+// and src/sdl/ui_rail.cpp's ui_marks_init() -- call once, alongside
+// those, before the first frame draws.
+void ui_dialogs_init(void);
+
 // Colors -> Setup...: opens (or, if already open, resets to a fresh
 // snapshot of) the color-configuration window -- three tabs mirroring
 // dialog.c's notebook pages (by node type / by date-time / by wildcard

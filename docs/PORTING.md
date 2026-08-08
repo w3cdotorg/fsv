@@ -5119,6 +5119,208 @@ dir-b` (two levels under the root).
   moves the edit to the new row, discarding the first's pending (already
   committed-on-blur, in practice) edit.
 
+### Task C3 verification (double-click opens files, guarded)
+
+Upstream fsn's original "execute or view a file" double-click gesture,
+FSN mode only: double-clicking a regular file or symlink hands it to the
+system's default opener instead of the ordinary `camera_look_at()`.
+Directories, and every special-file type, are unaffected.
+
+Files:
+
+| file | change |
+|---|---|
+| `src/sdl/input.h` | NEW `OpenFileRequest` seam (mirrors Task 5.1's `ContextMenuRequest`) + `input_take_open_file_request()` |
+| `src/sdl/input.cpp` | `node_open_eligible()` (NodeType gate), the double-click branch in `BUTTON_UP`, the matching `impatient_reclick` exemption in `BUTTON_DOWN`, `g_open_file_request` + its `input_reset()` clear |
+| `src/sdl/ui_dialogs.h`/`.cpp` | NEW `ui_dialogs_init()`; `draw_open_file_confirm()` (the confirm modal), `open_file_with_system_handler()`, `open_files_allowed` nvstore persistence |
+| `src/sdl/main.cpp` | `ui_dialogs_init()` call at startup, alongside `color_init()`/`landscape_init()`/`ui_marks_init()` |
+| `tests/fixture/café #1.txt` | NEW fixture file, non-ASCII + space + `#` in the name, for the URL-encoding check below |
+
+#### Security stance
+
+This feature never executes the file's own bytes and never reads its
+contents. The double-click resolves a path; `g_filename_to_uri()`
+(GLib) turns that into a `file://` URL with the raw filesystem bytes
+correctly percent-encoded (spaces, `#`, `%`, non-ASCII); `SDL_OpenURL()`
+hands that URL to the OS's own default-application resolver —
+LaunchServices on macOS (the exact mechanism Finder's own double-click
+uses), `xdg-open` on Linux. Whatever LaunchServices/`xdg-open` decides to
+do with the file (which application opens it, and what *that*
+application then does) is squarely outside this program's control or
+responsibility, exactly as it would be for a Finder double-click — this
+program's own obligation ends at handing over a correctly-formed URL.
+A symlink is handed to the opener via its own path (`node_absname()`);
+the OS resolves the link itself, the same way Finder would. Every
+special-file type (FIFO, socket, character/block device) is excluded by
+`node_open_eligible()`'s exhaustive switch and simply falls through to
+the ordinary `camera_look_at()` — opening one of those has an effect
+(blocking on a FIFO with no reader; hardware access for a device node)
+a regular file open does not, so this feature declines to touch them at
+all.
+
+The first use per node type gets an explicit confirm modal ("Open
+`<name>` with the system default app?") naming the file by its display
+name; "Always allow" (checked, then Accept) persists past the modal for
+future opens (`open_files_allowed`, nvstore, same read-once-at-startup/
+write-on-change shape as `color.h`'s `landscape_explicit()`). Cancel is
+a hard no-op: no open, no persistence, even if the checkbox was ticked
+first.
+
+#### Design decisions
+
+- **The `impatient_reclick` fix was the load-bearing part of this
+  task, not a corner case.** `camera.c`'s `FSN_CAMERA_MIN_PAN_TIME`
+  (0.5s) routinely outlasts a real double-click's inter-click interval
+  — `input.cpp`'s own header comment already documents this for every
+  visualization mode's minimum pan time — and the *existing*
+  double-click-to-expand toggle already has its own exemption from the
+  BUTTON_DOWN "impatient user" discard path for exactly this reason
+  (`NODE_IS_DIR(impatient_peek)`). Without the matching exemption added
+  here, a real physical double-click on a file would have its second
+  press silently discarded before this feature's own BUTTON_UP branch
+  ever ran — the feature would work in a synthetic, zero-delay test and
+  never fire for an actual user. Caught by tracing the function for
+  real during this task's own verification, not by inspection.
+- **A true `BeginPopupModal()`, not a plain window** (unlike Properties/
+  Color Setup): `imgui.cpp`'s own `io.WantCaptureKeyboard` update goes
+  true whenever a modal is open (`(g.ActiveId != 0) || (modal_window !=
+  NULL)`, read directly out of the vendored source, not assumed) — so
+  `input.cpp`'s Escape-to-collapse handler already bails on its very
+  first gate while this modal is open, no change to
+  `ui_dialogs_handle_escape()` needed. This app never sets
+  `ImGuiConfigFlags_NavEnableKeyboard`, so ImGui's own nav-cancel Escape
+  handling never runs either (the same reasoning `input.cpp`'s header
+  comment and `ui_main.cpp`'s context-menu popup already rely on) —
+  the modal's own body checks `IsKeyPressed(ImGuiKey_Escape)` explicitly
+  and calls `CloseCurrentPopup()`, the same pattern that popup already
+  uses.
+- **Explicit, fixed modal position** (`SetNextWindowPos()` off
+  `GetMainViewport()->WorkPos`, the same anchor style `main.cpp`'s scan
+  overlay uses), not ImGui's own default placement. A double-click is a
+  viewport gesture — the cursor sits directly over the node's own
+  on-screen geometry when this fires — and ImGui's default first-use
+  placement for an unpositioned window leans on the current mouse
+  position, which would put the modal right under the point the user
+  just clicked.
+- **Paths, not pointers, once anything outlives a frame** — Task B1/C2's
+  own discipline: the confirm modal snapshots `node_absname_display()`
+  (for the dialog text) and `node_absname()` (for the actual open) into
+  owned `std::string`s the instant the request arrives, and never holds
+  the `GNode*` itself past that one frame. A rescan while the modal is
+  open (unreachable in practice — a true modal blocks the menu bar that
+  would trigger one) can therefore never dangle it.
+- **`open_files_allowed` lives in `ui_dialogs.cpp`, not `color.h`/
+  `color.c`.** Unlike `landscape_explicit()`, nothing outside this file
+  — not even the GTK arm, which has no equivalent gesture at all — ever
+  needs to ask it, so it stays a local static with its own
+  `ui_dialogs_init()` rather than a new core accessor.
+
+#### Verification
+
+1. **Both arms build clean.** SDL/macOS native. GTK: the `fsvbuild`
+   Debian bookworm container, full `meson compile`; neither
+   `input.cpp`/`input.h` nor `ui_dialogs.cpp`/`.h` is part of the GTK
+   arm's source list (SDL-frontend-only files), so the GTK build is
+   structurally unaffected — confirmed by rebuilding it anyway.
+   `meson test` **4/4 on both arms** (nvstore, scanfs, fsn_layout,
+   color_persistence) — this task added no new libfsvcore surface, so
+   no new unit test.
+2. **Headed, real end-to-end verification** against `tests/fixture`, a
+   private `$HOME`, via a temporary headed harness (deleted before the
+   commit, same convention as every prior task's "temporary,
+   non-committed hooks" — confirmed by `git diff`/grep afterward): real
+   `SDL_Event`s fed through `ImGui_ImplSDL3_ProcessEvent()` +
+   `input_handle_event()`, exactly the pair the real event loop calls,
+   and real `ImGui::Button()`/`Checkbox()` clicks (not direct state
+   pokes). Two real bugs surfaced and were fixed as part of chasing this
+   verification, detailed below.
+   - Double-click on `file1.txt`, **with no synthetic delay at all**
+     (click 2 arrives while click 1's own restarted pan is still
+     "moving") — modal opens, correct display name
+     (`.../tests/fixture/file1.txt`), screenshotted.
+   - Escape — modal closes (confirmed via `ImGui::GetDrawData()`'s
+     command-list count dropping back toward the base scene once
+     closed); re-double-click opens a **fresh** confirm (proving no
+     stale request survived).
+   - Click **Cancel** — no `SDL_OpenURL` call, no persistence; a
+     subsequent double-click still shows a fresh confirm.
+   - Click **Open** with the checkbox unticked — `ui_dialogs: open-file
+     accepted (always_allow=0)` logged, followed by `ui_dialogs:
+     SDL_OpenURL("file:///.../tests/fixture/file1.txt") -> true`;
+     `open_files_allowed` still unset afterward (next double-click shows
+     the modal again).
+   - Tick **"Always allow"**, click **Open** — `accepted
+     (always_allow=1)` logged, persisted; a subsequent double-click
+     shows **no modal at all**, going straight to a logged
+     `SDL_OpenURL()` call — exactly "once always-allowed, no dialog."
+   - **Directory regression**: double-clicking `dir-a` (a real
+     `NODE_IS_DIR` target, collapsed going in) still toggles it —
+     `dirtree_entry_expanded()` false before, true after — unaffected by
+     every change above.
+   - **MapV regression**: switching to `FSV_MAPV` and double-clicking
+     `file1.txt` produces no confirm log, no `SDL_OpenURL` call at all —
+     confirmed FSN-only.
+3. **URL encoding**: `tests/fixture/café #1.txt` (non-ASCII, a space,
+   and a `#`) double-clicked with `open_files_allowed` already true
+   (from the step above) logged `SDL_OpenURL("file:///.../tests/
+   fixture/caf%C3%A9%20%231.txt") -> true` — `é` correctly percent-
+   encoded as its UTF-8 bytes (`%C3%A9`), space as `%20`, `#` as `%23`.
+4. **Two real bugs found and fixed while chasing this verification**
+   (both disclosed here rather than only in the commit history, per
+   this document's own convention):
+   - **The `impatient_reclick` exemption** (design decisions, above) —
+     without it, a real (non-zero-delay) double-click on a file would
+     never have opened anything at all. Caught because the harness's
+     *first* pass deliberately fed a double-click with realistic
+     zero-gap timing rather than pre-settling the camera, and the
+     modal simply never appeared.
+   - **A genuine use-after-free in the verification harness itself**
+     (not production code): `node_absname_display()` (`src/common.c`)
+     returns a pointer into its own reused, `g_free()`'d-and-reallocated
+     static buffer; calling it twice as two arguments to the *same*
+     `SDL_Log()` call is undefined behavior (argument evaluation order
+     is unspecified, and the second call's `g_free()` can dangle the
+     first call's pointer before the log line is ever formatted). This
+     produced a stray, unformatted `(null)` log line and, via the
+     resulting heap corruption, an unrelated-looking
+     `camera_look_at_full()` assertion abort several steps later —
+     worth recording because it cost real debugging time before the
+     actual (harness-only) cause was found. Fixed by snapshotting each
+     call's result into its own `std::string` before formatting;
+     production code never makes this mistake (nothing else in this
+     codebase calls `node_absname_display()` twice in one expression).
+
+#### Concerns / disclosed gaps
+
+- **A pre-existing, unrelated landmine, found by accident while
+  building this task's own verification harness**: Task B1 already
+  disclosed that a *collapsed* directory still draws its own immediate
+  file children as boxes on its pedestal ("indistinguishable from an
+  expanded leaf"). Clicking such a file runs the ordinary,
+  pre-Task-C3 `camera_look_at()` path — which has no `colexp()`
+  pre-expand call the way `ui_rail.cpp`'s Marks "Go" needed one (Task
+  C2) — straight into `camera_look_at_full()`'s own `#ifdef DEBUG`
+  assertion that the target's parent must already be expanded. In a
+  DEBUG build (this one) that aborts the process; in a release build the
+  assertion compiles out and the behavior is presumably just wrong, not
+  fatal. Reproduced concretely: settling the camera on collapsed
+  `dir-a` and picking screen-center lands on `dir-a/file2.bin` (its one
+  file child's box), not `dir-a` itself. Out of this task's scope to
+  fix — it predates Task C3 and is reachable via the *ordinary* single
+  click-to-look-at path, nothing this task added — but worth flagging
+  precisely because Task C3 makes double-clicking files a much more
+  prominent, deliberate gesture than before.
+- **The confirm modal's fixed corner position never moves once chosen.**
+  Fine for this task's scope (YAGNI); a future task wanting a
+  cascading/remembered position would need `ImGuiCond_Always` relaxed
+  to `ImGuiCond_FirstUseEver`.
+- **No de-duplication or queueing of open requests**: a second
+  double-click while the confirm modal is already open cannot happen in
+  practice (the modal is a true modal — see the design decisions above —
+  so the double-click that would create a second request never reaches
+  `input.cpp` in the first place; `io.WantCaptureMouse` is true for the
+  whole time it's open).
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -5214,3 +5416,7 @@ code is kept.
 | 2026-08-08 | fsn-mode Task B3: `fsn_node_visible()`'s ancestor walk starts one generation higher for a file than for a directory | `fsn_draw_recursive()` draws a directory's own box *and own files* unconditionally, before checking its own `collapsed` flag — that flag only gates recursion into *child directories* — so a file's visibility depends on its parent being *reached*, not on the parent's own collapsed state, while a directory's visibility depends on its parent not being collapsed directly. Getting this backwards (checking the immediate parent's collapsed flag for a file too) was the task's own first draft, caught by literally testing "collapse the selected node's parent" for both node kinds rather than trusting the more intuitive-sounding rule |
 | 2026-08-08 | fsn-mode Task B3: FSN auto-landscape persists a separate `landscape_explicit` nvstore boolean rather than inferring "explicit" from whether `landscape` differs from the built-in default | the built-in default ("slate") is itself a legitimate explicit choice a user could make from the menu, indistinguishable from "never chosen" by value alone; a dedicated flag is the only way to tell the two apart |
 | 2026-08-08 | fsn-mode Task B3: leaving FSN mode restores no prior landscape (no "landscape before FSN" is saved) | keeping the feature to what the brief asked for (auto-*entering* FSN) — a restore-on-exit would need its own saved-state slot and its own interaction with the explicit flag for arguably little benefit, since the landscape menu remains one click away in any mode |
+| 2026-08-09 | fsn-mode Task C3: `SDL_OpenURL()` + `g_filename_to_uri()`, never a direct `exec()`/`system()` of the file | delegates the "what happens next" decision to the OS's own default-application resolver (LaunchServices on macOS, `xdg-open` on Linux) — the exact mechanism a Finder double-click already uses — keeping this program's own responsibility limited to handing over a correctly percent-encoded URL |
+| 2026-08-09 | fsn-mode Task C3: extended the *existing* `impatient_reclick` exemption (`NODE_IS_DIR`) in `input.cpp`'s `BUTTON_DOWN` case to also cover an FSN-eligible file, rather than leaving the new open-file branch to rely on `camera_moving()` settling on its own | `FSN_CAMERA_MIN_PAN_TIME` (0.5s) routinely outlasts a real double-click's inter-click interval — confirmed by a verification harness whose *first* pass fed a zero-delay double-click and found the modal never opened, because the second click's press was silently discarded by the pre-existing "impatient user" path before this task's own code ever ran |
+| 2026-08-09 | fsn-mode Task C3: the confirm modal is a true `BeginPopupModal()`, positioned via explicit `SetNextWindowPos()` off `GetMainViewport()->WorkPos`, not ImGui's own default placement | a true modal makes `io.WantCaptureKeyboard` true for free (verified in `imgui.cpp`), so Escape is handled without touching `ui_dialogs_handle_escape()`; explicit positioning avoids ImGui's default first-use placement landing the modal directly under the cursor that just double-clicked to open it |
+| 2026-08-09 | fsn-mode Task C3: `open_files_allowed` is a `ui_dialogs.cpp`-local static with its own `ui_dialogs_init()`, not a new `color.h` accessor alongside `landscape_explicit()` | nothing outside this file — not even the GTK arm, which has no equivalent gesture — ever needs to ask it |

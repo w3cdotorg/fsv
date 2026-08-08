@@ -42,7 +42,10 @@
 #include <utility>
 #include <vector>
 
+#include <SDL3/SDL.h> /* SDL_Log(), SDL_OpenURL(), SDL_GetError() -- Task C3's file opener */
 #include <imgui.h>
+
+#include "input.h" /* OpenFileRequest, input_take_open_file_request() -- Task C3's seam */
 
 extern "C" {
 #include "common.h"
@@ -50,6 +53,7 @@ extern "C" {
 #include "colexp.h"
 #include "color.h"
 #include "dirtree.h"
+#include "nvstore.h" /* Task C3: open_files_allowed persistence, same API src/sdl/ui_rail.cpp's Marks panel already uses directly */
 }
 
 namespace {
@@ -629,11 +633,206 @@ draw_properties_window(void)
 
 } // namespace
 
+namespace {
+
+// ============================================================
+// Open file (fsn-mode Task C3, guarded double-click-opens-a-file)
+// ============================================================
+
+// nvstore key for "has the user ever ticked Always allow" -- same
+// cached-bool-read-once-at-startup shape as src/color.c's
+// key_landscape_explicit/landscape_explicit_current (see that file's
+// landscape_explicit() doc comment in src/color.h). Kept local to this
+// file (a static, not a core accessor like landscape_explicit()):
+// nothing outside ui_dialogs.cpp -- not even the GTK arm, which has no
+// equivalent gesture at all -- ever needs to ask this.
+const char key_open_files_allowed[] = "open_files_allowed";
+bool g_open_files_allowed = false;
+
+// Flips the persisted choice. The only caller is the confirm modal's
+// "Open" button below, and only when its "Always allow" checkbox is
+// ticked -- there is no UI path that can ever set this back to false
+// (matches the brief: once always-allowed, stays that way; resetting it
+// would need editing ~/.fsvrc by hand, same as landscape_explicit's own
+// one-way "has the user ever chosen explicitly" flag).
+void
+set_open_files_allowed(bool allowed)
+{
+	g_open_files_allowed = allowed;
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	nvs_write_boolean(fsvrc, key_open_files_allowed, allowed ? TRUE : FALSE);
+	nvs_close(fsvrc);
+}
+
+// Hands `abs_path` (the node's raw node_absname() bytes -- filesystem
+// encoding, NOT node_absname_display()'s UTF-8/NFC display form) to the
+// OS's own default-application chain: SDL_OpenURL() on macOS reaches
+// LaunchServices (the same resolver Finder's double-click uses); on
+// Linux it shells out to xdg-open (SDL_system.c's implementation, not
+// this program's own choice). This function never exec()s the file
+// itself and never reads its contents -- see docs/PORTING.md's Task C3
+// section for the full security-stance writeup this mirrors.
+//
+// g_filename_to_uri() (GLib -- already linked into this binary, see
+// meson.build's glibdep) builds the "file://" URL, not a hand-rolled
+// percent-encoder: percent-encoding arbitrary filesystem bytes (spaces,
+// '#', '%', non-ASCII) correctly is exactly this function's one job, and
+// it already returns a properly-escaped, malloc'd string -- getting
+// that escaping wrong by hand here would risk feeding SDL_OpenURL() a
+// URL that resolves to the wrong path.
+void
+open_file_with_system_handler(const std::string &abs_path)
+{
+	GError *error = nullptr;
+	char *uri = g_filename_to_uri(abs_path.c_str(), nullptr, &error);
+	if (uri == nullptr) {
+		SDL_Log("ui_dialogs: g_filename_to_uri(\"%s\") failed: %s",
+		    abs_path.c_str(), error != nullptr ? error->message : "(no message)");
+		if (error != nullptr)
+			g_error_free(error);
+		return;
+	}
+
+	// Both outcomes logged, not just the failure case -- Task C3's own
+	// verification bar wants SDL_OpenURL()'s return value on record, and
+	// this is also this program's one and only trace of "a file open was
+	// actually attempted" (there is no confirmation dialog *after* this
+	// point the way the modal is *before* it).
+	const bool opened = SDL_OpenURL(uri);
+	if (opened)
+		SDL_Log("ui_dialogs: SDL_OpenURL(\"%s\") -> true", uri);
+	else
+		SDL_Log("ui_dialogs: SDL_OpenURL(\"%s\") -> false (%s)",
+		    uri, SDL_GetError());
+
+	g_free(uri);
+}
+
+// Transient state for the confirm modal -- owned strings snapshotted
+// the instant a request arrives (see draw_open_file_confirm() below),
+// never a GNode* held across frames: the same "paths, not pointers"
+// discipline src/sdl/ui_rail.cpp's Marks panel (Task C2) and this same
+// file's own Properties window (PropertiesState, above) already follow,
+// for the same reason -- a rescan between this modal opening and the
+// user clicking "Open" must not leave a dangling pointer here.
+// `always_allow` is the checkbox's own transient tick state, reset to
+// false every time a fresh request (re)opens the modal.
+struct OpenFileConfirmState {
+	std::string display_name;
+	std::string abs_path;
+	bool always_allow = false;
+};
+
+OpenFileConfirmState g_open_file;
+
+void
+draw_open_file_confirm(void)
+{
+	OpenFileRequest req = input_take_open_file_request();
+	if (req.pending && req.node != nullptr) {
+		GNode *node = static_cast<GNode *>(req.node);
+		if (g_open_files_allowed) {
+			// Already always-allowed: skip the modal entirely and open
+			// right away -- "Once always-allowed, no dialog" (brief).
+			open_file_with_system_handler(node_absname(node));
+		} else {
+			g_open_file.display_name = node_absname_display(node);
+			g_open_file.abs_path = node_absname(node);
+			g_open_file.always_allow = false;
+			SDL_Log("ui_dialogs: open-file confirm for \"%s\" (%s)",
+			    g_open_file.display_name.c_str(), g_open_file.abs_path.c_str());
+			// A double-click is a viewport gesture: the cursor sits
+			// right over the node's own on-screen geometry when this
+			// fires. Left unpositioned, ImGui's default placement for a
+			// first-ever-opened window leans on the current mouse
+			// position, which would land this modal directly under the
+			// cursor that just triggered it -- pinned instead to a
+			// fixed corner, the same anchor style main.cpp's own scan
+			// overlay uses (ImGui::SetNextWindowPos() off
+			// GetMainViewport()->WorkPos), so it reliably appears
+			// somewhere the user is already looking, never on top of
+			// (or accidentally immediately dismissed by residual input
+			// at) the click point.
+			const ImGuiViewport *vp = ImGui::GetMainViewport();
+			ImGui::SetNextWindowPos(
+			    ImVec2(vp->WorkPos.x + 40.0f, vp->WorkPos.y + 60.0f),
+			    ImGuiCond_Always);
+			// ImGui's own idiom: OpenPopup() this frame, then fall
+			// straight into the matching BeginPopupModal() call below,
+			// unconditionally, in the same function -- exactly the
+			// shape ui_main.cpp's draw_context_menu() already uses for
+			// its (non-modal) popup.
+			ImGui::OpenPopup("Open File?");
+		}
+	}
+
+	if (ImGui::BeginPopupModal("Open File?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		// A *true* modal (BeginPopupModal(), unlike Properties/Color
+		// Setup's plain ImGui::Begin() windows above): imgui.cpp's own
+		// io.WantCaptureKeyboard update goes true whenever `modal_window
+		// != NULL` (verified by reading imgui.cpp directly, not
+		// assumed -- same verification style input.cpp's header comment
+		// already used for the WantCaptureKeyboard/IsPopupOpen()
+		// distinction), so input.cpp's Escape-to-collapse handler
+		// already bails on its very first gate for as long as this is
+		// open -- no change to ui_dialogs_handle_escape() needed, unlike
+		// the Properties/Color Setup case that function exists for.
+		//
+		// But this app never sets ImGuiConfigFlags_NavEnableKeyboard
+		// (main.cpp's ImGui init), so ImGui's own nav-cancel Escape
+		// handling (gated on that same flag) never runs either --
+		// nothing would otherwise close this modal on Escape at all.
+		// Same explicit check ui_main.cpp's context-menu popup already
+		// relies on for the identical reason.
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+			ImGui::CloseCurrentPopup();
+
+		ImGui::TextWrapped("Open %s with the system default app?",
+		    g_open_file.display_name.c_str());
+		ImGui::Spacing();
+		ImGui::Checkbox("Always allow (don't ask again)", &g_open_file.always_allow);
+		ImGui::Separator();
+
+		if (ImGui::Button("Open")) {
+			// Brief: persistence happens on Accept, not on ticking the
+			// checkbox by itself -- a checked box under a cancelled
+			// dialog should not silently grant future opens no
+			// confirmation ever asked for.
+			SDL_Log("ui_dialogs: open-file accepted (always_allow=%d)",
+			    g_open_file.always_allow ? 1 : 0);
+			if (g_open_file.always_allow)
+				set_open_files_allowed(true);
+			open_file_with_system_handler(g_open_file.abs_path);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) {
+			// Brief: "Cancel = no-op" -- no open, no persistence, even
+			// if "Always allow" was ticked first.
+			SDL_Log("ui_dialogs: open-file cancelled");
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
+	}
+}
+
+} // namespace
+
+void
+ui_dialogs_init(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	g_open_files_allowed = nvs_read_boolean_default(fsvrc, key_open_files_allowed, FALSE) != 0;
+	nvs_close(fsvrc);
+}
+
 void
 ui_dialogs_draw(void)
 {
 	draw_color_setup_window();
 	draw_properties_window();
+	draw_open_file_confirm();
 }
 
 bool

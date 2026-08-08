@@ -1103,6 +1103,12 @@ main(int argc, char **argv)
 	// drawn or gone to (src/sdl/ui_rail.cpp).
 	ui_marks_init();
 
+	// fsn-mode Task C3: loads the persisted "open_files_allowed" flag
+	// (double-click-opens-a-file's "Always allow" checkbox) from
+	// ~/.fsvrc. Same startup slot and nvstore-backed pattern as the
+	// three calls just above.
+	ui_dialogs_init();
+
 	// Before the scan, not after: scanning a large tree takes minutes,
 	// and gui_update() paints its progress overlay through these
 	// backends the whole time. --screenshot skips them (and so renders
