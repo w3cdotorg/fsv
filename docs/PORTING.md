@@ -3084,6 +3084,48 @@ shipped as part of a task rather than afterward.
   - Documented in `README.md`'s Controls table and the in-app
     Help → Controls window (`src/sdl/ui_main.cpp`), both marked as an
     addition the same way the scroll-wheel row already is.
+  - **Fix round (review, 2026-08-08): a file-double-click regression.**
+    `camera_look_at()`'s minimum pan time (`camera.c`'s `*_MIN_PAN_TIME`
+    family; DiscV hardcodes 2.0s, `discv_look_at()`) always outlasts a
+    physical double-click's inter-click interval, so `camera_moving()`
+    is unconditionally still true when the second press arrives. A
+    first pass at this feature widened `BUTTON_DOWN`'s pre-existing
+    "impatient user" branch (which discards a click that interrupts an
+    in-flight pan) to skip the discard for *any* `clicks >= 2` press,
+    blind to what was actually under the cursor. That let a
+    double-click on a *file* re-arm `BUTTON_UP`'s ordinary
+    `camera_look_at()` a second time — and `camera_look_at_full()`
+    (`camera.c:974`) is not a no-op for a node that is already
+    `globals.current_node`: it unconditionally calls
+    `window_set_access(FALSE)` and restarts a full minimum-duration pan
+    with zero visible motion, so the second click would have silently
+    locked input for up to 2s on every file double-click. Fixed by
+    peeking `node_at_cursor()` on the second press *before* deciding
+    (only when `camera_moving()` — bounded to the rare case a press
+    lands mid-pan, never on an ordinary idle-camera click) and only
+    skipping the discard when that peek resolves to a directory
+    (`NODE_IS_DIR()`); a file or empty space keeps the exact original
+    unconditional discard, so a file double-click now produces exactly
+    one `camera_look_at()` call end to end, same as before this feature
+    existed.
+  - **Disclosed, not fixed — the same `camera_look_at_full()`-on-current-
+    node pattern also exists inside `colexp.c` itself**, pre-dating this
+    feature: `colexp()`'s `COLEXP_EXPAND` case calls
+    `camera_look_at_full(globals.current_node, ...)` whenever
+    `curnode_is_equal` (the directory being toggled is already
+    `globals.current_node`) — which, for this feature's own most common
+    case (double-click flies to the directory on the first press, then
+    the second press's `colexp()` call sees that same directory as
+    `globals.current_node`), fires a second zero-motion re-pan with the
+    same `window_set_access(FALSE)` lock, for the directory's own
+    (typically sub-second to 2s) pan duration. This is not new: the
+    identical sequence already existed pre-feature via, e.g.,
+    right-click → Expand on a directory the camera was just flown to.
+    Fixing it means changing `colexp.c` (shared core, also built by the
+    GTK frontend) to special-case "already looking at this node", which
+    is out of scope for an SDL-frontend gesture addition and was not
+    asked for; left as a known pre-existing quirk rather than patched
+    incidentally.
 
 ## Why this architecture
 
@@ -3149,7 +3191,7 @@ code is kept.
 | 2026-08-08 | `linux-sdl` CI job is `continue-on-error: true`; `release` explicitly ignores its result (with `always()`) rather than gating on it | building SDL3 from source on Ubuntu is inherently more fragile than the apt-packaged GTK path and is a bonus, not the anti-regression job; releases must still ship a working Linux binary (falling back to GTK) even if this job fails |
 | 2026-08-08 | CI's `linux-sdl` job links SDL3 statically (`-DSDL_SHARED=OFF -DSDL_STATIC=ON`), not shared, and gained a standing `ldd`-based regression check for it | a shared build would dynamically link `libSDL3.so`, which no Ubuntu release ships a runtime package for either — the release binary would fail to start for every downloader with no user-side fix; static removes the dependency entirely, confirmed by running the binary in a bare `ubuntu:24.04` container |
 | 2026-08-08 | `make-bundle.sh` accepts a direct binary path as an alternative to a meson builddir | the script previously only understood a builddir layout, so it always failed when bundled into a release tarball, where the binary sits flat next to it instead |
-| 2026-08-08 | README's Controls table describes the real gestures read from `src/sdl/input.cpp`, not the task brief's own pre-reading assumption ("double-click activate/warp") | there is no double-click action anywhere in the 3D viewport, in this port or upstream — `viewport.c`'s original code and this file's port of it both treat a double-click as two ordinary clicks; porting an imagined gesture into user-facing docs would misinform users about behavior that doesn't exist |
+| 2026-08-08 | README's Controls table describes the real gestures read from `src/sdl/input.cpp`, not the task brief's own pre-reading assumption ("double-click activate/warp") | there is no double-click action anywhere in the 3D viewport, in this port or upstream — `viewport.c`'s original code and this file's port of it both treat a double-click as two ordinary clicks; porting an imagined gesture into user-facing docs would misinform users about behavior that doesn't exist. **Superseded 2026-08-08 by a post-port addition** (double-click-to-expand a directory) — see "Post-port additions" below and this same table's Double-click row above; the claim was accurate for the Task 6.5 state of the code and is left as a historical record rather than rewritten |
 | 2026-08-08 | Old "Misc notes / OpenGL versions" section kept verbatim, moved under a collapsed `<details>` rather than deleted | it documents real, still-true constraints on the GTK/OpenGL frontend (core-profile context negotiation, GLSL version floor), which this port didn't touch and doesn't obsolete |
 | 2026-08-08 | Purge the morph/scheduled-event queues at the *top* of `scanfs()`, before the frees, rather than at `dirtree_clear()` | the queues are what is being emptied, not the tree, so doing it first means they never briefly hold pointers to freed memory; it also makes the purge unconditional instead of dependent on `globals.fstree != NULL` |
 | 2026-08-08 | `morph_break_all()` and `scheduled_events_clear()` kept as two functions, not one | two independent queues with two independent public entry points (`morph_full()`, `schedule_event()`); one name cannot honestly describe both, and the only caller wants both adjacently anyway |

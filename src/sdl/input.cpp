@@ -235,27 +235,47 @@ input_handle_event(const SDL_Event *ev)
 		const double y = ev->button.y * scale;
 
 		// Addition, not a port: viewport.c's original condition here is
-		// a plain `if (camera_moving())`. `camera_moving()` is *always*
-		// still true on this double-click's second press: the first
-		// click's BUTTON_UP just started a camera_look_at() pan (below),
-		// and every visualization mode's minimum pan time
-		// (camera.c's *_MIN_PAN_TIME: 0.5s DiscV/MapV, 1.0s TreeV) is
-		// longer than a physical double-click's inter-click interval.
-		// Without carving out clicks>=2 here, the "impatient user"
-		// branch immediately below would finish that pan and null
-		// g_indicated_node on *every* double-click over a node, before
-		// BUTTON_UP's double-click-to-expand toggle ever got a node to
-		// act on -- silently making the whole feature unreachable
-		// through real double-clicks despite working in a synthetic
-		// same-position test that doesn't hit this same-target-pan race.
-		const bool impatient_reclick = camera_moving() && ev->button.clicks < 2;
+		// a plain `if (camera_moving())`, which unconditionally nulls
+		// g_indicated_node below ("impatient user" -- discard this
+		// click, it interrupted an in-flight pan). That is still the
+		// right call for a FILE, or for empty space, or for an ordinary
+		// second single-click: viewport.c already had no distinct
+		// double-click behavior, and camera_look_at_full() is not a
+		// no-op for a node that is already globals.current_node (it
+		// calls window_set_access(FALSE) and restarts a full
+		// minimum-duration pan -- 0.5s MapV, 2.0s DiscV, 1.0s TreeV,
+		// camera.c's own DISCV_CAMERA_MIN_PAN_TIME et al -- with zero
+		// visible motion), so re-arming BUTTON_UP's plain
+		// camera_look_at() for a *second* click on the same file would
+		// silently re-lock input for up to 2s. Only a genuine
+		// double-click's second press *landing on a directory* should
+		// skip the discard, so BUTTON_UP's toggle below has a node to
+		// act on -- every visualization mode's minimum pan time
+		// (camera.c's *_MIN_PAN_TIME) outlasts a physical double-click's
+		// inter-click interval, so camera_moving() is unconditionally
+		// still true at that second press regardless of node type.
+		//
+		// Peeking at the actual node under the cursor (rather than
+		// deciding blind on clicks alone, as an earlier version of this
+		// change did) is what tells directories and files apart here.
+		// The extra node_at_cursor()/gpu_pick() call this costs is
+		// bounded: it only runs on the rare BUTTON_DOWN that lands while
+		// a pan is already in flight (camera_moving()), never on an
+		// ordinary idle-camera press.
+		GNode *impatient_peek = NULL;
+		bool impatient_reclick = camera_moving();
+		if (impatient_reclick && btn1 && !ctrl_key && ev->button.clicks >= 2) {
+			impatient_peek = node_at_cursor((int)x, (int)y);
+			if (impatient_peek != NULL && NODE_IS_DIR(impatient_peek))
+				impatient_reclick = false;
+		}
 
 		if (camera_moving()) {
 			// "Yipe! Impatient user" -- viewport.c's own comment. Always
 			// finishes an in-progress pan on any new press, exactly as
 			// before -- only whether the click is then *discarded*
 			// (impatient_reclick) or allowed to pick, right below,
-			// changed for the clicks>=2 case above.
+			// changed for the double-click-on-directory case above.
 			camera_pan_finish();
 		}
 
@@ -264,6 +284,8 @@ input_handle_event(const SDL_Event *ev)
 		} else if (!ctrl_key) {
 			if (btn2)
 				g_indicated_node = NULL;
+			else if (impatient_peek != NULL)
+				g_indicated_node = impatient_peek; // reuse the peek above, don't pick twice
 			else
 				g_indicated_node = node_at_cursor((int)x, (int)y);
 
