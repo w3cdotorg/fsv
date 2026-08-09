@@ -14,6 +14,7 @@
 #include "camera.h"
 
 #include "animation.h"
+#include "colexp.h" /* colexp(), COLEXP_EXPAND_ANY -- see fsn_ensure_parent_expanded( ) */
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
 #include "filelist.h"
 #include "fsv-platform.h"
@@ -1520,6 +1521,54 @@ camera_pan_commit( GNode *node, double pan_time )
 }
 
 
+/* fsn-mode, final Milestone C review: FSV_FSN's own drawn/pickable state
+ * can disagree with the synchronous dirtree_entry_expanded( ) flag the
+ * DEBUG assertions in camera_look_at_full( ) and camera_warp_to( ) below
+ * both check. Every other mode's *_draw_recursive( ) (geometry.c) draws a
+ * collapsed directory as a single closed folder icon -- nothing under it
+ * is drawn or pickable, so the flag and the screen agree by construction.
+ * FSN is different on purpose (geometry-fsn-draw.c's fsn_draw_recursive( )/
+ * fsn_node_visible( ) comments): a collapsed directory still draws -- and
+ * leaves pickable -- its OWN file children on its pedestal; only its
+ * subdirectories (and everything under them) are hidden. A plain single
+ * click on one of those still-drawn file boxes therefore reaches
+ * camera_look_at_full( ) with the file's parent already flagged collapsed.
+ * The same gap opens transiently for any FSN node clicked while an
+ * ancestor's collapse is still mid-morph: dirtree_entry_expanded( ) flips
+ * the instant colexp( ) starts, but the deployment-driven draw/pick
+ * recursion only catches up once that ~0.5s/level morph actually finishes
+ * -- an overview click (ui_overview.cpp, fsn_layout_nearest( )) or a warp
+ * double-click (camera_warp_to( ) below) can land on a still-drawn child
+ * in that window just as easily as the steady-state collapsed case above.
+ *
+ * Fixed with the mechanism this codebase already proves elsewhere for the
+ * analogous collapsed-target case -- ui_rail.cpp's Marks panel "Go" button
+ * and ui_dialogs.cpp's "Look at target node" (symlink resolution) both
+ * expand a collapsed ancestor chain with colexp( COLEXP_EXPAND_ANY ) before
+ * panning to it. Centralized here, once, rather than duplicated at every
+ * FSN entry path (input.cpp's single-click and warp-lite double-click,
+ * ui_overview.cpp's click) -- both functions below already funnel every
+ * caller through this point before their own DEBUG assertion, so this is
+ * the one place guaranteed to run for all of them, present and future.
+ * colexp( COLEXP_EXPAND_ANY ) does not itself call back into
+ * camera_look_at_full( )/camera_warp_to( ) (colexp.c's own depth==0
+ * epilogue explicitly no-ops the camera for that message -- "something
+ * else should already be doing something with the camera"), so this
+ * cannot recurse. Scoped to FSV_FSN by an explicit mode check, not left to
+ * "the mismatch just never happens elsewhere": every other mode's draw
+ * code keeps the invariant true on its own, so this is a deliberate no-op
+ * there, not an accidental one. */
+static void
+fsn_ensure_parent_expanded( GNode *node )
+{
+	if (globals.fsv_mode != FSV_FSN)
+		return;
+
+	if (NODE_IS_DIR(node->parent) && !dirtree_entry_expanded( node->parent ))
+		colexp( node->parent, COLEXP_EXPAND_ANY );
+}
+
+
 /* Points the camera at the given node, using the specified motion
  * morph type and (optionally, if value is nonnegative) the specified
  * pan duration */
@@ -1528,9 +1577,12 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 {
 	double pan_time = 0.0;
 
+	fsn_ensure_parent_expanded( node );
+
 #ifdef DEBUG
 	/* Parent directory of target node must be expanded
-	 * (or at least be expanding) */
+	 * (or at least be expanding) -- fsn_ensure_parent_expanded( ) above
+	 * makes this true rather than merely checking it, for FSV_FSN */
 	if (NODE_IS_DIR(node->parent))
 		g_assert( dirtree_entry_expanded( node->parent ) );
 #endif
@@ -1673,14 +1725,18 @@ camera_warp_to( GNode *node )
 {
 	double pan_time;
 
+	fsn_ensure_parent_expanded( node );
+
 #ifdef DEBUG
-	/* Same precondition as camera_look_at_full( )'s: the target's own
-	 * parent must already be expanded for it to have been pickable at
-	 * all. Unlike that function, `node` itself need not be expanded --
-	 * the caller auto-expands it first only when it was collapsed, but
-	 * a warp onto an already-expanded pedestal is exactly the
-	 * re-double-click case this task's "no collapse" behavior exists
-	 * for. */
+	/* Same precondition as camera_look_at_full( )'s (see
+	 * fsn_ensure_parent_expanded( )'s own doc comment, above it, for why
+	 * this can otherwise be false even for a target that really was
+	 * on-screen and pickable): the target's own parent must already be
+	 * expanded for it to have been pickable at all. Unlike that
+	 * function, `node` itself need not be expanded -- the caller
+	 * auto-expands it first only when it was collapsed, but a warp onto
+	 * an already-expanded pedestal is exactly the re-double-click case
+	 * this task's "no collapse" behavior exists for. */
 	if (NODE_IS_DIR(node->parent))
 		g_assert( dirtree_entry_expanded( node->parent ) );
 #endif
