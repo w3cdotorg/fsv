@@ -685,6 +685,17 @@ open_file_with_system_handler(const std::string &abs_path)
 {
 	GError *error = nullptr;
 	char *uri = g_filename_to_uri(abs_path.c_str(), nullptr, &error);
+	// This branch is verified by code inspection only, not a fixture --
+	// checked directly (fix-round, code review): `touch $'bad\xffname.txt'`
+	// on this task's own macOS/APFS gets "Illegal byte sequence" from the
+	// kernel itself, so a non-UTF-8 filename (the input that makes
+	// g_filename_to_uri() fail here) cannot be put on disk to double-click
+	// on this platform at all. `abs_path` is always absolute
+	// (node_absname() walks to the real root), so the function's other
+	// failure mode (a relative path) is also unreachable from this call
+	// site. See docs/PORTING.md's Task C3 fix-round section (Minor 3) --
+	// a Linux CI leg (ext4, no such validation) could add a real fixture
+	// for this branch later.
 	if (uri == nullptr) {
 		SDL_Log("ui_dialogs: g_filename_to_uri(\"%s\") failed: %s",
 		    abs_path.c_str(), error != nullptr ? error->message : "(no message)");

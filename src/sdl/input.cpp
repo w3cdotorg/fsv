@@ -81,7 +81,7 @@
 // checks IsPopupOpen() itself so this file's own action does not *also*
 // fire underneath that popup on the same keypress.
 //
-// Two more gates, added on review, cover what WantCaptureKeyboard/
+// Three more gates, added on review, cover what WantCaptureKeyboard/
 // IsPopupOpen() still miss:
 //
 //  - A right-click and this Escape landing in the *same*
@@ -97,6 +97,16 @@
 //    cancels it rather than falling through to the scene: a batched
 //    right-click+Escape should read the same as "open the menu, then
 //    immediately close it", not "open the menu AND collapse a node".
+//  - fsn-mode Task C3: a double-click-opens-a-file BUTTON_UP and this
+//    Escape landing in the same drain hit exactly the same gap, for
+//    exactly the same reason -- g_open_file_request is filled by the
+//    BUTTON_UP case below, and ui_dialogs.cpp's draw_open_file_confirm()
+//    doesn't call ImGui::OpenPopup() on it (which is what would finally
+//    make WantCaptureKeyboard true) until the *next* frame. Symmetric
+//    fix: this case also checks g_open_file_request.pending and cancels
+//    it rather than falling through to the scene -- a batched
+//    double-click+Escape should read as "the confirm almost opened,
+//    then got dismissed", not "open the file AND collapse a node".
 //  - Properties and Color Setup (src/sdl/ui_dialogs.cpp) are plain
 //    ImGui::Begin() windows, not popups or modals -- neither
 //    WantCaptureKeyboard nor IsPopupOpen() above ever sees them, even
@@ -883,6 +893,25 @@ input_handle_event(const SDL_Event *ev)
 			// the request instead of falling through to the scene.
 			g_context_menu_request.pending = false;
 			g_context_menu_request.node = nullptr;
+			break;
+		}
+		if (g_open_file_request.pending) {
+			// fsn-mode Task C3: the same same-drain race as
+			// g_context_menu_request just above, mirrored -- a
+			// double-click-opens-a-file BUTTON_UP and this Escape
+			// landed in the same event drain, before
+			// ui_dialogs.cpp's draw_open_file_confirm() ever got a
+			// frame to turn the request into a real (WantCaptureKeyboard-
+			// true) modal -- see the header comment above. Cancel the
+			// request instead of falling through to the scene: without
+			// this, the Escape would incorrectly collapse/step-out on
+			// the scene below, and the confirm modal would then still
+			// pop up on the very next frame regardless (input.cpp had
+			// already committed the request before this key event was
+			// even processed) -- exactly the unintended-collapse-plus-
+			// modal-anyway race this gate closes.
+			g_open_file_request.pending = false;
+			g_open_file_request.node = nullptr;
 			break;
 		}
 		if (ui_dialogs_handle_escape())

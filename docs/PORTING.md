@@ -5321,6 +5321,134 @@ first.
   `input.cpp` in the first place; `io.WantCaptureMouse` is true for the
   whole time it's open).
 
+### Fix round (code review): same-drain Esc race + docs sync
+
+Two Important findings, both fixed; two Minors, both resolved (one by a
+documented, evidence-backed non-fix).
+
+#### Important 1 — the same-drain Esc race, symmetric with the already-fixed context-menu one
+
+`g_open_file_request` had exactly the gap `g_context_menu_request`
+was already fixed for (see this document's own "Post-port additions"
+section and `input.cpp`'s header comment): an Escape landing in the
+*same* `SDL_PollEvent` drain as the double-click's own `BUTTON_UP` hits
+the Escape handler chain before the confirm modal exists.
+`io.WantCaptureKeyboard` reflects the *previous* frame's popup-stack
+state (computed at the top of `ImGui::NewFrame()`, before this
+frame's own draw ever runs), `IsPopupOpen()` is false for the same
+reason, and — pre-fix — nothing in the Escape chain knew to ask
+`g_open_file_request.pending`. The result: Escape fell through to the
+ordinary scene-collapse/step-out logic (an unrelated, *unintended*
+side effect on whatever `globals.current_node` happened to be), and
+the confirm modal still opened on the very next frame regardless,
+because `input.cpp` had already committed the request before the key
+event was even processed — "unintended collapse, and the modal pops up
+anyway."
+
+**Fix**: `input.cpp`'s Escape handler chain now checks
+`g_open_file_request.pending` immediately after the existing
+`g_context_menu_request.pending` check, and cancels it the same way —
+consumes the keypress, no scene action, request cleared. Exactly
+mirrors the pending-context-menu guard; the file header comment's
+"Three more gates" list (was "Two") documents the parallel.
+
+**Verification — RED, then GREEN, reproduced directly** (not just
+asserted), via a temporary, non-committed harness (`--esc-race-repro`,
+removed before this fix's commit — `git diff`/grep confirm no trace):
+real `SDL_Event`s fed through `ImGui_ImplSDL3_ProcessEvent()` +
+`input_handle_event()` with **no frame boundary at all** between the
+double-click's own two clicks and the Escape KEY_DOWN/UP that follows
+— the literal same-drain shape.
+
+- **RED** (`git stash` on just the new `g_open_file_request.pending`
+  check, rebuilding the pre-fix binary): root directory (expanded
+  going in) came out **collapsed** after the same-drain click+Escape
+  (`dirtree_entry_expanded()` true → false — the unintended step-out,
+  since `globals.current_node` was `file1.txt`, whose parent is root),
+  and a frame later the confirm modal's own draw call still produced
+  real content (`ImGui::GetDrawData()->CmdListsCount` went from 0 to
+  1) — both halves of the reported bug, reproduced concretely, not
+  inferred.
+- **GREEN** (fix restored): root stayed expanded (no collapse) and the
+  modal never rendered any content at all, one frame later or ever —
+  the request was cancelled, not merely delayed.
+- **Esc with the modal *already* open** (a real frame boundary between
+  the double-click and the Escape, not the same-drain race): unaffected
+  by the new check — `io.WantCaptureKeyboard` is already true by then
+  (the modal has been open at least one full frame), so Escape is
+  caught by the pre-existing first gate before the new check is ever
+  reached. Confirmed: root stayed expanded, modal closed, matching its
+  own unchanged `IsKeyPressed(Escape)` → `CloseCurrentPopup()` body.
+- **Ordinary (non-racing) double-click**: confirmed still opens the
+  confirm modal normally — the new check does not touch the main
+  feature's common-case path at all (it only ever fires when
+  `g_open_file_request.pending` is true, which is only ever true in the
+  same-drain window this fix targets).
+- Both arms rebuilt clean; `meson test` 4/4 on each.
+
+#### Important 2 — docs didn't mention the new gesture at all
+
+`README.md`'s Controls table and its trailing "double-clicking a file…
+has no special action" paragraph, and the in-app Help → Controls table
+(`src/sdl/ui_main.cpp`), both predated Task C3 and were never updated
+for it — both now flatly contradicted the shipped behavior. Fixed:
+
+- `README.md`: new table row ("Double-click a file" → the FSN-mode
+  behavior, confirm-then-persist, spelled out; every other mode
+  unaffected), the Escape row's note extended to mention the open-file
+  confirmation among the popups that get to consume Escape first, and
+  the trailing paragraph narrowed to what's actually still true (empty
+  space, and files outside FSN mode).
+- `src/sdl/ui_main.cpp`'s in-app table: one new row, "Double-click a
+  file (FSN mode)" → "Open with the system default app (first use
+  asks; Always allow persists)".
+
+#### Minor 3 — a `g_filename_to_uri()` NULL-path fixture
+
+Checked whether a raw invalid-byte filename (the one input that makes
+`g_filename_to_uri()` fail on Unix — it also fails for a non-absolute
+path, but `node_absname()` always returns an absolute one, so that arm
+is unreachable from this call site regardless) is even constructible
+as a real fixture file on this task's own macOS/APFS environment:
+
+```
+$ touch $'bad\xffname.txt'
+touch: bad<0xEF><0xBF><0xBD>name.txt: Illegal byte sequence
+```
+
+**Not constructible.** APFS (via the kernel's own filename validation,
+not a shell quirk — confirmed the byte reaches the syscall via `touch`
+directly) rejects a non-UTF-8 byte sequence in a filename outright, so
+there is no way to get such a file onto disk here to double-click in
+the first place. `open_file_with_system_handler()`'s `uri == nullptr`
+branch (log the `GError` message, free it, return without ever calling
+`SDL_OpenURL()`) is therefore verified by code inspection only on this
+platform — left that way rather than mocking `g_filename_to_uri()` out
+from under real GLib, which would test the mock, not the code. A Linux
+CI leg (ext4, which does not validate filename byte sequences at all)
+could construct this fixture for real and is the natural place to close
+this gap later; noted here rather than silently left unverified.
+
+#### Minor 4 — what "verified" actually meant for `SDL_OpenURL()`
+
+Stated precisely, since the task's own verification bar anticipated a
+TCC-restricted sandbox: this environment could confirm `SDL_OpenURL()`'s
+**boolean return value** (`true` in every run) and the **exact URL
+string** passed to it (correctly percent-encoded — see the café
+fixture check above) via `SDL_Log()`. It could not go further with
+certainty: a TextEdit process was observed running in this session
+(consistent with — though not conclusive proof of — earlier
+`SDL_OpenURL()` calls having actually reached LaunchServices), but
+enumerating its actual open documents to confirm a specific call opened
+a specific window required AppleScript automation
+(`osascript -e 'tell application "TextEdit" to get name of every
+document'`), which hung waiting on a macOS Automation consent dialog
+this non-interactive sandbox cannot answer — the same class of
+TCC restriction the task brief itself anticipated. What's verifiable
+here, stated exactly: the call path executes and the URL is correct;
+whether a window visibly opens on a real, interactive desktop session
+is not something this sandbox can independently confirm.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -5420,3 +5548,5 @@ code is kept.
 | 2026-08-09 | fsn-mode Task C3: extended the *existing* `impatient_reclick` exemption (`NODE_IS_DIR`) in `input.cpp`'s `BUTTON_DOWN` case to also cover an FSN-eligible file, rather than leaving the new open-file branch to rely on `camera_moving()` settling on its own | `FSN_CAMERA_MIN_PAN_TIME` (0.5s) routinely outlasts a real double-click's inter-click interval — confirmed by a verification harness whose *first* pass fed a zero-delay double-click and found the modal never opened, because the second click's press was silently discarded by the pre-existing "impatient user" path before this task's own code ever ran |
 | 2026-08-09 | fsn-mode Task C3: the confirm modal is a true `BeginPopupModal()`, positioned via explicit `SetNextWindowPos()` off `GetMainViewport()->WorkPos`, not ImGui's own default placement | a true modal makes `io.WantCaptureKeyboard` true for free (verified in `imgui.cpp`), so Escape is handled without touching `ui_dialogs_handle_escape()`; explicit positioning avoids ImGui's default first-use placement landing the modal directly under the cursor that just double-clicked to open it |
 | 2026-08-09 | fsn-mode Task C3: `open_files_allowed` is a `ui_dialogs.cpp`-local static with its own `ui_dialogs_init()`, not a new `color.h` accessor alongside `landscape_explicit()` | nothing outside this file — not even the GTK arm, which has no equivalent gesture — ever needs to ask it |
+| 2026-08-09 | fsn-mode Task C3 fix round: `g_open_file_request.pending` gets its own same-drain-Esc guard in `input.cpp`, placed immediately after `g_context_menu_request.pending`'s existing one, rather than a generic "any pending request" check | keeps each guard's own comment specific to the request it cancels (matches the file's existing one-guard-per-seam style) and avoids a shared helper for exactly two call sites |
+| 2026-08-09 | fsn-mode Task C3 fix round: documented the `g_filename_to_uri()` NULL-path fixture as *empirically unconstructible on macOS/APFS* (kernel-level filename validation rejects the byte sequence outright), rather than mocking the function to force it | a mock would test the mock, not the real code; the actual constraint is the platform's, confirmed by trying it directly (`touch $'bad\xffname.txt'` → "Illegal byte sequence"), not assumed |
