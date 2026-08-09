@@ -5712,8 +5712,9 @@ one pedestal instead of the whole landscape:
   not ported.
 - **A `colexp()`-internal repan can be discarded by the warp it raced
   with.** `colexp(COLEXP_EXPAND)`'s own depth-0 epilogue may arm a
-  `camera_look_at_full()` re-pan of its own (when the node being
-  expanded is an ancestor of `globals.current_node`); `input.cpp`'s
+  `camera_look_at_full()` re-pan of its own (when `globals.current_node`
+  is an ancestor of — or equal to — the node being expanded, per
+  `colexp.c`'s `curnode_is_ancestor` check); `input.cpp`'s
   warp-lite branch calls that `colexp()` and then, in the same event,
   `camera_warp_to()` — whose `camera_pan_begin()` unconditionally calls
   `camera_pan_break()`, cancelling whatever pan is in flight, including
