@@ -120,7 +120,7 @@ Menu highlights (menu bar at the top of the window):
 |---|---|
 | **File** | Change Root… (pick a new directory to visualize), Rescan, Quit |
 | **Vis** | Switch between the three visualization modes — DiscV, MapV, TreeV |
-| **View** | Toggle the docked Directory Tree & Files panel |
+| **View** | Toggle the docked Directory Tree & Files panel, the camera control rail, and (FSN mode only) the Overview picture-in-picture mini-map |
 | **Colors** | Color nodes by type, by timestamp, or by wildcard pattern; Setup… opens the full color editor (settings persist to `~/.fsvrc`) |
 | **Help** | Controls (this table, in-app), About fsv… |
 
@@ -142,6 +142,10 @@ the original source code was never released:
 - Flight navigation on middle-drag, a camera control rail
   (Reset / Go back / Birds eye / Front view + Tilt/Height sliders), and
   the selection spotlight — a soft pool of light under the selected node.
+- A Marks panel on the camera rail — bookmark the current node by name,
+  then "Go" back to it later, rename, or delete it; persists to
+  `~/.fsvrc`. A slight extension of the original: available in every
+  visualization mode, not just FSN.
 
 ### The macOS / Metal port (this branch)
 

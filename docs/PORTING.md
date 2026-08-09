@@ -5710,6 +5710,19 @@ one pedestal instead of the whole landscape:
   of scope per the task brief (YAGNI). Warp-lite is a camera pose and
   an auto-expand, nothing more; upstream fsn's full warp UI state is
   not ported.
+- **A `colexp()`-internal repan can be discarded by the warp it raced
+  with.** `colexp(COLEXP_EXPAND)`'s own depth-0 epilogue may arm a
+  `camera_look_at_full()` re-pan of its own (when the node being
+  expanded is an ancestor of `globals.current_node`); `input.cpp`'s
+  warp-lite branch calls that `colexp()` and then, in the same event,
+  `camera_warp_to()` — whose `camera_pan_begin()` unconditionally calls
+  `camera_pan_break()`, cancelling whatever pan is in flight, including
+  one `colexp()` itself just started. Benign (the warp is the pan the
+  user actually asked for, and it lands at the intended target either
+  way) and precedent-consistent — the "second click while a pan is
+  already running" pattern the rest of this codebase already relies on
+  (B2's flight-during-a-pan, an ordinary second click on a file) is
+  exactly this shape, just with the first pan started one call deeper.
 
 Not pushed, per the global constraints.
 
