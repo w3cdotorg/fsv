@@ -103,13 +103,16 @@ handling — see [`src/sdl/input.cpp`](src/sdl/input.cpp)):
 | Middle-drag | Dolly (zoom) the camera in/out — **in FSN mode: flight** (vertical deflection = forward/backward speed, horizontal = turn, Shift = climb/descend, release to stop) |
 | Ctrl + left-drag | Revolve the camera around the current target |
 | Scroll wheel | Dolly (zoom) — an addition in this port; upstream fsv has no wheel gesture, only the middle-drag |
-| Double-click a directory | Toggle expand/collapse of that directory — an addition in this port; upstream fsv (and this port, before this addition) treats a double-click as just two ordinary left-clicks in a row, with no directory-activation gesture in the 3D view at all |
+| Double-click a directory | Toggle expand/collapse of that directory — an addition in this port; upstream fsv (and this port, before this addition) treats a double-click as just two ordinary left-clicks in a row, with no directory-activation gesture in the 3D view at all. **In FSN mode: "warp-lite"** — auto-expands it if collapsed and flies the camera down onto its pedestal, landing close and low so its file boxes fill the view (upstream fsn's own "warp", scoped down — see docs/PORTING.md's Task C4 section). Re-double-clicking an already-expanded/warped-into pedestal never collapses it (fsn's warp wasn't a toggle) — it just re-centers. Collapsing an FSN directory stays available via Escape, the context menu, or the panel's tree-row arrow |
+| Double-click a file | **In FSN mode:** opens it with the system default app — upstream fsn's own "execute or view a file" gesture. First use asks for confirmation ("Open `<name>` with the system default app?"); ticking "Always allow" there skips that dialog from then on. In every other mode: no special action (same as two ordinary left-clicks) |
 | Right-click | Open the context menu for the node under the cursor (Look At, Properties…, Expand/Collapse) |
-| Escape | Collapse the current directory if it's expanded, otherwise collapse its parent and fly the camera there — an addition in this port; upstream fsv has no keyboard handling in the 3D view at all. Does nothing if a context menu or other ImGui popup is open (that gets to consume Escape first) |
+| Escape | Collapse the current directory if it's expanded, otherwise collapse its parent and fly the camera there — an addition in this port; upstream fsv has no keyboard handling in the 3D view at all. Does nothing if a context menu, the open-file confirmation, or other ImGui popup is open (that gets to consume Escape first) |
 
-Double-clicking a file, or empty space, has no special action beyond
-the ordinary left-click behavior above (select + fly the camera there
-twice) — the toggle only applies to directories.
+Double-clicking empty space, or a file outside FSN mode, has no special
+action beyond the ordinary left-click behavior above (select + fly the
+camera there twice) — the directory gesture (toggle outside FSN,
+warp-lite inside it) only applies to directories, and the system-open
+gesture only to files in FSN mode.
 
 Menu highlights (menu bar at the top of the window):
 
@@ -117,7 +120,7 @@ Menu highlights (menu bar at the top of the window):
 |---|---|
 | **File** | Change Root… (pick a new directory to visualize), Rescan, Quit |
 | **Vis** | Switch between the three visualization modes — DiscV, MapV, TreeV |
-| **View** | Toggle the docked Directory Tree & Files panel |
+| **View** | Toggle the docked Directory Tree & Files panel, the camera control rail, and (FSN mode only) the Overview picture-in-picture mini-map |
 | **Colors** | Color nodes by type, by timestamp, or by wildcard pattern; Setup… opens the full color editor (settings persist to `~/.fsvrc`) |
 | **Help** | Controls (this table, in-app), About fsv… |
 
@@ -139,6 +142,10 @@ the original source code was never released:
 - Flight navigation on middle-drag, a camera control rail
   (Reset / Go back / Birds eye / Front view + Tilt/Height sliders), and
   the selection spotlight — a soft pool of light under the selected node.
+- A Marks panel on the camera rail — bookmark the current node by name,
+  then "Go" back to it later, rename, or delete it; persists to
+  `~/.fsvrc`. A slight extension of the original: available in every
+  visualization mode, not just FSN.
 
 ### The macOS / Metal port (this branch)
 

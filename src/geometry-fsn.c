@@ -49,8 +49,11 @@ static double fsn_extent_w = 0.0;
 static double fsn_extent_d = 0.0;
 static double fsn_extent_h = 0.0;
 
-/* Accumulators used while placing; folded into the three above at the
- * end of fsn_geometry_init( ) */
+/* Corners of that same ground-plane box, in world coordinates. Written
+ * incrementally by fsn_note_footprint( ) during placement and read back
+ * afterwards by fsn_layout_bounds( ) -- fsn_extent_w/_d above are only
+ * their differences, which is not enough to frame a landscape that does
+ * not straddle the origin. Meaningful only while fsn_root != NULL. */
 static double fsn_min_x, fsn_max_x, fsn_min_y, fsn_max_y;
 
 /* Bumped on every layout pass -- see fsn_layout_generation( ) */
@@ -276,6 +279,7 @@ fsn_geometry_free( void )
 {
 	fsn_root = NULL;
 	fsn_extent_w = fsn_extent_d = fsn_extent_h = 0.0;
+	fsn_min_x = fsn_max_x = fsn_min_y = fsn_max_y = 0.0;
 }
 
 
@@ -342,6 +346,75 @@ fsn_layout_extents( double *width, double *depth, double *height )
 		*depth = (fsn_root != NULL) ? fsn_extent_d : 0.0;
 	if (height != NULL)
 		*height = (fsn_root != NULL) ? fsn_extent_h : 0.0;
+}
+
+
+void
+fsn_layout_bounds( double *min_x, double *max_x, double *min_y, double *max_y )
+{
+	const boolean have = (fsn_root != NULL);
+
+	if (min_x != NULL)
+		*min_x = have ? fsn_min_x : 0.0;
+	if (max_x != NULL)
+		*max_x = have ? fsn_max_x : 0.0;
+	if (min_y != NULL)
+		*min_y = have ? fsn_min_y : 0.0;
+	if (max_y != NULL)
+		*max_y = have ? fsn_max_y : 0.0;
+}
+
+
+/* Nearest-pedestal search, one directory and its drawn descendants.
+ * `best_d2` carries the running best squared distance (so no sqrt is
+ * needed anywhere) and is only ever lowered.
+ *
+ * The `collapsed` early return is what keeps this in step with what is
+ * actually on screen: fsn_draw_recursive( ) (src/geometry-fsn-draw.c)
+ * stops descending at exactly the same test, so the two walks visit the
+ * same set of pedestals. Deliberately a mirrored condition rather than a
+ * call into the draw half -- that half is not linked into libfsvcore
+ * (see this file's header comment), and this one must stay gpu-free. */
+static GNode *
+fsn_nearest_recursive( GNode *dnode, double x, double y, double *best_d2 )
+{
+	const FsnPedestal *ped;
+	GNode *node, *best = NULL, *found;
+	double dx, dy, d2;
+
+	ped = FSN_GEOM_PARAMS(dnode);
+	dx = ped->x - x;
+	dy = ped->z - y; /* FsnPedestal::z is world y -- see geometry-fsn.h */
+	d2 = dx * dx + dy * dy;
+	if (d2 < *best_d2) {
+		*best_d2 = d2;
+		best = dnode;
+	}
+
+	if (DIR_COLLAPSED(dnode))
+		return best; /* its subdirectories are not drawn */
+
+	for (node = dnode->children; node != NULL; node = node->next) {
+		if (!NODE_IS_DIR(node))
+			continue;
+		found = fsn_nearest_recursive( node, x, y, best_d2 );
+		if (found != NULL)
+			best = found;
+	}
+
+	return best;
+}
+
+
+GNode *
+fsn_layout_nearest( double x, double y )
+{
+	double best_d2 = G_MAXDOUBLE;
+
+	if (fsn_root == NULL)
+		return NULL;
+
+	return fsn_nearest_recursive( fsn_root, x, y, &best_d2 );
 }
 
 

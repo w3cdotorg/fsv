@@ -33,6 +33,22 @@ void ui_rail_draw(void);
 bool ui_rail_get_visible(void);
 void ui_rail_set_visible(bool visible);
 
+// fsn-mode Task C2: the Marks panel -- named bookmarks of nodes in the
+// landscape (reference screenshot's left-rail "Marks" list, "go to" and
+// "delete" buttons), joining the camera rail below its sliders inside
+// ui_rail_draw() itself. A slight extension of upstream fsn: shown in
+// every mode (a mark is just a node bookmark, useful whichever
+// landscape/view you're looking at it from), not FSN-only.
+//
+// Call once at startup, before the first ui_rail_draw() -- same slot as
+// color_init( )/landscape_init( ) in main.cpp, and for the same reason:
+// this reads ~/.fsvrc's persisted "marks" vector (nvstore, mirroring
+// color.c's wpattern-group vector round trip) into memory. Safe to call
+// before any filesystem has been scanned: it only loads name/path pairs
+// as strings, and resolves no GNode pointers until a mark is actually
+// drawn or gone to.
+void ui_marks_init(void);
+
 // Draws the bottom-center "ages:" legend bar -- 7 color swatches, each
 // with its bucket's label underneath (src/fsn-style.h's
 // fsn_age_buckets[]) -- anchored to the bottom-center of the main

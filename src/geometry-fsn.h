@@ -119,5 +119,35 @@ boolean fsn_layout_wire( GNode *node, FsnWire *wire );
  * NULL. All three come back 0.0 if no layout pass has run. */
 void fsn_layout_extents( double *width, double *depth, double *height );
 
+/* The same ground-plane bounding box as fsn_layout_extents( ), but as
+ * absolute WORLD coordinates rather than sizes: the landscape is not
+ * centered on the origin (fsn_place( ) pins the root pedestal at (0,0)
+ * and grows the tree towards +y), so a consumer that has to *frame* the
+ * landscape -- fsn-mode Task C1's overview mini-map, which builds a
+ * top-down orthographic projection around it -- needs the corners, not
+ * the extents. `min_y`/`max_y` are world y, i.e. the FsnPedestal::z axis
+ * (see the COORDINATES note at the top of this header).
+ *
+ * Any argument may be NULL. All four come back 0.0 if no layout pass has
+ * run, which is a degenerate (empty) box the caller must handle -- same
+ * convention as fsn_layout_extents( ). */
+void fsn_layout_bounds( double *min_x, double *max_x, double *min_y,
+			double *max_y );
+
+/* The directory whose pedestal center is nearest the ground point
+ * (`x`, `y`) in WORLD coordinates, or NULL if no layout pass has run.
+ *
+ * Only directories are candidates: they are what a pedestal is, and what
+ * camera_look_at( ) is worth flying to. Only *drawn* ones, too -- the
+ * walk descends exactly like the draw pass's own recursion, so a
+ * collapsed directory's hidden children can never be returned for a
+ * click on a spot where nothing is visible.
+ *
+ * Pure distance to the pedestal center, not a footprint hit test: this
+ * answers "which pedestal did the user mean", including for a click on
+ * bare ground between two of them, which is what fsn-mode Task C1's
+ * click-to-look-at wants. */
+GNode *fsn_layout_nearest( double x, double y );
+
 
 /* end geometry-fsn.h */

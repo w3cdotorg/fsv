@@ -4811,8 +4811,149 @@ own pre-existing "long way round" behavior after a manual revolve
    `src/geometry-fsn-draw.c` against the previous commit and rebuilding
    both arms clean one final time.
 
+### Task C1 verification (overview window — picture-in-picture mini-map)
+
+Upstream fsn's "overview" window (reference screenshot
+`3060c037-069f-4715-a01e-c30e53e505a2.jpg`, top-right): a small live map
+of the whole landscape seen from straight above, with a marker at the
+camera's own position. FSN mode only, toggled from **View → Overview**
+(greyed out in the other modes), default on.
+
+**Where the pieces live.** `src/geometry-fsn.c` gains two pure-math
+accessors (`fsn_layout_bounds()`, the landscape's ground box in absolute
+world coordinates — the extents alone cannot frame a landscape that does
+not straddle the origin — and `fsn_layout_nearest()`, point → pedestal,
+descending exactly as far as the draw pass does). `src/sdl/gpu.cpp` gains
+`gpu_overview_render()`, the **fourth** offscreen render path in that
+file after `gpu_pick()`, `--screenshot` and `--record`.
+`src/sdl/ui_overview.cpp` owns the ImGui window, the click mapping and
+the re-render policy.
+
+**Texture binding.** ImGui 1.92.9b's SDL_GPU backend takes a raw
+`SDL_GPUTexture*` as its `ImTextureID` and supplies its own sampler
+(`imgui_impl_sdlgpu3.cpp`: `texture_sampler_binding.texture =
+(SDL_GPUTexture*)(intptr_t)pcmd->GetTexID()`, sampler =
+`bd->CurrentSampler`). Verified by reading the vendored backend rather
+than assumed — **before 2025/08/08 the same backend wanted a pointer to
+an `SDL_GPUTextureSamplerBinding`**, and handing one API the other's
+value crashes. `ImGui::Image()` takes an `ImTextureRef`, which has an
+implicit constructor from `ImTextureID`, so the cast is the whole story;
+the texture carries `SDL_GPU_TEXTUREUSAGE_SAMPLER` alongside
+`COLOR_TARGET`.
+
+**Resolution: fixed, 512x320** (`FSN_OVERVIEW_WIDTH/HEIGHT`,
+`src/fsn-style.h`), letterboxed into whatever size the user drags the
+window to. Window-sized would mean destroying and recreating both the
+color texture *and* its depth buffer on every drag frame; 512x320 is
+already more pixels than the 320x200 default window shows, and 16:10
+makes that default close to pixel-for-pixel.
+
+**Not routed through `g_capture_texture`.** Unlike the other three
+offscreen paths, the overview has its own texture *and* its own depth
+buffer, both cached until `gpu_shutdown()`, and `gpu_scene_begin()`/
+`gpu_scene_end()` branch on `g_overview_frame` **before** consulting the
+capture state. Two consequences, both deliberate: an overview render
+nested inside a `--record` frame still picks the R8G8B8A8 pipelines that
+match its own texture (the record texture is in the swapchain's format,
+target index 0), and `ensure_depth_texture()`'s single window-sized depth
+texture is never made to flip-flop between two sizes twice a frame.
+
+**Re-render policy: only when something it shows has moved.**
+`ui_overview_render()` compares a key of {mode, `fsn_layout_generation()`,
+the camera's six pose numbers, a walk-summed total of every drawn
+directory's `deployment`} against the last render's. The deployment sum
+is the awkward member and is there on purpose: expanding or collapsing a
+directory from the context menu changes the map with no camera movement
+at all, and `src/animation.h` has no "a morph is running" predicate to
+ask instead. It costs one float-summing tree walk on frames that are
+being drawn anyway, next to the two full walks `geometry_draw()` already
+performs.
+
+**Scene only, and thinner than the main view.** No ImGui inside the
+texture; no sky (a stack of screen-space quads would simply cover a
+top-down map) and no ground quad (the pass's clear color *is* the
+ground, pinned to the "night" preset — whose ground is the same green as
+"classic"; only its sky, which the overview never shows, differs); no
+labels or path text (`geometry_draw(FALSE)`, exactly as `gpu_pick()`);
+and no selection spotlight, which is skipped by `geometry-fsn-draw.c`
+itself on a new `gpu_overview_pass()` predicate. That predicate is
+deliberately **not** a third `FsvRenderMode` value: the overview paints
+real colors, so all four existing `gpu_render_mode() == FSV_RENDER_NORMAL`
+tests must keep answering "normal" during it. The GTK shim returns 0.
+
+**Marker.** A flat arrowhead at the camera's ground position — derived
+by solving `setup_modelview_matrix()`'s own transform for the eye point,
+`camera = target + distance * (cos φ cos θ, cos φ sin θ, sin φ)` — 
+pointing back along `-(cos θ, sin θ)`, drawn with the depth test off so a
+pedestal it stands over cannot hide it. Sized as a fraction of the framed
+half-width (constant on screen at any landscape scale) and **clamped into
+the framed rectangle**: the frame is the landscape's box, not the box
+extended to include the camera, so that flying does not continuously
+rescale the map — "stable map, moving marker" — and a camera pulled back
+outside the tree pins its marker to the edge instead of vanishing. The
+reference's marker is a small black X; this is a yellow arrow, because it
+has to read against nodes colored by type/timestamp and because an arrow
+also carries the heading (documented as a deliberate departure in
+`fsn-style.h`).
+
+**Click-to-look-at**, no drag-navigation (YAGNI, per the plan): click in
+the image → item-relative UV → the *same* world rectangle the last render
+framed (`gpu_overview_frame_rect()`, not a recomputation) → 
+`fsn_layout_nearest()` → `camera_look_at()`. The only subtlety is the
+vertical flip: world +y is NDC +y is the texture's *top* row, so `v == 0`
+maps to `max_y`.
+
+Verified:
+
+1. **Both arms build**, `meson test` **4/4 on each** — macOS/SDL native
+   and a Debian bookworm container's `-Dfrontend=gtk` (53/53 targets).
+   `tests/test_fsn_layout.c` grew invariants 7 and 8 for the two new
+   accessors, including the not-origin-centered property a framing
+   consumer would otherwise get wrong and the collapsed-subtree case.
+2. **Headed FSN on `src/`**: the overview shows the three-pedestal
+   landscape from above, file-box grids and both wires visible, marker at
+   the camera. Screenshots `c1_overview_full.png` (whole window) and the
+   pair `c1_overview_marker_start.png` / `c1_overview_marker_turned.png`
+   — after a scripted 6-second revolve the marker has walked from the
+   bottom edge (pointing +y, into the landscape) round to the left edge,
+   **turned 90° to keep pointing back at the tree**: it moves *and*
+   rotates. `c1_overview_after_flight.png` shows the same after a
+   `camera_look_at()` flight to `src/sdl`.
+3. **Click-to-look-at**: a synthetic click at logical (1200, 60), pushed
+   as real SDL events through `ImGui_ImplSDL3_ProcessEvent()`, logged
+   `overview: click (1734.7, 1693.9) -> xmaps` and the camera target then
+   morphed (0,0) → (416.0, 1623.9), i.e. it genuinely flew to that
+   pedestal.
+4. **Idle**: **0 overview renders over 119 consecutive forced frames**
+   with the camera settled (temporary counter, removed before the
+   commits). During a flight it re-renders every frame, as intended.
+   Hiding the window: **0 renders over 40 frames of live camera motion**.
+   In MapV: **0 renders over 40 frames of motion**, and the window is not
+   drawn at all.
+5. **Pick regression, interleaved in the same frame.** A 7-point
+   `gpu_pick()` sweep across the window's center row returned
+   `86 99 80 89 88 101 0` with the camera parked (no overview render that
+   frame) and **byte-identical ids** while the overview was re-rendering
+   on every frame — the two offscreen paths do not disturb each other.
+   `--screenshot` still renders in all four modes (FSN/MapV/TreeV/DiscV);
+   `--record` wrote 330 FSN frames with the overview composited in.
+6. **All throwaway harness code removed before the commits below** —
+   `src/sdl/main.cpp` and `src/sdl/ui_overview.cpp` re-diffed against the
+   previous commit and both arms rebuilt clean afterwards.
+
 ### Concerns / disclosed gaps
 
+- **The overview never appears in `--screenshot` output.** That path
+  renders the scene alone with no ImGui pass (by design, since Task 2.2),
+  and the overview is an ImGui window. `--record` composites ImGui and
+  does show it. Not a defect, but it means the mini-map cannot be
+  regression-checked by the cheap headless screenshot the rest of this
+  port leans on.
+- **The mini-map's framing ignores the camera.** A camera far outside the
+  landscape pins its marker to the frame edge rather than zooming the map
+  out to include it — the deliberate trade for a map that does not
+  rescale under every flight, but it does mean the marker's *distance*
+  from the tree is not readable while it is clamped.
 - **`fsn_look_at()`'s file-zoom diameter (Task B1, not touched here)
   makes a real click-to-fly on a file in a densely packed directory land
   the camera nose-first against the box row**, as noted above — a real
@@ -4830,6 +4971,761 @@ own pre-existing "long way round" behavior after a manual revolve
   `fsn_draw_spotlight()`.
 - **"Night" landscape remains uncalibrated** (Task A1's own disclosed
   gap; untouched here, and auto-landscape only ever selects "classic").
+
+### Task C2 verification (Marks panel — named node bookmarks)
+
+Upstream fsn's left-rail "Marks" list (task-C2-brief.md's reference
+screenshot): named bookmarks of nodes in the landscape, with "go to" and
+"delete" per row and a "Mark here" button that bookmarks
+`globals.current_node`. **A slight extension of the original**: shown in
+every mode, not FSN-only — a mark is just a node bookmark, and there's
+nothing FSN-specific about wanting to jump back to a node from MapV or
+TreeV either. It joins `src/sdl/ui_rail.cpp`'s camera rail below its
+Tilt/Height sliders.
+
+**Files:** `src/common.c`/`.h` (`node_from_absname()` — a purpose-named
+entry point wrapping the already-complete `node_named()`); `src/sdl/
+ui_rail.cpp`/`.h` (`ui_marks_init()`, the whole Marks section);
+`src/sdl/main.cpp` (`ui_marks_init()` call at startup); `tests/
+test_fsn_layout.c` (invariant 9).
+
+**Storage: paths, not pointers — same UAF discipline as Task B1.** Each
+mark is `{name, path}`, where `path` is `node_absname()`'s raw-byte
+absolute path. A rescan or Change Root frees and rebuilds the whole
+fstree, so a `GNode *` captured before that would dangle; a path string
+survives it and is resolved back to a live node only at draw time (to
+grey out a missing row) and at "go to" time, via the new
+`node_from_absname()`. This is cheap enough to redo every frame for a
+handful of marks and needs no dedicated "invalidate on rescan" hook.
+
+**`node_from_absname()` turned out to already exist, under a different
+name.** The brief asked to "compose a resolve helper... `node_from_absname(
+)` — verify against `node_absname()`'s format so round-trip is exact,"
+flagging `node_named()` as a "one level" lookup to check. Reading
+`node_named()` end to end (not skimmed) showed it already walks the
+*whole* path component by component against the live `root_dnode` — it
+is a complete resolver, not a one-level one, and its contract already
+matches `node_absname()`'s exact byte format (it strips `node_absname(
+root_dnode)` as a prefix, then `strtok()`s the rest against `NODE_DESC(
+node)->name`, the same raw name `node_absname()` itself concatenates).
+So `node_from_absname()` is a one-line wrapper around it, kept as a
+separate, purpose-named entry point rather than pointing marks straight
+at `node_named()` — the two call sites (existing symlink-target
+resolution, new mark resolution) can each state their own intent, and
+either is free to diverge later without disturbing the other.
+
+**Persistence mirrors `color.c`'s wpattern-group vector round trip
+exactly**: `nvs_vector_begin()`/`nvs_path_present()`/`nvs_vector_end()`
+around a repeated `mark` node, each holding scalar `name`/`path`
+children, under its own `marks` path. Loaded once at startup
+(`ui_marks_init()`, the same slot as `color_init()`/`landscape_init()` in
+`src/sdl/main.cpp`); every mutation (add/delete/rename) does a full
+rewrite immediately (`nvs_delete_recursive()` then re-write the whole
+vector) — there is no "Save" button to defer to, unlike the Color Setup
+dialog's Apply, so rewrite-on-every-change is the simplest thing that
+stays correct.
+
+**UI**: "Mark here" (disabled only when there's no current node — it
+doesn't touch the camera, so it isn't blocked by the same in-flight-morph
+guard as Reset/Go back/Front view); each row is a label + "Go" + "X". The
+label doubles as the smallest-decent-UX inline rename affordance: double-
+click to open an `ImGui::InputText`, commit on Enter or on losing focus,
+discard an empty edit. A row whose path doesn't resolve shows its label
+greyed (`ImGui::TextDisabled`) with a "Not found here: <path>" tooltip
+and a disabled "Go" button — never auto-removed, exactly per the brief
+("the user might switch back roots"). A resolved row's tooltip shows
+`node_absname_display()` (UTF-8-safe, NFC-composed) rather than the raw
+stored path, matching the B-era display/storage split; the raw path is
+the fallback for a row with no live node to ask a display form of.
+
+**A real bug the brief's own "go-to" verification step surfaced**:
+`camera_look_at_full()` asserts the target's immediate parent directory
+is already expanded in the dirtree. A mark pointing into a collapsed
+subdirectory (the normal case for anything not near the root) hit this
+assertion and aborted, discovered by the headed verification below, not
+by inspection. Fixed the same way `src/sdl/ui_dialogs.cpp`'s existing
+"Look at target node" button already does for symlink targets: `colexp(
+target->parent, COLEXP_EXPAND_ANY)` before `camera_look_at()`, if the
+parent isn't already expanded. `COLEXP_EXPAND_ANY` walks the *whole*
+ancestor chain (`colexp.c` recurses into `dnode->parent` under that
+message), so this also covers a mark buried several directories deep,
+not just one level — verified directly against the fixture's `dir-a/
+dir-b` (two levels under the root).
+
+**Verification.**
+
+1. **Both arms build clean.** SDL/macOS native. GTK: the same Debian
+   bookworm container prior tasks used (`fsvbuild`, repo bind-mounted at
+   `/work`) — a full reconfigure + rebuild produced the real GTK `fsv`
+   executable, **53/53 targets**, including `src/window.c`; `common.c`'s
+   new `node_from_absname()` compiled into `libfsvcore` there with no
+   unused-symbol warning (it has a real caller: `src/sdl/ui_rail.cpp`,
+   which the GTK arm doesn't link, but the function itself is an ordinary
+   exported entry point, not `static`, so nothing in that arm's build
+   flags to it). `meson test` **4/4 on both arms** (nvstore, scanfs,
+   color_persistence, fsn_layout) — `test_fsn_layout.c` gained invariant
+   9 (`node_from_absname()` round-trips `node_absname()` for the root, a
+   directory nested two deep, a sibling directory, and a file; a
+   never-existed path resolves to `NULL`).
+2. **Headed, direct-state verification** (temporary, non-committed hooks
+   in `src/sdl/main.cpp`/`ui_rail.cpp`/`.h` — the same "SDL_PushEvent /
+   direct state where cleaner" allowance prior tasks used, since
+   pixel-driving ImGui's double-click-to-rename and button hit-testing
+   would test ImGui's own input handling, not this task's logic; deleted
+   before either commit below — `git diff` against both shows no trace,
+   confirmed by grepping the tree for the hook names after removal). Run
+   against `tests/fixture` (`dir-a/dir-b` nested two deep, sibling
+   `dir-c`), `$HOME` redirected to a private temp directory so this never
+   touched the real invoking user's `~/.fsvrc`:
+   - **Add two marks** (`file1.txt` at the root, `dir-a/dir-b`) — logged
+     `resolved=1` for both immediately.
+   - **Simulate a relaunch** (re-run `ui_marks_init()`'s read path in the
+     same process, without touching the in-memory list any other way) —
+     logged `count=2`, both still `resolved=1`, proving the add persisted
+     to `~/.fsvrc`'s new `marks` vector (inspected directly afterward:
+     `marks\n\tmark\n\t\tname ...\n\t\tpath ...`, the same indented shape
+     `color`'s own sections use).
+   - **Go to each** — logged the resolved target's `node_absname_display(
+     )` for both, matching the expected node exactly, and (after the
+     `colexp()` fix above) no assertion failure, including for `dir-a/
+     dir-b`'s two-level-collapsed case.
+   - **Delete one** (`file1.txt`'s mark) — logged `count=1`; simulated
+     relaunch again — still `count=1`, only the `dir-b` mark, proving the
+     delete persisted too (not just the in-memory erase).
+   - **Missing-path case**: with only the `dir-a/dir-b` mark left, Change
+     Root to `tests/fixture/dir-c` (a sibling with no `dir-a` in it) —
+     logged `resolved=0` for that mark (the greyed-row case) without it
+     being removed from the list; Change Root back to `tests/fixture` —
+     logged `resolved=1` again, same mark, same path string, never
+     re-entered by the user.
+3. This section itself, added to `docs/PORTING.md`.
+
+### Concerns / disclosed gaps
+
+- **No de-duplication on "Mark here."** Marking the same node twice
+  creates two rows with the same path. Not handled per the brief's "keep
+  it simple" instruction; a minor UX rough edge, not a correctness one
+  (both rows resolve and behave independently).
+- **A missing mark's tooltip shows the raw stored path, not a display-
+  safe form.** There is no live `GNode *` for a missing entry to ask
+  `node_absname_display()` of; for the vanishingly rare case of a
+  non-UTF-8 byte sequence in a stored path, the tooltip could render
+  oddly. Accepted rather than duplicating `node_absname_display()`'s
+  validate-and-normalize logic against a raw string with no node behind
+  it.
+- **At most one row can be renamed at a time** (a single `g_editing_
+  index`, not per-row state). Matches the brief's "smallest decent UX"
+  framing; a second double-click while already editing another row just
+  moves the edit to the new row, discarding the first's pending (already
+  committed-on-blur, in practice) edit.
+
+### Task C3 verification (double-click opens files, guarded)
+
+Upstream fsn's original "execute or view a file" double-click gesture,
+FSN mode only: double-clicking a regular file or symlink hands it to the
+system's default opener instead of the ordinary `camera_look_at()`.
+Directories, and every special-file type, are unaffected.
+
+Files:
+
+| file | change |
+|---|---|
+| `src/sdl/input.h` | NEW `OpenFileRequest` seam (mirrors Task 5.1's `ContextMenuRequest`) + `input_take_open_file_request()` |
+| `src/sdl/input.cpp` | `node_open_eligible()` (NodeType gate), the double-click branch in `BUTTON_UP`, the matching `impatient_reclick` exemption in `BUTTON_DOWN`, `g_open_file_request` + its `input_reset()` clear |
+| `src/sdl/ui_dialogs.h`/`.cpp` | NEW `ui_dialogs_init()`; `draw_open_file_confirm()` (the confirm modal), `open_file_with_system_handler()`, `open_files_allowed` nvstore persistence |
+| `src/sdl/main.cpp` | `ui_dialogs_init()` call at startup, alongside `color_init()`/`landscape_init()`/`ui_marks_init()` |
+| `tests/fixture/café #1.txt` | NEW fixture file, non-ASCII + space + `#` in the name, for the URL-encoding check below |
+
+#### Security stance
+
+This feature never executes the file's own bytes and never reads its
+contents. The double-click resolves a path; `g_filename_to_uri()`
+(GLib) turns that into a `file://` URL with the raw filesystem bytes
+correctly percent-encoded (spaces, `#`, `%`, non-ASCII); `SDL_OpenURL()`
+hands that URL to the OS's own default-application resolver —
+LaunchServices on macOS (the exact mechanism Finder's own double-click
+uses), `xdg-open` on Linux. Whatever LaunchServices/`xdg-open` decides to
+do with the file (which application opens it, and what *that*
+application then does) is squarely outside this program's control or
+responsibility, exactly as it would be for a Finder double-click — this
+program's own obligation ends at handing over a correctly-formed URL.
+A symlink is handed to the opener via its own path (`node_absname()`);
+the OS resolves the link itself, the same way Finder would. Every
+special-file type (FIFO, socket, character/block device) is excluded by
+`node_open_eligible()`'s exhaustive switch and simply falls through to
+the ordinary `camera_look_at()` — opening one of those has an effect
+(blocking on a FIFO with no reader; hardware access for a device node)
+a regular file open does not, so this feature declines to touch them at
+all.
+
+The first use per node type gets an explicit confirm modal ("Open
+`<name>` with the system default app?") naming the file by its display
+name; "Always allow" (checked, then Accept) persists past the modal for
+future opens (`open_files_allowed`, nvstore, same read-once-at-startup/
+write-on-change shape as `color.h`'s `landscape_explicit()`). Cancel is
+a hard no-op: no open, no persistence, even if the checkbox was ticked
+first.
+
+#### Design decisions
+
+- **The `impatient_reclick` fix was the load-bearing part of this
+  task, not a corner case.** `camera.c`'s `FSN_CAMERA_MIN_PAN_TIME`
+  (0.5s) routinely outlasts a real double-click's inter-click interval
+  — `input.cpp`'s own header comment already documents this for every
+  visualization mode's minimum pan time — and the *existing*
+  double-click-to-expand toggle already has its own exemption from the
+  BUTTON_DOWN "impatient user" discard path for exactly this reason
+  (`NODE_IS_DIR(impatient_peek)`). Without the matching exemption added
+  here, a real physical double-click on a file would have its second
+  press silently discarded before this feature's own BUTTON_UP branch
+  ever ran — the feature would work in a synthetic, zero-delay test and
+  never fire for an actual user. Caught by tracing the function for
+  real during this task's own verification, not by inspection.
+- **A true `BeginPopupModal()`, not a plain window** (unlike Properties/
+  Color Setup): `imgui.cpp`'s own `io.WantCaptureKeyboard` update goes
+  true whenever a modal is open (`(g.ActiveId != 0) || (modal_window !=
+  NULL)`, read directly out of the vendored source, not assumed) — so
+  `input.cpp`'s Escape-to-collapse handler already bails on its very
+  first gate while this modal is open, no change to
+  `ui_dialogs_handle_escape()` needed. This app never sets
+  `ImGuiConfigFlags_NavEnableKeyboard`, so ImGui's own nav-cancel Escape
+  handling never runs either (the same reasoning `input.cpp`'s header
+  comment and `ui_main.cpp`'s context-menu popup already rely on) —
+  the modal's own body checks `IsKeyPressed(ImGuiKey_Escape)` explicitly
+  and calls `CloseCurrentPopup()`, the same pattern that popup already
+  uses.
+- **Explicit, fixed modal position** (`SetNextWindowPos()` off
+  `GetMainViewport()->WorkPos`, the same anchor style `main.cpp`'s scan
+  overlay uses), not ImGui's own default placement. A double-click is a
+  viewport gesture — the cursor sits directly over the node's own
+  on-screen geometry when this fires — and ImGui's default first-use
+  placement for an unpositioned window leans on the current mouse
+  position, which would put the modal right under the point the user
+  just clicked.
+- **Paths, not pointers, once anything outlives a frame** — Task B1/C2's
+  own discipline: the confirm modal snapshots `node_absname_display()`
+  (for the dialog text) and `node_absname()` (for the actual open) into
+  owned `std::string`s the instant the request arrives, and never holds
+  the `GNode*` itself past that one frame. A rescan while the modal is
+  open (unreachable in practice — a true modal blocks the menu bar that
+  would trigger one) can therefore never dangle it.
+- **`open_files_allowed` lives in `ui_dialogs.cpp`, not `color.h`/
+  `color.c`.** Unlike `landscape_explicit()`, nothing outside this file
+  — not even the GTK arm, which has no equivalent gesture at all — ever
+  needs to ask it, so it stays a local static with its own
+  `ui_dialogs_init()` rather than a new core accessor.
+
+#### Verification
+
+1. **Both arms build clean.** SDL/macOS native. GTK: the `fsvbuild`
+   Debian bookworm container, full `meson compile`; neither
+   `input.cpp`/`input.h` nor `ui_dialogs.cpp`/`.h` is part of the GTK
+   arm's source list (SDL-frontend-only files), so the GTK build is
+   structurally unaffected — confirmed by rebuilding it anyway.
+   `meson test` **4/4 on both arms** (nvstore, scanfs, fsn_layout,
+   color_persistence) — this task added no new libfsvcore surface, so
+   no new unit test.
+2. **Headed, real end-to-end verification** against `tests/fixture`, a
+   private `$HOME`, via a temporary headed harness (deleted before the
+   commit, same convention as every prior task's "temporary,
+   non-committed hooks" — confirmed by `git diff`/grep afterward): real
+   `SDL_Event`s fed through `ImGui_ImplSDL3_ProcessEvent()` +
+   `input_handle_event()`, exactly the pair the real event loop calls,
+   and real `ImGui::Button()`/`Checkbox()` clicks (not direct state
+   pokes). Two real bugs surfaced and were fixed as part of chasing this
+   verification, detailed below.
+   - Double-click on `file1.txt`, **with no synthetic delay at all**
+     (click 2 arrives while click 1's own restarted pan is still
+     "moving") — modal opens, correct display name
+     (`.../tests/fixture/file1.txt`), screenshotted.
+   - Escape — modal closes (confirmed via `ImGui::GetDrawData()`'s
+     command-list count dropping back toward the base scene once
+     closed); re-double-click opens a **fresh** confirm (proving no
+     stale request survived).
+   - Click **Cancel** — no `SDL_OpenURL` call, no persistence; a
+     subsequent double-click still shows a fresh confirm.
+   - Click **Open** with the checkbox unticked — `ui_dialogs: open-file
+     accepted (always_allow=0)` logged, followed by `ui_dialogs:
+     SDL_OpenURL("file:///.../tests/fixture/file1.txt") -> true`;
+     `open_files_allowed` still unset afterward (next double-click shows
+     the modal again).
+   - Tick **"Always allow"**, click **Open** — `accepted
+     (always_allow=1)` logged, persisted; a subsequent double-click
+     shows **no modal at all**, going straight to a logged
+     `SDL_OpenURL()` call — exactly "once always-allowed, no dialog."
+   - **Directory regression**: double-clicking `dir-a` (a real
+     `NODE_IS_DIR` target, collapsed going in) still toggles it —
+     `dirtree_entry_expanded()` false before, true after — unaffected by
+     every change above.
+   - **MapV regression**: switching to `FSV_MAPV` and double-clicking
+     `file1.txt` produces no confirm log, no `SDL_OpenURL` call at all —
+     confirmed FSN-only.
+3. **URL encoding**: `tests/fixture/café #1.txt` (non-ASCII, a space,
+   and a `#`) double-clicked with `open_files_allowed` already true
+   (from the step above) logged `SDL_OpenURL("file:///.../tests/
+   fixture/caf%C3%A9%20%231.txt") -> true` — `é` correctly percent-
+   encoded as its UTF-8 bytes (`%C3%A9`), space as `%20`, `#` as `%23`.
+4. **Two real bugs found and fixed while chasing this verification**
+   (both disclosed here rather than only in the commit history, per
+   this document's own convention):
+   - **The `impatient_reclick` exemption** (design decisions, above) —
+     without it, a real (non-zero-delay) double-click on a file would
+     never have opened anything at all. Caught because the harness's
+     *first* pass deliberately fed a double-click with realistic
+     zero-gap timing rather than pre-settling the camera, and the
+     modal simply never appeared.
+   - **A genuine use-after-free in the verification harness itself**
+     (not production code): `node_absname_display()` (`src/common.c`)
+     returns a pointer into its own reused, `g_free()`'d-and-reallocated
+     static buffer; calling it twice as two arguments to the *same*
+     `SDL_Log()` call is undefined behavior (argument evaluation order
+     is unspecified, and the second call's `g_free()` can dangle the
+     first call's pointer before the log line is ever formatted). This
+     produced a stray, unformatted `(null)` log line and, via the
+     resulting heap corruption, an unrelated-looking
+     `camera_look_at_full()` assertion abort several steps later —
+     worth recording because it cost real debugging time before the
+     actual (harness-only) cause was found. Fixed by snapshotting each
+     call's result into its own `std::string` before formatting;
+     production code never makes this mistake (nothing else in this
+     codebase calls `node_absname_display()` twice in one expression).
+
+#### Concerns / disclosed gaps
+
+- **A pre-existing, unrelated landmine, found by accident while
+  building this task's own verification harness**: Task B1 already
+  disclosed that a *collapsed* directory still draws its own immediate
+  file children as boxes on its pedestal ("indistinguishable from an
+  expanded leaf"). Clicking such a file runs the ordinary,
+  pre-Task-C3 `camera_look_at()` path — which has no `colexp()`
+  pre-expand call the way `ui_rail.cpp`'s Marks "Go" needed one (Task
+  C2) — straight into `camera_look_at_full()`'s own `#ifdef DEBUG`
+  assertion that the target's parent must already be expanded. In a
+  DEBUG build (this one) that aborts the process; in a release build the
+  assertion compiles out and the behavior is presumably just wrong, not
+  fatal. Reproduced concretely: settling the camera on collapsed
+  `dir-a` and picking screen-center lands on `dir-a/file2.bin` (its one
+  file child's box), not `dir-a` itself. Out of this task's scope to
+  fix — it predates Task C3 and is reachable via the *ordinary* single
+  click-to-look-at path, nothing this task added — but worth flagging
+  precisely because Task C3 makes double-clicking files a much more
+  prominent, deliberate gesture than before.
+- **The confirm modal's fixed corner position never moves once chosen.**
+  Fine for this task's scope (YAGNI); a future task wanting a
+  cascading/remembered position would need `ImGuiCond_Always` relaxed
+  to `ImGuiCond_FirstUseEver`.
+- **No de-duplication or queueing of open requests**: a second
+  double-click while the confirm modal is already open cannot happen in
+  practice (the modal is a true modal — see the design decisions above —
+  so the double-click that would create a second request never reaches
+  `input.cpp` in the first place; `io.WantCaptureMouse` is true for the
+  whole time it's open).
+
+### Fix round (code review): same-drain Esc race + docs sync
+
+Two Important findings, both fixed; two Minors, both resolved (one by a
+documented, evidence-backed non-fix).
+
+#### Important 1 — the same-drain Esc race, symmetric with the already-fixed context-menu one
+
+`g_open_file_request` had exactly the gap `g_context_menu_request`
+was already fixed for (see this document's own "Post-port additions"
+section and `input.cpp`'s header comment): an Escape landing in the
+*same* `SDL_PollEvent` drain as the double-click's own `BUTTON_UP` hits
+the Escape handler chain before the confirm modal exists.
+`io.WantCaptureKeyboard` reflects the *previous* frame's popup-stack
+state (computed at the top of `ImGui::NewFrame()`, before this
+frame's own draw ever runs), `IsPopupOpen()` is false for the same
+reason, and — pre-fix — nothing in the Escape chain knew to ask
+`g_open_file_request.pending`. The result: Escape fell through to the
+ordinary scene-collapse/step-out logic (an unrelated, *unintended*
+side effect on whatever `globals.current_node` happened to be), and
+the confirm modal still opened on the very next frame regardless,
+because `input.cpp` had already committed the request before the key
+event was even processed — "unintended collapse, and the modal pops up
+anyway."
+
+**Fix**: `input.cpp`'s Escape handler chain now checks
+`g_open_file_request.pending` immediately after the existing
+`g_context_menu_request.pending` check, and cancels it the same way —
+consumes the keypress, no scene action, request cleared. Exactly
+mirrors the pending-context-menu guard; the file header comment's
+"Three more gates" list (was "Two") documents the parallel.
+
+**Verification — RED, then GREEN, reproduced directly** (not just
+asserted), via a temporary, non-committed harness (`--esc-race-repro`,
+removed before this fix's commit — `git diff`/grep confirm no trace):
+real `SDL_Event`s fed through `ImGui_ImplSDL3_ProcessEvent()` +
+`input_handle_event()` with **no frame boundary at all** between the
+double-click's own two clicks and the Escape KEY_DOWN/UP that follows
+— the literal same-drain shape.
+
+- **RED** (`git stash` on just the new `g_open_file_request.pending`
+  check, rebuilding the pre-fix binary): root directory (expanded
+  going in) came out **collapsed** after the same-drain click+Escape
+  (`dirtree_entry_expanded()` true → false — the unintended step-out,
+  since `globals.current_node` was `file1.txt`, whose parent is root),
+  and a frame later the confirm modal's own draw call still produced
+  real content (`ImGui::GetDrawData()->CmdListsCount` went from 0 to
+  1) — both halves of the reported bug, reproduced concretely, not
+  inferred.
+- **GREEN** (fix restored): root stayed expanded (no collapse) and the
+  modal never rendered any content at all, one frame later or ever —
+  the request was cancelled, not merely delayed.
+- **Esc with the modal *already* open** (a real frame boundary between
+  the double-click and the Escape, not the same-drain race): unaffected
+  by the new check — `io.WantCaptureKeyboard` is already true by then
+  (the modal has been open at least one full frame), so Escape is
+  caught by the pre-existing first gate before the new check is ever
+  reached. Confirmed: root stayed expanded, modal closed, matching its
+  own unchanged `IsKeyPressed(Escape)` → `CloseCurrentPopup()` body.
+- **Ordinary (non-racing) double-click**: confirmed still opens the
+  confirm modal normally — the new check does not touch the main
+  feature's common-case path at all (it only ever fires when
+  `g_open_file_request.pending` is true, which is only ever true in the
+  same-drain window this fix targets).
+- Both arms rebuilt clean; `meson test` 4/4 on each.
+
+#### Important 2 — docs didn't mention the new gesture at all
+
+`README.md`'s Controls table and its trailing "double-clicking a file…
+has no special action" paragraph, and the in-app Help → Controls table
+(`src/sdl/ui_main.cpp`), both predated Task C3 and were never updated
+for it — both now flatly contradicted the shipped behavior. Fixed:
+
+- `README.md`: new table row ("Double-click a file" → the FSN-mode
+  behavior, confirm-then-persist, spelled out; every other mode
+  unaffected), the Escape row's note extended to mention the open-file
+  confirmation among the popups that get to consume Escape first, and
+  the trailing paragraph narrowed to what's actually still true (empty
+  space, and files outside FSN mode).
+- `src/sdl/ui_main.cpp`'s in-app table: one new row, "Double-click a
+  file (FSN mode)" → "Open with the system default app (first use
+  asks; Always allow persists)".
+
+#### Minor 3 — a `g_filename_to_uri()` NULL-path fixture
+
+Checked whether a raw invalid-byte filename (the one input that makes
+`g_filename_to_uri()` fail on Unix — it also fails for a non-absolute
+path, but `node_absname()` always returns an absolute one, so that arm
+is unreachable from this call site regardless) is even constructible
+as a real fixture file on this task's own macOS/APFS environment:
+
+```
+$ touch $'bad\xffname.txt'
+touch: bad<0xEF><0xBF><0xBD>name.txt: Illegal byte sequence
+```
+
+**Not constructible.** APFS (via the kernel's own filename validation,
+not a shell quirk — confirmed the byte reaches the syscall via `touch`
+directly) rejects a non-UTF-8 byte sequence in a filename outright, so
+there is no way to get such a file onto disk here to double-click in
+the first place. `open_file_with_system_handler()`'s `uri == nullptr`
+branch (log the `GError` message, free it, return without ever calling
+`SDL_OpenURL()`) is therefore verified by code inspection only on this
+platform — left that way rather than mocking `g_filename_to_uri()` out
+from under real GLib, which would test the mock, not the code. A Linux
+CI leg (ext4, which does not validate filename byte sequences at all)
+could construct this fixture for real and is the natural place to close
+this gap later; noted here rather than silently left unverified.
+
+#### Minor 4 — what "verified" actually meant for `SDL_OpenURL()`
+
+Stated precisely, since the task's own verification bar anticipated a
+TCC-restricted sandbox: this environment could confirm `SDL_OpenURL()`'s
+**boolean return value** (`true` in every run) and the **exact URL
+string** passed to it (correctly percent-encoded — see the café
+fixture check above) via `SDL_Log()`. It could not go further with
+certainty: a TextEdit process was observed running in this session
+(consistent with — though not conclusive proof of — earlier
+`SDL_OpenURL()` calls having actually reached LaunchServices), but
+enumerating its actual open documents to confirm a specific call opened
+a specific window required AppleScript automation
+(`osascript -e 'tell application "TextEdit" to get name of every
+document'`), which hung waiting on a macOS Automation consent dialog
+this non-interactive sandbox cannot answer — the same class of
+TCC restriction the task brief itself anticipated. What's verifiable
+here, stated exactly: the call path executes and the URL is correct;
+whether a window visibly opens on a real, interactive desktop session
+is not something this sandbox can independently confirm.
+
+### Task C4 verification (warp-lite fly-in — Milestone C complete)
+
+**What changed.** FSN mode's directory double-click stops being the
+plain expand/collapse toggle every other mode still uses. Upstream
+fsn's own "warp" flew the camera down onto a clicked pedestal; the
+toggle (added post-port, Task 4.1-era, before FSN mode existed) never
+distinguished the two. Now: FSV_FSN's double-click branch auto-expands
+a *collapsed* target (`colexp(COLEXP_EXPAND)`, letting the deployment
+morph run *during* the fly-in — the pedestal's box grid rises while the
+camera is still travelling toward it) and calls a new
+`camera_warp_to()` instead of `camera_look_at()`. An *already-expanded*
+target — including one already warped into — never collapses on a
+second double-click: warp was never a toggle upstream either, so the
+branch simply has no collapse call in it at all, and a re-click just
+re-centers (a visible no-op if the camera is already there). Collapsing
+an FSN directory stays reachable via Escape, the context menu, or the
+panel's tree-row arrow — this task narrows one gesture, not the whole
+feature set. Every other mode's double-click is untouched: the
+pre-existing toggle code is preserved verbatim, gated behind an
+`else if` that only fires when the FSN branch's own
+`globals.fsv_mode == FSV_FSN` guard is false.
+
+**Files.** `src/camera.c`/`.h` (`camera_warp_to()`, `fsn_warp_pose()`,
+and the `camera_pan_begin()`/`camera_pan_commit()` prologue/epilogue
+factored out of `camera_look_at_full()` so the two share it rather than
+duplicating it); `src/fsn-style.h` (`FSN_WARP_PHI`,
+`FSN_WARP_HEIGHT_LIFT`, `FSN_WARP_DIAMETER_FRAC`); `src/sdl/input.cpp`
+(the FSN-only branch in `BUTTON_UP`, and its header comment).
+
+**The refactor camera_warp_to( ) needed first.** `camera_look_at_full()`
+already has the exact hook pattern a warp needs — end a flight, drop
+into bird's-eye view if active, save scroll state, break any pan in
+progress, then (after the pose is computed) arm the master pan morph
+and update history/current-node bookkeeping. Duplicating that ~25-line
+prologue/epilogue for one more entry point is exactly the kind of
+copy-shaped state this codebase's other tasks have refactored away
+(B2's `cancel_pan_for_manual_control()`, the C1/C2 accessor-not-copy
+pattern) — so it is now two static helpers,
+`camera_pan_begin()`/`camera_pan_commit()`, and
+`camera_look_at_full()` and `camera_warp_to()` both call them.
+`camera_warp_to()` has no per-mode switch the way
+`camera_look_at_full()` does: it is FSN-only by construction (the only
+caller is gated on `globals.fsv_mode == FSV_FSN`), so
+`fsn_warp_pose()` — shaped exactly like the pre-existing `fsn_look_at()`
+— stands in for the switch's one live arm. `camera_warp_to()` also
+takes no `MorphType`/`pan_time_override`: every caller wants the same
+`MORPH_SIGMOID` landing, so unlike `camera_look_at()`'s thin wrapper
+around `camera_look_at_full()`, there is nothing for a caller to
+override, and no need to require `animation.h` (which
+`camera_look_at_full()`'s declaration is `#ifdef`-gated on) at the
+call site in `input.cpp`.
+
+**The landing pose.** `fsn_warp_pose()` reads the same `FsnPedestal` as
+`fsn_look_at()` (`fsn_layout_get()`) and computes the same spherical
+`target + distance · (θ, φ)` camera position, but framed tight on the
+one pedestal instead of the whole landscape:
+
+- **Target**: the pedestal's own center (`x`, `z`), raised
+  `FSN_WARP_HEIGHT_LIFT` (110 units) above its top (`h`) — aiming at
+  roughly file-box height rather than the bare pedestal surface
+  underneath them. `fsn_warp_pose()` has no per-child geometry, only
+  the parent `FsnPedestal`, so this is a fixed guess at "typical" box
+  height (between `FSN_BOX_H_MIN` 16 and `FSN_BOX_H_MAX` 320), not a
+  per-box lookup.
+- **Elevation** (`FSN_WARP_PHI`, 18°): higher than `camera.c`'s own
+  `FSN_CAMERA_PHI` (15°, that constant's grazing establishing-shot
+  pitch for the whole-landscape overview). A first pass tried 8°
+  with an *unraised* target and produced, confirmed by screenshot, a
+  camera standing in the aisle between two rows of boxes staring down
+  a canyon of their side walls — the opposite of "file boxes fill the
+  view". Raising both the target (above) and the elevation together is
+  what clears the camera over the box canopy instead of threading it
+  between two rows.
+- **Distance** (`FSN_WARP_DIAMETER_FRAC`, 0.22 of the pedestal's own
+  `MAX(w, d)`, vs. `fsn_look_at()`'s `SQRT_2 · MAX(w, d)` framing the
+  *whole* footprint): close enough that a handful of boxes dominate the
+  frame with real perspective, the way the reference screenshot (cited
+  by `FSN_CAMERA_PHI`'s own comment, and again below) shows a handful
+  of large near boxes and two more pedestals with converging wires
+  receding into the distance.
+- **Pan time and theta unwrap**: identical formulas to `fsn_look_at()`
+  — travel-proportional duration (`FSN_CAMERA_MIN/MAX_PAN_TIME`), and
+  `unwrap_theta_toward()` before arming the morph (the B2 lesson: theta
+  is an angle, `morph()` interpolates a number, so a viewer parked just
+  past the wrap point must have theta shifted by a whole turn first or
+  the pan spins 267° the long way instead of turning ~90° the short
+  one).
+
+**Verification.**
+
+1. **Both arms build clean.** SDL/macOS native (`ninja -C builddir-sdl`)
+   and the `fsvbuild` Debian bookworm container's GTK arm
+   (`ninja -C builddir-gtk`) — `camera.c`/`.h` and `fsn-style.h` are
+   shared core, `input.cpp` is SDL-only. `meson test`: **4/4 on both**
+   (nvstore, scanfs, fsn_layout, color_persistence) — no new
+   `libfsvcore` surface (the warp pose lives in `camera.c`, which links
+   into every existing test binary unchanged), so no new unit test.
+2. **Headed, real end-to-end verification**, same convention as Tasks
+   B2/C3: a temporary, env-var-gated harness (`FSV_C4_VERIFY`) added to
+   `src/sdl/main.cpp`, pushing real `SDL_Event`s through
+   `ImGui_ImplSDL3_ProcessEvent()` + `input_handle_event()` — the exact
+   pair the real event loop calls — fully removed before the commit
+   (`git diff`/`git status` on `main.cpp` after removal show **zero net
+   change** to that file). Run against this repo's own `src/` tree
+   (`fsv src --fsn`), targeting `root_dnode` itself (always
+   front-and-center in FSN's intro framing, sidestepping having to hunt
+   for a child pedestal's exact screen position):
+   - **Auto-expand + swoop**: root force-collapsed
+     (`dirtree_entry_expanded()` 1→0), then a real double-click (two
+     manually click-numbered press/release pairs, one push per
+     animation tick — see the next point) at the pedestal's screen
+     position: `expanded` flips 0→1 *before* the pan even finishes
+     (`dirtree_entry_expanded()` flips synchronously the instant
+     `colexp()` starts, confirmed mid-pan), and the camera lands at
+     `theta=270 phi=18 dist=147.8` — `FSN_WARP_PHI`, and a travel
+     distance an order of magnitude tighter than the ~950–2369 unit
+     distances the plain establishing shot uses for the same tree.
+     Screenshot pair `c4_before.png`/`c4_after.png` (task's
+     `screenshots/` directory): the before frame is the familiar
+     head-on collapsed-root view (root's own file boxes, modest,
+     `src` labeled on the ground); the after frame is a close, elevated
+     view with a handful of large file boxes filling most of the frame
+     and two child pedestals with converging wires visible in the
+     distance — read directly and compared against the task's
+     reference image (`35037135976_0d90f4a3d5_z.jpg`): both show the
+     same "standing among the files" composition — sky band at the
+     top, a grid of boxes filling most of the lower frame, wires
+     converging toward pedestals further back. Not pixel-identical
+     (different tree, different box count) but the same camera language.
+   - **A genuine harness bug, caught and fixed before it could produce
+     a false negative**: pushing all four button events of a
+     double-click in one `SDL_PushEvent()` burst made the *second*
+     click's own `BUTTON_UP` see a stale `camera_moving() == true` and
+     silently no-op — not a bug in this task's code, but in
+     `camera_pan_finish()`'s own documented contract.
+     `morph_finish()` (`animation.c`) only sets `Morph::t_end` to 0.0;
+     it does not synchronously clear `camera_currently_moving`, which
+     only happens on the *next* `fsv_animation_tick()`. A real physical
+     double-click always has several ticks between its own press and
+     release (even a fast one), so this never surfaces outside a
+     zero-delay synthetic harness — but a zero-delay burst reproduces
+     it every time. Fixed in the harness (one button event pushed per
+     animation tick, matching a real click's own timing shape), not in
+     production code, since production code has no such burst path.
+   - **Re-double-click, deliberately mid-pan (rapid re-click, the
+     "warped in" case)**: a second double-click fired one tick after
+     the first, while the first's own pan was still in flight
+     (`impatient_reclick`'s dir exemption — pre-existing, verified
+     still applies unconditionally on `NODE_IS_DIR()`, unmodified by
+     this task — is what lets the second click's `BUTTON_DOWN` pick
+     instead of being discarded as "impatient user"). Result:
+     `expanded` stays **1** throughout (`0→1→1`, never back to 0) and
+     `current_node` never changes — no collapse, exactly the "state
+     chosen behavior" the brief asks for. `camera_pan_break()` inside
+     `camera_pan_begin()` cleanly cancels the first warp's just-armed
+     morphs and re-arms fresh ones to the same destination — the same
+     "second click while a pan is already running" pattern the rest of
+     this codebase already relies on (B2's flight-during-a-pan, the
+     ordinary ordinary-second-click-on-a-file case), not a new race.
+   - **Escape still collapses**: with the pedestal warped into and
+     expanded, a real `Escape` key event collapses it
+     (`dirtree_entry_expanded()` 1→0) — the toggle-adjacent behaviors
+     this task deliberately left alone (Escape/context-menu/panel
+     collapse) are all still live.
+   - **Flight interrupted by a warp, then the swoop lands cleanly**: a
+     real middle-button press + forward-drag starts a flight
+     (`camera_flight_active()` reads 1), then a double-click on the
+     (freshly re-collapsed, via the Escape step above) target fires
+     *while the middle button is still held*. Result:
+     `camera_flight_active()` reads **0** after the middle button is
+     released and the pan settles, and `expanded` reads **1** — the
+     flight ended (via `camera_pan_begin()`'s `camera_flight_end()`,
+     the same hook `camera_look_at_full()` already relies on for this)
+     and the auto-expand + swoop ran to completion, not a partial or
+     corrupted state. No new pending seam is introduced by warp (it is
+     a direct, synchronous camera call from `input.cpp`, unlike the
+     C3-era `g_open_file_request`/`g_context_menu_request` structs), so
+     there is no new same-drain Esc race to guard — confirmed by
+     inspection: `camera_warp_to()` takes effect within the same event
+     that calls it, with nothing deferred to a later frame for Escape
+     to race against.
+   - **Wrapped theta, short arc**: rather than fly a real yaw to the
+     wrap point (B2's own, slower, verification), `camera->theta` was
+     poked directly to 3.0 and `camera_warp_to()` called directly (the
+     exact same production entry point `input.cpp` calls, just without
+     the picking layer in between — picking was unusable for this one
+     check, see the next bullet) targeting the already-expanded,
+     already-current root. Result: `camera->theta` reads **363.0**
+     immediately after the call returns — `unwrap_theta_toward()`
+     shifted it by a whole turn *in place*, synchronously, before
+     arming the morph — and `|363 − 270| = 93 ≤ 180`, the short arc,
+     matching B2's own fix-round verification pattern for
+     `fsn_look_at()` exactly (this is the same fix, exercised in the
+     new function it also needed).
+   - **A second harness-methodology bug, caught by tracing rather than
+     assumed**: the *first* attempt at the wrapped-theta check used a
+     simulated click at the pedestal's *pre-warp* screen position — but
+     by that point in the script the camera had already warped in
+     close, and that same screen pixel now landed on one of the
+     pedestal's own *file*-box children instead of the pedestal itself
+     (exactly the "boxes fill the view" effect this task built,
+     working as intended). The resulting double-click hit Task C3's
+     file-open path instead of a re-warp, and the file-open confirm
+     modal it opened then stayed open and captured
+     (`io.WantCaptureMouse`) every subsequent synthetic click for the
+     rest of the script, silently invalidating the MapV-regression
+     check that ran after it. Diagnosed by adding, then removing,
+     temporary `SDL_Log()` probes in `input.cpp`'s `BUTTON_DOWN`/
+     `BUTTON_UP` cases (`io.WantCaptureMouse`, the resolved node, and
+     `camera_moving()`) — confirmed no trace of those probes remains
+     (`git diff`/`git status` clean on `input.cpp` beyond this task's
+     real change). Fixed by calling `camera_warp_to()` directly for
+     this one check instead of through a simulated click, as above.
+   - **MapV regression**: mode-switched to `FSV_MAPV`. The double-click
+     branch this task changed is unconditionally FSN-only
+     (`&& globals.fsv_mode == FSV_FSN`); every other mode falls to the
+     pre-existing `else if (NODE_IS_DIR(...))` toggle, byte-identical
+     to the code before this task. The harness's own synthetic click at
+     the same fixed screen pixel landed on a MapV-mode file box rather
+     than the root node in that mode's different (stacked, top-down)
+     layout — a pre-existing picking-target-precision limitation of a
+     fixed-pixel synthetic click, not a code path this task touches —
+     so this regression is verified primarily by the code diff itself
+     (one added `&&` condition gates the new branch; the toggle branch
+     below it is untouched) rather than a clean empirical re-run;
+     disclosed rather than glossed over.
+   - **FSN file double-click (Task C3) regression**: mode-switched back
+     to FSN, centered on an actual file sibling of root
+     (`geometry.c`), real double-click. `input_take_open_file_request()`
+     reads `pending == 1` — the file-open path is untouched and still
+     fires for files, confirming the new dir-only branch's placement
+     (ahead of, and mutually exclusive with, the pre-existing file-open
+     `else if`) doesn't shadow it.
+3. **Idle CPU unchanged.** `camera_warp_to()` and `fsn_warp_pose()` run
+   only synchronously inside `input_handle_event()`'s `BUTTON_UP` case,
+   adding no per-tick main-loop cost the way B2's flight tracking did
+   (`camera_flight_tick()`) — there is nothing new for an idle frame to
+   pay for. Measured anyway: process CPU time over a 10 s idle window
+   in FSN mode, this branch's binary, **0.07 s** — consistent with
+   B2's own idle baseline (0.11–0.12 s) and B2's explanation of where
+   that number comes from (the animation subsystem's own per-tick cost,
+   unrelated to this task).
+
+**Concerns / disclosed gaps.**
+
+- **`FSN_WARP_HEIGHT_LIFT` is a fixed guess**, not a per-directory
+  computation from its children's actual box heights — `fsn_warp_pose()`
+  only has the parent `FsnPedestal`, and a real per-child lookup would
+  need a second, more invasive geometry-accessor addition for a purely
+  cosmetic gain. Tuned by iterating three real screenshots against the
+  task's reference image rather than picked once and trusted.
+- **The MapV regression check** (above) is verified by code diff, not
+  a clean empirical click-through, due to a synthetic-harness picking
+  limitation in that mode's layout at the one fixed pixel this
+  harness used — disclosed rather than re-run indefinitely to chase a
+  harness-only precision issue on a code path this task does not
+  modify.
+- **No Search panel, no true in-directory paradigm** — explicitly out
+  of scope per the task brief (YAGNI). Warp-lite is a camera pose and
+  an auto-expand, nothing more; upstream fsn's full warp UI state is
+  not ported.
+- **A `colexp()`-internal repan can be discarded by the warp it raced
+  with.** `colexp(COLEXP_EXPAND)`'s own depth-0 epilogue may arm a
+  `camera_look_at_full()` re-pan of its own (when `globals.current_node`
+  is an ancestor of — or equal to — the node being expanded, per
+  `colexp.c`'s `curnode_is_ancestor` check); `input.cpp`'s
+  warp-lite branch calls that `colexp()` and then, in the same event,
+  `camera_warp_to()` — whose `camera_pan_begin()` unconditionally calls
+  `camera_pan_break()`, cancelling whatever pan is in flight, including
+  one `colexp()` itself just started. Benign (the warp is the pan the
+  user actually asked for, and it lands at the intended target either
+  way) and precedent-consistent — the "second click while a pan is
+  already running" pattern the rest of this codebase already relies on
+  (B2's flight-during-a-pan, an ordinary second click on a file) is
+  exactly this shape, just with the first pan started one call deeper.
+
+Not pushed, per the global constraints.
 
 ## Why this architecture
 
@@ -4926,3 +5822,14 @@ code is kept.
 | 2026-08-08 | fsn-mode Task B3: `fsn_node_visible()`'s ancestor walk starts one generation higher for a file than for a directory | `fsn_draw_recursive()` draws a directory's own box *and own files* unconditionally, before checking its own `collapsed` flag — that flag only gates recursion into *child directories* — so a file's visibility depends on its parent being *reached*, not on the parent's own collapsed state, while a directory's visibility depends on its parent not being collapsed directly. Getting this backwards (checking the immediate parent's collapsed flag for a file too) was the task's own first draft, caught by literally testing "collapse the selected node's parent" for both node kinds rather than trusting the more intuitive-sounding rule |
 | 2026-08-08 | fsn-mode Task B3: FSN auto-landscape persists a separate `landscape_explicit` nvstore boolean rather than inferring "explicit" from whether `landscape` differs from the built-in default | the built-in default ("slate") is itself a legitimate explicit choice a user could make from the menu, indistinguishable from "never chosen" by value alone; a dedicated flag is the only way to tell the two apart |
 | 2026-08-08 | fsn-mode Task B3: leaving FSN mode restores no prior landscape (no "landscape before FSN" is saved) | keeping the feature to what the brief asked for (auto-*entering* FSN) — a restore-on-exit would need its own saved-state slot and its own interaction with the explicit flag for arguably little benefit, since the landscape menu remains one click away in any mode |
+| 2026-08-09 | fsn-mode Task C3: `SDL_OpenURL()` + `g_filename_to_uri()`, never a direct `exec()`/`system()` of the file | delegates the "what happens next" decision to the OS's own default-application resolver (LaunchServices on macOS, `xdg-open` on Linux) — the exact mechanism a Finder double-click already uses — keeping this program's own responsibility limited to handing over a correctly percent-encoded URL |
+| 2026-08-09 | fsn-mode Task C3: extended the *existing* `impatient_reclick` exemption (`NODE_IS_DIR`) in `input.cpp`'s `BUTTON_DOWN` case to also cover an FSN-eligible file, rather than leaving the new open-file branch to rely on `camera_moving()` settling on its own | `FSN_CAMERA_MIN_PAN_TIME` (0.5s) routinely outlasts a real double-click's inter-click interval — confirmed by a verification harness whose *first* pass fed a zero-delay double-click and found the modal never opened, because the second click's press was silently discarded by the pre-existing "impatient user" path before this task's own code ever ran |
+| 2026-08-09 | fsn-mode Task C3: the confirm modal is a true `BeginPopupModal()`, positioned via explicit `SetNextWindowPos()` off `GetMainViewport()->WorkPos`, not ImGui's own default placement | a true modal makes `io.WantCaptureKeyboard` true for free (verified in `imgui.cpp`), so Escape is handled without touching `ui_dialogs_handle_escape()`; explicit positioning avoids ImGui's default first-use placement landing the modal directly under the cursor that just double-clicked to open it |
+| 2026-08-09 | fsn-mode Task C3: `open_files_allowed` is a `ui_dialogs.cpp`-local static with its own `ui_dialogs_init()`, not a new `color.h` accessor alongside `landscape_explicit()` | nothing outside this file — not even the GTK arm, which has no equivalent gesture — ever needs to ask it |
+| 2026-08-09 | fsn-mode Task C3 fix round: `g_open_file_request.pending` gets its own same-drain-Esc guard in `input.cpp`, placed immediately after `g_context_menu_request.pending`'s existing one, rather than a generic "any pending request" check | keeps each guard's own comment specific to the request it cancels (matches the file's existing one-guard-per-seam style) and avoids a shared helper for exactly two call sites |
+| 2026-08-09 | fsn-mode Task C3 fix round: documented the `g_filename_to_uri()` NULL-path fixture as *empirically unconstructible on macOS/APFS* (kernel-level filename validation rejects the byte sequence outright), rather than mocking the function to force it | a mock would test the mock, not the real code; the actual constraint is the platform's, confirmed by trying it directly (`touch $'bad\xffname.txt'` → "Illegal byte sequence"), not assumed |
+| 2026-08-09 | fsn-mode Task C4: FSN's directory double-click never collapses (no `colexp(COLLAPSE)` call anywhere in the branch), rather than tracking "is the camera currently warped into this node" as a flag and gating collapse on it | upstream fsn's warp was never a toggle in the first place; the branch structure itself (auto-expand-if-collapsed, then always `camera_warp_to()`, no collapse arm) makes "re-double-click never collapses" true by construction with no runtime state to get out of sync, the smallest option the task brief itself offered |
+| 2026-08-09 | fsn-mode Task C4: factored `camera_look_at_full()`'s prologue/epilogue into `camera_pan_begin()`/`camera_pan_commit()` so `camera_warp_to()` could share them, rather than duplicating ~25 lines (flight-end, access-disable, birdseye-off, scroll-save, pan-break; master-morph-arm, history-push, current-node/manual-control bookkeeping) | the "hook pattern" the task brief asked warp to mirror is exactly this prologue/epilogue; two functions with the same shape and no shared body is the kind of copy this codebase's other tasks (B2's `cancel_pan_for_manual_control()`, C1/C2's accessor-over-copy) have already refactored away rather than repeated |
+| 2026-08-09 | fsn-mode Task C4: `camera_warp_to()` takes no `MorphType`/`pan_time_override` (unlike `camera_look_at_full()`) | its one caller (`input.cpp`'s FSN double-click branch) always wants the same `MORPH_SIGMOID` landing; a parameter nothing ever varies is dead surface, and dropping it means `camera.h`'s declaration needs no `#ifdef FSV_ANIMATION_H` guard the way `camera_look_at_full()`'s does |
+| 2026-08-09 | fsn-mode Task C4: the warp's look-at target is the pedestal top raised by a fixed `FSN_WARP_HEIGHT_LIFT`, not the bare pedestal surface (`ped->h` alone) | confirmed by screenshot: an unraised target at a low elevation put the camera in the aisle between two rows of file boxes, staring down a canyon of their side walls — the opposite of the "file boxes fill the view" the task asked for; raising the aim point together with the elevation is what clears the camera over the box canopy |
+| 2026-08-09 | fsn-mode Task C4: the wrapped-theta short-arc check calls `camera_warp_to()` directly rather than through a simulated double-click | by the time that check runs in the verification script, the camera has already warped in close, so a click at the pre-warp screen position lands on one of the pedestal's own file-box children (the very effect this task built) rather than the pedestal itself — confirmed the hard way when an earlier pass's stray click there opened Task C3's file-open confirm modal and silently blocked every later synthetic click in the same script via `io.WantCaptureMouse` |

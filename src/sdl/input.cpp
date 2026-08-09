@@ -29,6 +29,38 @@
 // under the second click keeps the ordinary camera_look_at() -- the
 // gate only fires for a directory node.
 //
+// FSV_FSN mode, ADDITION on top of the addition -- fsn-mode Task C4,
+// "warp-lite": the toggle above is *not* what a directory double-click
+// does in FSN. Upstream fsn's own double-click ("warp") flies the camera
+// down onto the pedestal and was never a toggle, so this mode's branch
+// auto-expands a collapsed target (colexp(COLEXP_EXPAND), letting the
+// deployment morph run *during* the fly-in) and calls camera_warp_to()
+// instead of camera_look_at() -- but never collapses on a second
+// double-click of an already-expanded pedestal (camera_warp_to() just
+// re-centers on it, which is a visible no-op if the camera is already
+// there). Collapsing an FSN directory stays reachable via Escape, the
+// context menu, or the panel's tree-row arrow -- see docs/PORTING.md's
+// Task C4 section. Every other mode keeps the toggle above, unchanged.
+//
+// Double-click-opens-a-file, ADDITION -- not a port, fsn-mode Task C3:
+// upstream fsn's original "execute or view a file" gesture, ported as
+// "hand it to the system's default opener" rather than a literal exec()
+// of the file's own bytes -- see docs/PORTING.md's Task C3 section for
+// the full security-stance writeup (delegates to LaunchServices on
+// macOS / xdg-open via SDL_OpenURL() on Linux, exactly what
+// double-clicking the file in Finder or a file manager would do).
+// FSV_FSN mode only: the BUTTON_UP case below adds one more branch
+// alongside the double-click-to-expand toggle just above it -- a
+// double-click landing on a regular file or symlink
+// (node_open_eligible() below decides which NodeTypes qualify;
+// directories are already claimed by the toggle branch, and the
+// special-file types are deliberately excluded) fills
+// g_open_file_request instead of calling the ordinary
+// camera_look_at(). The confirmation modal and the actual
+// SDL_OpenURL() call live in src/sdl/ui_dialogs.cpp, which consumes the
+// request through the same one-way seam Task 5.1's ContextMenuRequest
+// already established -- see input.h.
+//
 // Escape-to-collapse, ADDITION -- not a port, viewport.c has no keyboard
 // handling in the 3D view at all: the SDL_EVENT_KEY_DOWN case below is
 // new, not a translation of any GDK_KEY_PRESS branch. Pressing Escape
@@ -62,7 +94,7 @@
 // checks IsPopupOpen() itself so this file's own action does not *also*
 // fire underneath that popup on the same keypress.
 //
-// Two more gates, added on review, cover what WantCaptureKeyboard/
+// Three more gates, added on review, cover what WantCaptureKeyboard/
 // IsPopupOpen() still miss:
 //
 //  - A right-click and this Escape landing in the *same*
@@ -78,6 +110,16 @@
 //    cancels it rather than falling through to the scene: a batched
 //    right-click+Escape should read the same as "open the menu, then
 //    immediately close it", not "open the menu AND collapse a node".
+//  - fsn-mode Task C3: a double-click-opens-a-file BUTTON_UP and this
+//    Escape landing in the same drain hit exactly the same gap, for
+//    exactly the same reason -- g_open_file_request is filled by the
+//    BUTTON_UP case below, and ui_dialogs.cpp's draw_open_file_confirm()
+//    doesn't call ImGui::OpenPopup() on it (which is what would finally
+//    make WantCaptureKeyboard true) until the *next* frame. Symmetric
+//    fix: this case also checks g_open_file_request.pending and cancels
+//    it rather than falling through to the scene -- a batched
+//    double-click+Escape should read as "the confirm almost opened,
+//    then got dismissed", not "open the file AND collapse a node".
 //  - Properties and Color Setup (src/sdl/ui_dialogs.cpp) are plain
 //    ImGui::Begin() windows, not popups or modals -- neither
 //    WantCaptureKeyboard nor IsPopupOpen() above ever sees them, even
@@ -196,6 +238,11 @@ static double g_hover_y = 0.0;
 // ones this file uses for picking -- see the fill site below.
 static ContextMenuRequest g_context_menu_request = { false, nullptr, 0.0f, 0.0f };
 
+// Open-file request seam (fsn-mode Task C3) -- see input.h. Written only
+// from the double-click branch below (FSV_FSN mode, an eligible
+// NodeType); read/cleared only by input_take_open_file_request().
+static OpenFileRequest g_open_file_request = { false, nullptr };
+
 // ---- Helpers ------------------------------------------------------------
 
 // Window-coordinate -> pixel-coordinate scale factor, the SDL/HiDPI
@@ -265,6 +312,50 @@ update_highlight(bool btn1_down)
 			geometry_highlight_node(NULL, FALSE);
 		window_statusbar(SB_RIGHT, node_absname_display(g_indicated_node));
 	}
+}
+
+// fsn-mode Task C3: which NodeTypes the double-click-opens-a-file
+// gesture applies to (see this file's header comment and
+// docs/PORTING.md's Task C3 section for the full security-stance
+// writeup). A regular file or a symlink both qualify: SDL_OpenURL()'s
+// backend (LaunchServices on macOS, xdg-open on Linux) resolves a
+// symlink's own path itself, exactly the way Finder double-clicking it
+// would, so this file never has to chase the target manually. Every
+// special-file type -- FIFO, socket, character or block device -- is
+// deliberately excluded: opening one of those has an effect a regular
+// file open does not (a FIFO open can block waiting for a reader/writer
+// that never shows up; a device node's "contents" are hardware, not
+// data to display), so those fall through to the ordinary
+// camera_look_at() below instead, a silent no-op as far as this feature
+// is concerned. NODE_DIRECTORY never reaches this function in practice
+// (the double-click-to-expand toggle above claims it first) and
+// NODE_METANODE is the invisible tree root's own parent, never a real
+// pick result -- both listed anyway so the switch stays exhaustive.
+// Written as a switch with every enumerator spelled out and no
+// `default:`, same discipline middle_drag_is_flight() below uses: a new
+// NodeType (src/common.h) then fails to compile here rather than
+// silently inheriting an answer.
+static bool
+node_open_eligible(NodeType type)
+{
+	switch (type) {
+	case NODE_REGFILE:
+	case NODE_SYMLINK:
+		return true;
+
+	case NODE_METANODE:
+	case NODE_DIRECTORY:
+	case NODE_FIFO:
+	case NODE_SOCKET:
+	case NODE_CHARDEV:
+	case NODE_BLOCKDEV:
+	case NODE_UNKNOWN:
+		return false;
+
+	case NUM_NODE_TYPES:
+		break; // sentinel value, never a real node's type
+	}
+	return false; // unreachable; keeps compilers without -Wswitch quiet
 }
 
 // Per-mode gesture dispatch -- the first in this file, and the pattern
@@ -444,6 +535,28 @@ input_handle_event(const SDL_Event *ev)
 			impatient_peek = node_at_cursor((int)x, (int)y);
 			if (impatient_peek != NULL && NODE_IS_DIR(impatient_peek))
 				impatient_reclick = false;
+			// fsn-mode Task C3: the same exemption, for the same
+			// reason, extended to an FSN double-click-opens-a-file
+			// target (node_open_eligible() below). Without this, a
+			// real physical double-click on a file would never reach
+			// the BUTTON_UP branch that opens it: this file's own
+			// click==1 BUTTON_UP already called camera_look_at() and
+			// restarted a full minimum-duration pan (this comment
+			// block's own note, a few lines up, on why that pan runs
+			// even for an already-current node) -- camera.c's
+			// FSN_CAMERA_MIN_PAN_TIME (0.5s) routinely outlasts a
+			// physical double-click's inter-click interval, exactly
+			// like every other mode's own minimum pan time already
+			// does, so camera_moving() would still read true at this
+			// second BUTTON_DOWN regardless of which file was
+			// clicked. Caught by tracing this function for real while
+			// verifying this task, not by inspection -- a synthetic
+			// double-click test with no inter-click delay would never
+			// have exposed it.
+			else if (impatient_peek != NULL &&
+			    globals.fsv_mode == FSV_FSN &&
+			    node_open_eligible(NODE_DESC(impatient_peek)->type))
+				impatient_reclick = false;
 		}
 
 		if (camera_moving()) {
@@ -559,7 +672,29 @@ input_handle_event(const SDL_Event *ev)
 			// NODE_IS_DIR()) -- a file or empty space under the
 			// second click falls through to the ordinary
 			// camera_look_at() below, unchanged.
-			if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node)) {
+			if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node) &&
+			    globals.fsv_mode == FSV_FSN) {
+				// fsn-mode Task C4: warp-lite -- see this file's header
+				// comment. dirtree_entry_expanded() is the same
+				// synchronous flag the toggle branch below reads
+				// (flipped the instant colexp() starts, not
+				// DIR_EXPANDED()'s deployment-animation progress); only
+				// a *collapsed* target gets auto-expanded here, so the
+				// deployment morph runs during the fly-in rather than
+				// snapping the box grid in ahead of it. An
+				// already-expanded target (the re-double-click case)
+				// skips straight to camera_warp_to() -- never
+				// colexp(COLLAPSE): upstream fsn's warp was not a
+				// toggle, and camera_warp_to() re-centering on a
+				// pedestal the camera is already at is a visible no-op,
+				// exactly the "smallest" re-double-click behavior the
+				// task brief asks for. Collapsing stays reachable via
+				// Escape, the context menu, or the panel's tree-row
+				// arrow.
+				if (!dirtree_entry_expanded(g_indicated_node))
+					colexp(g_indicated_node, COLEXP_EXPAND);
+				camera_warp_to(g_indicated_node);
+			} else if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node)) {
 				// Same single-level toggle ui_main.cpp's context menu
 				// (Expand/Collapse) and ui_panels.cpp's tree-row arrow
 				// click use: dirtree_entry_expanded() is the tree
@@ -567,11 +702,28 @@ input_handle_event(const SDL_Event *ev)
 				// colexp() starts), not DIR_EXPANDED()'s deployment-
 				// animation progress -- see ui_main.cpp's
 				// draw_context_menu() comment for why that distinction
-				// matters here too.
+				// matters here too. FSV_FSN is claimed by the warp-lite
+				// branch just above; every other mode reaches here.
 				if (dirtree_entry_expanded(g_indicated_node))
 					colexp(g_indicated_node, COLEXP_COLLAPSE_RECURSIVE);
 				else
 					colexp(g_indicated_node, COLEXP_EXPAND);
+			} else if (ev->button.clicks >= 2 &&
+			    globals.fsv_mode == FSV_FSN &&
+			    node_open_eligible(NODE_DESC(g_indicated_node)->type)) {
+				// fsn-mode Task C3 -- see this file's header comment and
+				// node_open_eligible() above. This click's own
+				// BUTTON_DOWN/BUTTON_UP pair at clicks==1 already ran
+				// the plain camera_look_at() branch below once (the
+				// first click of any double-click always does), so the
+				// camera is already there; this second release opens
+				// the file instead of re-flying to a target it already
+				// reached -- the same "skip the second fly" shape the
+				// directory-toggle branch just above already uses.
+				// ui_dialogs.cpp's draw_open_file_confirm() consumes
+				// this next frame (input_take_open_file_request()).
+				g_open_file_request.pending = true;
+				g_open_file_request.node = g_indicated_node;
 			} else {
 				camera_look_at(g_indicated_node);
 			}
@@ -779,6 +931,25 @@ input_handle_event(const SDL_Event *ev)
 			g_context_menu_request.node = nullptr;
 			break;
 		}
+		if (g_open_file_request.pending) {
+			// fsn-mode Task C3: the same same-drain race as
+			// g_context_menu_request just above, mirrored -- a
+			// double-click-opens-a-file BUTTON_UP and this Escape
+			// landed in the same event drain, before
+			// ui_dialogs.cpp's draw_open_file_confirm() ever got a
+			// frame to turn the request into a real (WantCaptureKeyboard-
+			// true) modal -- see the header comment above. Cancel the
+			// request instead of falling through to the scene: without
+			// this, the Escape would incorrectly collapse/step-out on
+			// the scene below, and the confirm modal would then still
+			// pop up on the very next frame regardless (input.cpp had
+			// already committed the request before this key event was
+			// even processed) -- exactly the unintended-collapse-plus-
+			// modal-anyway race this gate closes.
+			g_open_file_request.pending = false;
+			g_open_file_request.node = nullptr;
+			break;
+		}
 		if (ui_dialogs_handle_escape())
 			// Properties or Color Setup was open -- see the header
 			// comment above and ui_dialogs_handle_escape()'s own doc
@@ -900,6 +1071,14 @@ input_reset(void)
 	g_indicated_node = NULL;
 	g_context_menu_request.pending = false;
 	g_context_menu_request.node = nullptr;
+	// fsn-mode Task C3: same reasoning as g_context_menu_request just
+	// above -- a rescan is about to free the tree this points into, and
+	// a BUTTON_UP arriving after it (there shouldn't be one; belt and
+	// suspenders, same as the rest of this function) must not hand a
+	// freed GNode* to ui_dialogs.cpp's draw_open_file_confirm() on the
+	// next frame.
+	g_open_file_request.pending = false;
+	g_open_file_request.node = nullptr;
 	g_hover_pending = false;
 
 	// Drag/capture state. A scan blocks the main thread for as long as
@@ -935,5 +1114,13 @@ input_take_context_menu_request(void)
 {
 	ContextMenuRequest req = g_context_menu_request;
 	g_context_menu_request.pending = false;
+	return req;
+}
+
+OpenFileRequest
+input_take_open_file_request(void)
+{
+	OpenFileRequest req = g_open_file_request;
+	g_open_file_request.pending = false;
 	return req;
 }

@@ -38,6 +38,11 @@
 // here rather than silently relabeled, per the brief.
 #include "ui_rail.h"
 
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include <SDL3/SDL.h> /* SDL_Log() -- "Go" click, same convention as ui_overview.cpp's click-to-look-at */
 #include <imgui.h>
 
 #include "app.h"
@@ -46,6 +51,9 @@ extern "C" {
 #include "common.h"
 #include "camera.h"
 #include "color.h"
+#include "colexp.h" /* colexp(), COLEXP_EXPAND_ANY -- see draw_mark_row()'s "Go" */
+#include "dirtree.h" /* dirtree_entry_expanded() */
+#include "nvstore.h"
 #include "window.h"
 }
 
@@ -119,6 +127,247 @@ draw_scroll_slider(int axis, const char *label, bool enabled)
 		ImGui::SetTooltip("Only available in MapV/TreeV");
 	ImGui::EndGroup();
 	ImGui::PopID();
+}
+
+// ---- Marks (bookmarks) -----------------------------------------------
+//
+// fsn-mode Task C2. Upstream fsn's left-rail "Marks" list (task-C2-
+// brief.md's reference screenshot): named bookmarks of nodes in the
+// landscape, with "go to" and "delete" per row and a "Mark here" button
+// that bookmarks globals.current_node. A slight extension of the
+// original: shown in every mode, not FSN-only -- a mark is just a node
+// bookmark, and there's nothing FSN-specific about wanting to jump back
+// to a node from MapV or TreeV either.
+//
+// Persistence mirrors src/color.c's wpattern-group vector round trip
+// exactly (nvs_vector_begin/nvs_path_present/nvs_vector_end around a
+// repeated "mark" node, each holding scalar "name"/"path" children) --
+// see color_read_config()/color_write_config() for the pattern this
+// copies. Every mutation (add/delete/rename) rewrites the whole vector
+// immediately: there is no explicit "Save" step to wire up, unlike the
+// Color Setup dialog's Apply button, so a rewrite-on-every-change is the
+// simplest thing that is still always correct.
+//
+// Stores each mark's node as an absolute path STRING
+// (node_absname()'s raw-byte format), not a GNode pointer -- Task B1's
+// UAF notes are exactly why: a rescan or Change Root frees and rebuilds
+// the whole fstree, so a pointer captured before that would dangle.
+// Resolution back to a live GNode* happens at draw time (to grey out a
+// row whose path no longer exists) and at "go to" time, via
+// src/common.c's node_from_absname() -- cheap enough to redo every
+// frame for a handful of marks, and it sidesteps needing any dedicated
+// "invalidate marks on rescan" hook.
+namespace {
+
+struct Mark {
+	std::string name; // user label; defaults to the node's display name
+	std::string path; // node_absname() raw bytes -- see node_from_absname()
+};
+
+std::vector<Mark> g_marks;
+
+// Which row (by index into g_marks) is currently showing its inline
+// rename InputText, or -1 if none. Index-based rather than keyed by
+// path/pointer: simplest thing that works for "at most one row editing
+// at a time", and it's reset to -1 on every mutation that could move
+// indices around (delete) so it can never point at the wrong row.
+int g_editing_index = -1;
+char g_edit_buf[256];
+
+const char key_marks[] = "marks";
+const char key_marks_mark[] = "mark";
+const char key_marks_name[] = "name";
+const char key_marks_path[] = "path";
+
+// Full rewrite of the "marks" vector -- same shape as
+// color_write_config()'s ColorByWPattern section: change into the
+// vector's own path, delete whatever was there before, write every
+// entry inside a fresh nvs_vector_begin()/nvs_vector_end() pair.
+void
+marks_write_config(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+
+	nvs_change_path(fsvrc, key_marks);
+	nvs_delete_recursive(fsvrc, ".");
+
+	nvs_vector_begin(fsvrc);
+	for (const Mark &m : g_marks) {
+		nvs_change_path(fsvrc, key_marks_mark);
+		nvs_write_string(fsvrc, key_marks_name, m.name.c_str());
+		nvs_write_string(fsvrc, key_marks_path, m.path.c_str());
+		nvs_change_path(fsvrc, "..");
+	}
+	nvs_vector_end(fsvrc);
+
+	nvs_close(fsvrc);
+}
+
+// Loads the "marks" vector from ~/.fsvrc -- same shape as
+// color_read_config()'s ColorByWPattern section, including the
+// "nvs_vector_end() before leaving the vector's own path" step that
+// Task 5.3's fix round found missing there (a stray-open vector would
+// otherwise corrupt whatever nvstore key came right after this one).
+// Called once at startup (ui_marks_init(), before any filesystem has
+// been scanned), so this only ever populates strings -- no GNode
+// resolution happens here.
+void
+marks_read_config(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+
+	g_marks.clear();
+	nvs_change_path(fsvrc, key_marks);
+	nvs_vector_begin(fsvrc);
+	while (nvs_path_present(fsvrc, key_marks_mark)) {
+		nvs_change_path(fsvrc, key_marks_mark);
+
+		char *name = nvs_read_string_default(fsvrc, key_marks_name, "");
+		char *path = nvs_read_string_default(fsvrc, key_marks_path, "");
+		g_marks.push_back(Mark{ name, path });
+		free(name); /* !xfree -- nvstore.c's xstrdup is plain strdup */
+		free(path);
+
+		nvs_change_path(fsvrc, "..");
+	}
+	nvs_vector_end(fsvrc);
+
+	nvs_close(fsvrc);
+}
+
+// One "Marks" row: label (double-click to rename inline) + Go + Delete.
+// Returns true if the caller should erase this entry afterward (the
+// Delete button was clicked) -- deletion is deferred to the caller so
+// this function never mutates the vector it's being called *from* while
+// iterating it.
+bool
+draw_mark_row(int index, Mark &m, bool access_ok)
+{
+	bool delete_requested = false;
+
+	ImGui::PushID(index);
+
+	// Resolved fresh every frame -- see this section's file-header
+	// comment on why redoing this walk beats caching a pointer.
+	GNode *target = node_from_absname(m.path.c_str());
+	const bool resolved = (target != nullptr);
+
+	if (index == g_editing_index) {
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		ImGui::InputText("##rename", g_edit_buf, sizeof(g_edit_buf),
+		    ImGuiInputTextFlags_EnterReturnsTrue |
+		    ImGuiInputTextFlags_AutoSelectAll);
+		if (ImGui::IsItemDeactivated()) {
+			// Commits on Enter or on losing focus either way (both
+			// deactivate the item in the same frame); an empty edit
+			// (the field cleared to nothing) is discarded rather than
+			// leaving the mark unnamed. Does not trim/reject a
+			// whitespace-only edit -- that's a real (if odd) label a
+			// user could deliberately type, not worth guarding against.
+			if (g_edit_buf[0] != '\0')
+				m.name = g_edit_buf;
+			g_editing_index = -1;
+			marks_write_config();
+		}
+	} else {
+		if (resolved)
+			ImGui::TextUnformatted(m.name.c_str());
+		else
+			ImGui::TextDisabled("%s", m.name.c_str());
+		if (ImGui::IsItemHovered()) {
+			// Display form for a live node (UTF-8-safe, NFC-composed --
+			// same node_absname_display() distinction Task B-era code
+			// already draws for the status bar/context menu); the raw
+			// stored path for a missing one, since there's no live node
+			// left to ask for a display form of it.
+			if (resolved)
+				ImGui::SetTooltip("%s", node_absname_display(target));
+			else
+				ImGui::SetTooltip("Not found here: %s", m.path.c_str());
+		}
+		if (ImGui::IsItemHovered() &&
+		    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+			g_editing_index = index;
+			strncpy(g_edit_buf, m.name.c_str(), sizeof(g_edit_buf) - 1);
+			g_edit_buf[sizeof(g_edit_buf) - 1] = '\0';
+		}
+	}
+
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!resolved || !access_ok);
+	if (ImGui::SmallButton("Go")) {
+		// Port of ui_dialogs.cpp's "Look at target node" button: a
+		// resolved node can still sit under a collapsed directory (a
+		// mark made before a Change Root, or one nobody has expanded
+		// since), and camera_look_at_full() asserts that its immediate
+		// parent is already expanded -- discovered the hard way, by
+		// this exact assertion firing during this task's own headed
+		// verification, when going to a mark under a still-collapsed
+		// ancestor. COLEXP_EXPAND_ANY (colexp.c) walks the *whole*
+		// ancestor chain, not just the immediate parent, so this covers
+		// a mark buried several directories deep, not only one level.
+		if (NODE_IS_DIR(target->parent) &&
+		    !dirtree_entry_expanded(target->parent))
+			colexp(target->parent, COLEXP_EXPAND_ANY);
+		SDL_Log("marks: go to %s", node_absname_display(target));
+		camera_look_at(target);
+	}
+	ImGui::EndDisabled();
+
+	ImGui::SameLine();
+	if (ImGui::SmallButton("X"))
+		delete_requested = true;
+
+	ImGui::PopID();
+
+	return delete_requested;
+}
+
+// The "Marks" section itself: "Mark here" button, then one row per
+// bookmark. Joins the camera rail below its Tilt/Height sliders, per
+// the plan's Target File Structure -- called from ui_rail_draw() below,
+// not exposed separately (there is exactly one caller, same as
+// draw_scroll_slider() above).
+void
+draw_marks_section(bool access_ok, float btn_w)
+{
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Marks");
+
+	// Gated on having a current node, not on access_ok: bookmarking
+	// doesn't touch the camera, so there's no in-flight-morph reason to
+	// block it the way Reset/Go back/Front view are blocked above.
+	ImGui::BeginDisabled(globals.current_node == nullptr);
+	if (ImGui::Button("Mark here", ImVec2(btn_w, 0.0f))) {
+		Mark m;
+		m.path = node_absname(globals.current_node);
+		const char *dname = NODE_DNAME(globals.current_node);
+		m.name = (strlen(dname) > 0) ? dname : _("/. (root)");
+		g_marks.push_back(std::move(m));
+		marks_write_config();
+	}
+	ImGui::EndDisabled();
+
+	int mark_to_delete = -1;
+	for (int i = 0; i < (int)g_marks.size(); i++)
+		if (draw_mark_row(i, g_marks[i], access_ok))
+			mark_to_delete = i;
+
+	if (mark_to_delete >= 0) {
+		g_marks.erase(g_marks.begin() + mark_to_delete);
+		g_editing_index = -1; // indices just shifted; don't point at the wrong row
+		marks_write_config();
+	}
+}
+
+} // namespace
+
+void
+ui_marks_init(void)
+{
+	marks_read_config();
 }
 
 void
@@ -214,6 +463,8 @@ ui_rail_draw(void)
 
 	if (access_ok && !sliders_ok)
 		ImGui::TextDisabled("MapV/TreeV only");
+
+	draw_marks_section(access_ok, btn_w);
 
 	ImGui::End();
 }

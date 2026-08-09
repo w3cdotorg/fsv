@@ -396,6 +396,18 @@ node_named( const char *absname )
 			 * a slash or a terminating null) */
 			len = 0;
 		}
+		else if ((absname[len] != '/') && (absname[len] != '\0')) {
+			/* root_name is a byte-prefix of absname, but not at a
+			 * path-component boundary -- e.g. root "/data/project1"
+			 * against absname "/data/project10/README.txt". That is
+			 * NOT "absname is under this root", just two names that
+			 * happen to share a prefix, so treat it the same as no
+			 * match at all. (The len == 1 case above -- root_name is
+			 * exactly "/" -- needs no such check: a lone separator has
+			 * no "name" of its own to falsely prefix-match, and every
+			 * absolute path is genuinely under it.) */
+			return NULL;
+		}
                 /* Copy the rest of the string into working space */
 		absname_partial_copy = xstrdup( &absname[len] );
 	}
@@ -446,6 +458,33 @@ node_named( const char *absname )
 	xfree( absname_partial_copy );
 
 	return node;
+}
+
+
+/* fsn-mode Task C2: resolves an absolute node path -- in node_absname( )'s
+ * exact byte format -- back to the corresponding GNode in the *current*
+ * fstree, or NULL if there is none (a deleted node, or a path captured
+ * under a different Change Root than the one now loaded).
+ *
+ * The Marks panel (src/sdl/ui_rail.cpp) stores paths, not GNode pointers,
+ * precisely so a rescan or Change Root can't leave a stale pointer
+ * behind (see Task B1's UAF notes on why fsn geometry code is careful
+ * about the same thing); this is the other half of that round trip,
+ * called at "go to"/draw time rather than kept live.
+ *
+ * This is node_named( )'s exact contract under a new, purpose-named
+ * entry point. node_named( ) already walks the *whole* path component
+ * by component against the live root_dnode -- it is not a one-level
+ * lookup despite what its name alone might suggest; verified by reading
+ * it end to end before adding this wrapper rather than assumed. Kept as
+ * a separate name (instead of pointing marks straight at node_named( ))
+ * so the two call sites -- symlink-target resolution and mark
+ * resolution -- can each state their own intent, and so either one is
+ * free to diverge later without disturbing the other. */
+GNode *
+node_from_absname( const char *absname )
+{
+	return node_named( absname );
 }
 
 

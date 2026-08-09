@@ -128,4 +128,23 @@ void camera_flight_tick( void );
 boolean camera_flight_active( void );
 
 
+/**** fsn warp-lite (FSV_FSN only -- see camera.c, Task C4) ****
+ *
+ * Upstream fsn's directory "warp", scoped down: flies the camera onto
+ * `node`'s own pedestal, landing low and close over it (file boxes
+ * filling the frame) rather than the wide establishing shot
+ * camera_look_at( ) gives a directory. Shares camera_look_at_full( )'s
+ * hook pattern (ends a flight, breaks any pan in progress, disables
+ * access for the duration, pushes history) -- see its own doc comment --
+ * but takes no MorphType/pan_time_override: every caller wants the same
+ * MORPH_SIGMOID landing, so there is nothing for a caller to override.
+ *
+ * `node` must already be a directory with FSN geometry (fsn_layout_get( )
+ * returning non-NULL); the caller -- src/sdl/input.cpp's FSN-mode
+ * double-click branch -- is the only one, and it auto-expands a
+ * collapsed target *before* calling this, so the deployment morph runs
+ * during the fly-in rather than snapping in ahead of it. */
+void camera_warp_to( GNode *node );
+
+
 /* end camera.h */

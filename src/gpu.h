@@ -216,6 +216,32 @@ void gpu_set_line_width(float width);
  *   docs/PORTING.md's "fsn mode" section for why. */
 void gpu_set_landscape(int index);
 
+/**** Overview mini-map (fsn-mode Task C1) ****************/
+
+/* Non-zero only while the renderer is drawing the FSN overview window's
+ * picture-in-picture mini-map: a second, top-down orthographic render of
+ * the same scene into its own small offscreen texture (src/sdl/gpu.cpp's
+ * gpu_overview_render()), composited by ImGui.
+ *
+ * Exists so a draw can be *thinned out* at mini-map scale without the
+ * caller having to know anything about the overview. It is deliberately
+ * NOT a third FsvRenderMode value: the overview paints the scene's real
+ * colors, so every existing `gpu_render_mode() == FSV_RENDER_NORMAL`
+ * test (geometry.c's node_set_color(), geometry-fsn-draw.c's wires)
+ * must keep answering "normal" during it -- adding an enum member would
+ * silently flip all four of them to the select pass's id/black colors.
+ *
+ * Today's one consumer is the selection spotlight (geometry-fsn-draw.c),
+ * which is a soft alpha-blended glow several pedestals wide: legible in
+ * the main view, a shapeless smear across a 512x320 mini-map. Path text
+ * and node labels need no check here -- gpu_overview_render() draws with
+ * high_detail == FALSE, which already excludes them, exactly as
+ * gpu_pick() does.
+ *
+ *   GTK/OpenGL (src/ogl-gpu-compat.c): always 0. The overview window is
+ *   an ImGui/SDL_GPU feature with no GTK counterpart. */
+int gpu_overview_pass(void);
+
 /**** Camera matrices ****************/
 
 /* The renderer-agnostic counterpart of FsvGlState.projection /

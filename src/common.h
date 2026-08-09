@@ -317,6 +317,7 @@ const char *abbrev_size( int64 size );
 const char *node_absname( GNode *node );
 const char *node_absname_display( GNode *node );
 GNode *node_named( const char *absname );
+GNode *node_from_absname( const char *absname );
 const struct NodeInfo *get_node_info( GNode *node );
 const char *rgb2hex( RGBcolor *color );
 RGBcolor hex2rgb( const char *hex_color );

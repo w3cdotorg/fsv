@@ -63,6 +63,7 @@
 // to be included by hand. Changing CGLM_CLIP_CONTROL project-wide would
 // also silently retarget the still-OpenGL GTK frontend, which shares
 // cglm — hence the explicit per-call-site variant.
+#include <cglm/clipspace/ortho_rh_zo.h> /* overview mini-map, fsn-mode Task C1 */
 #include <cglm/clipspace/persp_rh_zo.h>
 
 #include <SDL3/SDL.h>
@@ -78,6 +79,7 @@ extern "C" {
 #include "common.h"
 #include "camera.h"
 #include "geometry.h" /* geometry_draw( ) -- see gpu_pick() */
+#include "geometry-fsn.h" /* fsn_layout_bounds( ) -- see gpu_overview_render() */
 #include "tmaptext.h" /* text_upload_mvp( ) -- see gpu_upload_matrices() */
 }
 
@@ -211,6 +213,47 @@ Uint32 g_capture_width, g_capture_height;
 // against -- letting a recorded frame composite scene + ImGui exactly
 // like a visible one does, with no second ImGui pipeline required.
 bool g_recording_frame;
+
+// fsn-mode Task C1: the overview mini-map's own offscreen target, plus
+// the top-down orthographic frame the last render used.
+//
+// The fourth offscreen render path in this file, and the only *cached*
+// one: gpu_pick(), --screenshot and --record each build a texture, use it
+// once and release it, because each runs at most once per user action or
+// per captured frame. The overview redraws whenever the camera moves and
+// is sampled by ImGui every frame, so its texture (and its own
+// swapchain-independent depth buffer -- ensure_depth_texture()'s single
+// cached texture is sized to the *window*, and making it flip-flop
+// between two sizes every frame would reallocate it twice a frame) lives
+// until gpu_shutdown().
+//
+// It is also the only one that does NOT go through g_capture_texture:
+// gpu_scene_begin()/gpu_scene_end() branch on g_overview_frame first (see
+// both), so an overview render leaves every byte of the capture state
+// alone. That is what lets it run inside a --record frame, which has its
+// own g_capture_texture in the swapchain's format and would otherwise
+// pick the wrong pipeline set for this R8G8B8A8 texture.
+SDL_GPUTexture *g_overview_texture;
+SDL_GPUTexture *g_overview_depth;
+Uint32 g_overview_width, g_overview_height;
+
+// True only between gpu_overview_render()'s gpu_scene_begin() and
+// gpu_scene_end() -- see gpu_overview_pass(), the read side geometry-fsn-
+// draw.c uses.
+bool g_overview_frame;
+
+// The world-space ground rectangle the last successful overview render
+// framed, and whether there has been one. src/sdl/ui_overview.cpp maps a
+// click inside the image back through this rectangle, so it has to be
+// the *same* numbers the render used, not a recomputation.
+double g_overview_x0, g_overview_x1, g_overview_y0, g_overview_y1;
+bool g_overview_framed;
+
+// The top-down camera's height and far plane for the render in progress,
+// computed by overview_frame_scene() and consumed by
+// setup_overview_matrices() one call later (from inside
+// gpu_scene_begin(), which takes no arguments).
+float g_overview_eye_height, g_overview_far_clip;
 
 // Where the scene pass is currently drawing, and which of pipeline_for()'s
 // two color-target formats that is.
@@ -1399,6 +1442,319 @@ draw_landscape(int index)
 	gpu_draw(FSV_TRIANGLES, ground_verts, 4, ground_idx, 6);
 }
 
+// ---- Overview mini-map (fsn-mode Task C1) ----------------------------
+//
+// A second render of the same FSN scene, from straight above, through an
+// orthographic projection framing the whole landscape, into a small
+// texture ImGui shows in a picture-in-picture window (src/sdl/
+// ui_overview.cpp). Reference: the "overview" window in the top-right of
+// 3060c037-069f-4715-a01e-c30e53e505a2.jpg.
+//
+// What is deliberately absent from it:
+//   - the landscape sky/ground (draw_landscape()): the sky is a stack of
+//     screen-space quads, which from a top-down camera would simply
+//     cover the entire mini-map, and the ground plane is replaced by the
+//     pass's own clear color -- one flat fill instead of a 100000-unit
+//     quad, and the same green either way (see the clear in
+//     gpu_scene_end()).
+//   - node labels and the path text: geometry_draw(FALSE), exactly as
+//     gpu_pick() does. Unreadable at this scale, and text_draw_straight()
+//     bills a per-glyph quad for each one.
+//   - the selection spotlight: skipped by geometry-fsn-draw.c itself, on
+//     gpu_overview_pass(). See the comment there.
+// What is present: pedestals, file boxes and wires -- the landscape's
+// actual shape, which is the whole point of a mini-map -- plus the
+// camera marker drawn below.
+
+namespace {
+
+// Grows the framed rectangle to the mini-map texture's aspect ratio,
+// centered, so the landscape is never anisotropically squashed. Only
+// ever grows: shrinking to fit would crop the landscape the caller just
+// asked to see whole.
+void
+overview_fit_aspect(double *x0, double *x1, double *y0, double *y1)
+{
+	const double aspect = (double)FSN_OVERVIEW_WIDTH /
+	    (double)FSN_OVERVIEW_HEIGHT;
+	const double w = *x1 - *x0, h = *y1 - *y0;
+
+	if (w < h * aspect) {
+		const double cx = 0.5 * (*x0 + *x1), half = 0.5 * h * aspect;
+		*x0 = cx - half;
+		*x1 = cx + half;
+	} else {
+		const double cy = 0.5 * (*y0 + *y1), half = 0.5 * w / aspect;
+		*y0 = cy - half;
+		*y1 = cy + half;
+	}
+}
+
+// Works out the ground rectangle and the camera height for this render,
+// into g_overview_*. False means there is nothing to frame (no FSN
+// layout), in which case nothing is drawn at all and the previous
+// mini-map stays on screen.
+//
+// The landscape's own bounding box is what gets framed -- NOT the box
+// extended to include the camera. The camera in FSN sits well behind and
+// above its target, so folding its position in would rescale the whole
+// mini-map continuously through every flight, which is precisely the
+// "stable map, moving marker" relationship a mini-map exists to provide.
+// The marker is clamped into the frame instead (see
+// draw_overview_marker()), so it stays visible even when the camera is
+// genuinely outside the landscape.
+bool
+overview_frame_scene(void)
+{
+	double x0, x1, y0, y1, height, margin;
+
+	if (fsn_layout_root() == nullptr)
+		return false;
+
+	fsn_layout_bounds(&x0, &x1, &y0, &y1);
+	fsn_layout_extents(nullptr, nullptr, &height);
+	if (!(x1 > x0) || !(y1 > y0))
+		return false; // degenerate layout (should not happen: every
+			      // pedestal has a real footprint)
+
+	margin = FSN_OVERVIEW_MARGIN * MAX(x1 - x0, y1 - y0);
+	x0 -= margin;
+	x1 += margin;
+	y0 -= margin;
+	y1 += margin;
+	overview_fit_aspect(&x0, &x1, &y0, &y1);
+
+	g_overview_x0 = x0;
+	g_overview_x1 = x1;
+	g_overview_y0 = y0;
+	g_overview_y1 = y1;
+
+	// Straight above the tallest thing in the scene, looking down. An
+	// orthographic projection makes the exact height irrelevant to what
+	// the image looks like; all it has to do is keep every object
+	// strictly between the near and far planes.
+	g_overview_eye_height = (float)(height + FSN_OVERVIEW_HEADROOM);
+	g_overview_far_clip = g_overview_eye_height +
+	    (float)FSN_OVERVIEW_HEADROOM;
+	return true;
+}
+
+} // namespace
+
+// The top-down view matrix and orthographic projection for the rectangle
+// overview_frame_scene() last computed. Called by gpu_scene_begin() in
+// place of setup_projection_matrix()/setup_modelview_matrix().
+//
+// The view is a pure translation: with world +z up (see
+// g_base_modelview), a camera at (cx, cy, H) looking straight down has
+// eye axes that coincide with the world's -- right = +x, up = +y,
+// backwards = +z -- so its rotation is the identity, and world +y ends up
+// as "up" on the mini-map. Worth spelling out because the obvious
+// alternative (mapping eye z to -world z) is a reflection: it would flip
+// every triangle's winding and back-face cull the entire scene away.
+static void
+setup_overview_matrices(void)
+{
+	const float cx = (float)(0.5 * (g_overview_x0 + g_overview_x1));
+	const float cy = (float)(0.5 * (g_overview_y0 + g_overview_y1));
+	const float half_w = (float)(0.5 * (g_overview_x1 - g_overview_x0));
+	const float half_h = (float)(0.5 * (g_overview_y1 - g_overview_y0));
+	vec3 eye = { -cx, -cy, -g_overview_eye_height };
+
+	// Near clip well above the geometry: everything drawn lives between
+	// world z = 0 and eye_height - FSN_OVERVIEW_HEADROOM, i.e. eye z in
+	// [-eye_height, -FSN_OVERVIEW_HEADROOM].
+	glm_ortho_rh_zo(-half_w, half_w, -half_h, half_h, 1.0f,
+	    g_overview_far_clip, gpu_mat.projection);
+
+	glm_mat4_identity(gpu_mat.modelview);
+	glm_translate(gpu_mat.modelview, eye);
+}
+
+// The camera marker: a flat arrowhead on the ground at the camera's own
+// ground position, pointing the way it is looking.
+//
+// Position and heading come from the live camera the same way
+// setup_modelview_matrix()'s FSV_FSN/FSV_MAPV case reads them (FSN reuses
+// MapV's camera storage -- see camera.c's FSN_CAMERA_* note). Solving
+// that same transform for the eye point gives
+//
+//   camera = target + distance * (cos(phi)cos(theta),
+//                                 cos(phi)sin(theta), sin(phi))
+//
+// so the camera stands at that ground offset from its target and looks
+// back along -(cos(theta), sin(theta)) -- which is the arrow's direction.
+//
+// Drawn with the depth test off (FSV_DEPTH_ALWAYS_NOWRITE) so a pedestal
+// the camera happens to be standing over cannot hide it, and after
+// geometry_draw() so it also paints over anything already there.
+static void
+draw_overview_marker(void)
+{
+	const double theta = RAD(camera->theta);
+	// Ground-projected forward direction: from the camera towards its
+	// target (see above).
+	const double fx = -cos(theta), fy = -sin(theta);
+	// Left-hand perpendicular, for the two base corners.
+	const double lx = -fy, ly = fx;
+
+	const double size = FSN_OVERVIEW_MARKER_FRAC *
+	    0.5 * (g_overview_x1 - g_overview_x0);
+
+	double cx = MAPV_CAMERA(camera)->target.x +
+	    camera->distance * cos(RAD(camera->phi)) * cos(theta);
+	double cy = MAPV_CAMERA(camera)->target.y +
+	    camera->distance * cos(RAD(camera->phi)) * sin(theta);
+
+	// Clamped into the framed rectangle (inset by the marker's own size,
+	// so it is never half off the edge): a camera pulled far back sits
+	// outside the landscape it is looking at, and a marker that silently
+	// vanished off the edge would read as "the overview is broken"
+	// rather than "you are standing outside the tree".
+	cx = CLAMP(cx, g_overview_x0 + size, g_overview_x1 - size);
+	cy = CLAMP(cy, g_overview_y0 + size, g_overview_y1 - size);
+
+	// Counter-clockwise seen from above (the direction this pass views
+	// it from), matching pipeline_for()'s front-face winding.
+	const float z = 0.0f;
+	const FsvVertex verts[3] = {
+		{ { (float)(cx + fx * size), (float)(cy + fy * size), z },
+		  { 0.f, 0.f, 1.f } },
+		{ { (float)(cx - fx * size * 0.6 + lx * size * 0.6),
+		    (float)(cy - fy * size * 0.6 + ly * size * 0.6), z },
+		  { 0.f, 0.f, 1.f } },
+		{ { (float)(cx - fx * size * 0.6 - lx * size * 0.6),
+		    (float)(cy - fy * size * 0.6 - ly * size * 0.6), z },
+		  { 0.f, 0.f, 1.f } },
+	};
+
+	gpu_set_depth_test(FSV_DEPTH_ALWAYS_NOWRITE);
+	gpu_set_lighting(0);
+	gpu_set_color(FSN_OVERVIEW_MARKER_R, FSN_OVERVIEW_MARKER_G,
+	    FSN_OVERVIEW_MARKER_B, 1.0f);
+	gpu_draw(FSV_TRIANGLES, verts, 3, nullptr, 0);
+	gpu_set_depth_test(FSV_DEPTH_LESS);
+}
+
+// Creates the mini-map texture and its depth buffer on first use. Both
+// are fixed-size (FSN_OVERVIEW_WIDTH/HEIGHT, see fsn-style.h), so this is
+// a one-time cost.
+static bool
+ensure_overview_targets(void)
+{
+	if (g_overview_texture != nullptr && g_overview_depth != nullptr)
+		return true;
+
+	SDL_GPUTextureCreateInfo info = {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	// Same format as gpu_pick()/--screenshot's targets, so this reuses
+	// pipeline_for()'s existing target-index-1 pipelines rather than
+	// adding a third color-target format. SAMPLER on top of
+	// COLOR_TARGET: ImGui's backend binds this texture to its fragment
+	// shader (imgui_impl_sdlgpu3.cpp's SDL_BindGPUFragmentSamplers()).
+	info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+	    SDL_GPU_TEXTUREUSAGE_SAMPLER;
+	info.width = FSN_OVERVIEW_WIDTH;
+	info.height = FSN_OVERVIEW_HEIGHT;
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+	if (g_overview_texture == nullptr) {
+		g_overview_texture = SDL_CreateGPUTexture(g_device, &info);
+		if (g_overview_texture == nullptr) {
+			SDL_Log("gpu: overview texture creation failed: %s",
+			    SDL_GetError());
+			return false;
+		}
+	}
+
+	SDL_GPUTextureCreateInfo depth_info = {};
+	depth_info.type = SDL_GPU_TEXTURETYPE_2D;
+	depth_info.format = g_depth_format;
+	depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+	depth_info.width = FSN_OVERVIEW_WIDTH;
+	depth_info.height = FSN_OVERVIEW_HEIGHT;
+	depth_info.layer_count_or_depth = 1;
+	depth_info.num_levels = 1;
+	depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+	g_overview_depth = SDL_CreateGPUTexture(g_device, &depth_info);
+	if (g_overview_depth == nullptr) {
+		SDL_Log("gpu: overview depth texture creation failed: %s",
+		    SDL_GetError());
+		return false;
+	}
+
+	g_overview_width = FSN_OVERVIEW_WIDTH;
+	g_overview_height = FSN_OVERVIEW_HEIGHT;
+	return true;
+}
+
+int
+gpu_overview_pass(void)
+{
+	return g_overview_frame ? 1 : 0;
+}
+
+bool
+gpu_overview_render(void)
+{
+	// Runs inside the caller's frame, on the frame's own command buffer
+	// and *before* the visible scene pass, so that ImGui's later pass in
+	// that same buffer samples a texture this frame already filled. It
+	// is therefore not like gpu_pick(), which owns its command buffer
+	// precisely because it runs outside any frame -- this one requires
+	// one to be open, and refuses to start a second scene inside the
+	// first (g_recording).
+	if (!g_ready || g_cmd == nullptr || g_recording)
+		return false;
+	if (globals.fsv_mode != FSV_FSN)
+		return false;
+	if (!overview_frame_scene())
+		return false;
+	if (!ensure_overview_targets())
+		return false;
+
+	// gpu_scene_begin() reads this flag three times: to pick this
+	// texture as the color target, to build the top-down matrices
+	// instead of the live camera's, and to skip the landscape.
+	g_overview_frame = true;
+	gpu_scene_begin();
+	if (!g_recording) {
+		g_overview_frame = false;
+		return false; // gpu_scene_begin() declined the frame
+	}
+	// FALSE: no labels, no path text -- see this section's header.
+	geometry_draw(FALSE);
+	draw_overview_marker();
+	gpu_scene_end();
+	g_overview_frame = false;
+
+	g_overview_framed = true;
+	return true;
+}
+
+SDL_GPUTexture *
+gpu_overview_texture(void)
+{
+	return g_overview_framed ? g_overview_texture : nullptr;
+}
+
+void
+gpu_overview_frame_rect(double *x0, double *x1, double *y0, double *y1)
+{
+	if (x0 != nullptr)
+		*x0 = g_overview_x0;
+	if (x1 != nullptr)
+		*x1 = g_overview_x1;
+	if (y0 != nullptr)
+		*y0 = g_overview_y0;
+	if (y1 != nullptr)
+		*y1 = g_overview_y1;
+}
+
 void
 gpu_init(void *sdl_window)
 {
@@ -1557,6 +1913,18 @@ gpu_shutdown(void)
 	g_text_vertex_capacity = g_text_index_capacity =
 	    g_text_transfer_capacity = 0;
 
+	// fsn-mode Task C1: the overview mini-map's cached targets (the only
+	// offscreen textures in this file that outlive their own render --
+	// see their declaration).
+	if (g_overview_texture != nullptr)
+		SDL_ReleaseGPUTexture(g_device, g_overview_texture);
+	if (g_overview_depth != nullptr)
+		SDL_ReleaseGPUTexture(g_device, g_overview_depth);
+	g_overview_texture = nullptr;
+	g_overview_depth = nullptr;
+	g_overview_width = g_overview_height = 0;
+	g_overview_framed = false;
+
 	g_ready = false;
 
 	SDL_ReleaseWindowFromGPUDevice(g_device, g_window);
@@ -1615,18 +1983,35 @@ gpu_frame_end(void)
 void
 gpu_scene_begin(void)
 {
-	g_color_target = g_capture_texture != nullptr ? g_capture_texture
-						      : g_swapchain;
-	g_target_index = g_capture_texture == nullptr ? 0
-	    : g_recording_frame ? 0 /* matches swapchain format -- see g_recording_frame */
-	                         : 1;
+	// fsn-mode Task C1's overview mini-map is checked first and does not
+	// consult g_capture_texture at all: a --record frame has one of its
+	// own (in the swapchain's format, target index 0), and an overview
+	// render nested inside such a frame must still go to its own
+	// R8G8B8A8 texture with the matching pipelines. See the
+	// g_overview_texture declaration.
+	if (g_overview_frame) {
+		g_color_target = g_overview_texture;
+		g_target_index = 1; // R8G8B8A8, as for pick/--screenshot
+	} else {
+		g_color_target = g_capture_texture != nullptr ? g_capture_texture
+							      : g_swapchain;
+		g_target_index = g_capture_texture == nullptr ? 0
+		    : g_recording_frame ? 0 /* matches swapchain format -- see g_recording_frame */
+					 : 1;
+	}
 	if (g_cmd == nullptr || g_color_target == nullptr || !g_ready)
 		return;
 
 	// Same three calls the GTK frontend's render() made per frame
-	// (src/ogl.c:432).
-	setup_projection_matrix();
-	setup_modelview_matrix();
+	// (src/ogl.c:432) -- except for the overview, which frames the whole
+	// landscape from straight above instead of following the live camera
+	// (setup_overview_matrices(), fsn-mode Task C1).
+	if (g_overview_frame)
+		setup_overview_matrices();
+	else {
+		setup_projection_matrix();
+		setup_modelview_matrix();
+	}
 	gpu_upload_matrices();
 
 	// Reset per-frame draw state. The vectors keep their capacity, so
@@ -1648,7 +2033,12 @@ gpu_scene_begin(void)
 	// pass is excluded: the sky and ground must not be pickable (a click
 	// on empty sky has to resolve to node id 0, matching an empty
 	// background today), and neither one paints an id color at all.
-	if (g_render_mode == FSV_RENDER_NORMAL)
+	//
+	// The overview pass skips it too (fsn-mode Task C1): the sky is a
+	// stack of screen-space quads, which under a top-down camera would
+	// cover the mini-map completely, and its ground plane is replaced by
+	// the pass's clear color -- see gpu_scene_end().
+	if (g_render_mode == FSV_RENDER_NORMAL && !g_overview_frame)
 		draw_landscape(g_landscape_index);
 }
 
@@ -1718,14 +2108,34 @@ gpu_scene_end(void)
 	// slate's non-zero bytes would otherwise read back as a bogus id
 	// for e.g. a click on empty sky. gpu_pick() sets g_render_mode
 	// before this call and restores it right after.
+	//
+	// The overview mini-map (fsn-mode Task C1) is the other exception:
+	// its clear IS its ground. A top-down camera sees nothing of the sky
+	// and nothing of the ground plane except its color, so
+	// draw_landscape() is skipped for it entirely (see gpu_scene_begin())
+	// and the ground arrives here instead, as one flat fill. The palette
+	// is pinned to the "night" preset rather than following the Display
+	// menu: that is what this task's reference screenshot's inset shows
+	// (a flat green field), and night's ground is the same green as
+	// classic's -- only its sky, which the overview never shows, differs.
+	const FsnLandscape &overview_land =
+	    fsn_landscapes[FSN_LANDSCAPE_NIGHT];
 	color_target.clear_color = g_render_mode == FSV_RENDER_SELECT
 	    ? SDL_FColor{ 0.0f, 0.0f, 0.0f, 0.0f }
+	    : g_overview_frame
+	    ? SDL_FColor{ overview_land.ground[0], overview_land.ground[1],
+			  overview_land.ground[2], 1.0f }
 	    : SDL_FColor{ 0.08f, 0.10f, 0.12f, 1.0f };
 	color_target.load_op = SDL_GPU_LOADOP_CLEAR;
 	color_target.store_op = SDL_GPU_STOREOP_STORE;
 
 	SDL_GPUDepthStencilTargetInfo depth_target = {};
-	depth_target.texture = g_depth_texture;
+	// The overview renders at its own fixed resolution, so it carries
+	// its own depth buffer: SDL_GPU requires every attachment in a pass
+	// to be the same size, and ensure_depth_texture()'s single cached
+	// texture is sized to the window.
+	depth_target.texture = g_overview_frame ? g_overview_depth
+						: g_depth_texture;
 	depth_target.clear_depth = 1.0f;
 	depth_target.load_op = SDL_GPU_LOADOP_CLEAR;
 	// Nothing samples the depth buffer after the pass.

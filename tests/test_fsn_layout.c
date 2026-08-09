@@ -20,7 +20,24 @@
  *      FSN_DIR_SPAN measuring pass and the FSN_SIBLING_GAP slicing in the
  *      placement pass) and the reason tests/fixture carries two sibling
  *      directories, dir-a and dir-c, rather than one;
- *   6. file boxes stand inside their directory's pedestal top face.
+ *   6. file boxes stand inside their directory's pedestal top face;
+ *   7. fsn_layout_bounds( ) (Task C1) reports the same ground box as
+ *      fsn_layout_extents( ), encloses every pedestal, and is NOT
+ *      origin-centered -- the property a consumer framing the landscape
+ *      would otherwise get wrong;
+ *   8. fsn_layout_nearest( ) (Task C1) maps a ground point to the
+ *      pedestal it belongs to, including from outside the landscape.
+ *   9. node_from_absname( ) (Task C2, src/common.c) is the exact inverse
+ *      of node_absname( ): round-tripping every fixture node through
+ *      node_absname( ) -> node_from_absname( ) returns the same GNode,
+ *      and a path that doesn't exist in the tree resolves to NULL. This
+ *      is what the Marks panel's persisted paths rely on to survive a
+ *      relaunch.
+ *  10. node_from_absname( )/node_named( ) require a real path-component
+ *      boundary right after the root's own prefix, not just a byte
+ *      prefix match -- a root "/data/project1" must not accept
+ *      "/data/project10/README.txt" as one of its own. Code review
+ *      fix round (2026-08-09).
  *
  * LINKING. src/geometry-fsn.c is gpu-free by construction and therefore
  * part of libfsvcore, so this links exactly like test_scanfs -- core
@@ -97,6 +114,45 @@ on_footprint_edge(const FsnPedestal *p, double x, double y, int outward)
 		return 0;
 
 	return (x >= p->x - 0.5 * p->w - TOL) && (x <= p->x + 0.5 * p->w + TOL);
+}
+
+
+/* Asserts that every pedestal footprint in the subtree lies inside the
+ * ground-plane box fsn_layout_bounds( ) reports (invariant 7). Files are
+ * skipped: their boxes stand on a pedestal top, whose own footprint
+ * already encloses them (invariant 6 above). */
+static void
+check_inside_bounds(GNode *dnode, double min_x, double max_x, double min_y,
+		    double max_y)
+{
+	const FsnPedestal *p = fsn_layout_get(dnode);
+	GNode *node;
+
+	assert(p != NULL);
+	assert((p->x - 0.5 * p->w) >= min_x - TOL);
+	assert((p->x + 0.5 * p->w) <= max_x + TOL);
+	assert((p->z - 0.5 * p->d) >= min_y - TOL);
+	assert((p->z + 0.5 * p->d) <= max_y + TOL);
+
+	for (node = dnode->children; node != NULL; node = node->next)
+		if (NODE_IS_DIR(node))
+			check_inside_bounds(node, min_x, max_x, min_y, max_y);
+}
+
+
+/* Marks every directory in the subtree fully deployed (== expanded).
+ * The layout itself is deployment-independent, so this changes nothing
+ * about where anything sits -- it only makes the whole tree "drawn", for
+ * the visibility-aware fsn_layout_nearest( ) check. */
+static void
+expand_all(GNode *dnode)
+{
+	GNode *node;
+
+	DIR_NODE_DESC(dnode)->deployment = 1.0;
+	for (node = dnode->children; node != NULL; node = node->next)
+		if (NODE_IS_DIR(node))
+			expand_all(node);
 }
 
 
@@ -187,6 +243,45 @@ main(void)
 	file1 = child_named(root, "file1.txt");
 	assert(file1 != NULL && !NODE_IS_DIR(file1));
 
+	/* 9. node_from_absname( ) round-trips node_absname( ) for every kind
+	 * of fixture node -- root, a directory nested two deep, a sibling
+	 * directory, and a plain file -- and returns NULL for a path that
+	 * was never in the tree to begin with. node_absname( ) reuses one
+	 * static buffer per call, so each name is xstrdup( )'d immediately,
+	 * before the next node_absname( ) call overwrites it. */
+	{
+		GNode *nodes[] = { root, dir_a, dir_b, dir_c, file1 };
+		size_t i;
+
+		for (i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+			char *absname = xstrdup(node_absname(nodes[i]));
+			assert(node_from_absname(absname) == nodes[i]);
+			xfree(absname);
+		}
+
+		assert(node_from_absname("/no/such/path/at/all") == NULL);
+	}
+
+	/* 10. Byte-prefix-but-no-boundary: paste "dir-a/file2.bin" (a real
+	 * path under the root) directly onto the root's own absname with NO
+	 * separator in between. The resulting string byte-prefixes the
+	 * root's absname exactly (root_name is a prefix of it), but does not
+	 * land on a path-component boundary right after that prefix -- the
+	 * character there is 'd' (from "dir-a"), not '/' or '\0'. Before the
+	 * boundary check, node_named( ) stripped the root prefix regardless
+	 * and matched the *leftover* bytes ("dir-a/file2.bin") against the
+	 * real tree, resolving to dir-a's actual file2.bin -- a wrong node,
+	 * not even NULL. This is the same class of mistake a root
+	 * "/data/project1" vs a sibling "/data/project10/..." would make. */
+	{
+		char *root_abs2 = xstrdup(node_absname(root));
+		char bogus[512];
+
+		snprintf(bogus, sizeof(bogus), "%sdir-a/file2.bin", root_abs2);
+		assert(node_from_absname(bogus) == NULL);
+		xfree(root_abs2);
+	}
+
 	/* No layout yet */
 	assert(fsn_layout_get(root) == NULL);
 
@@ -251,8 +346,85 @@ main(void)
 	assert(depth >= (p_b->z + 0.5 * p_b->d) - (p_root->z - 0.5 * p_root->d));
 	assert(height >= p_root->h);
 
+	/* 7. fsn_layout_bounds( ) (Task C1) is the same box as the extents,
+	 * in absolute world coordinates. Three things are checked, because
+	 * only the first is implied by the extents alone:
+	 *   - the two agree (max - min == extent) on both ground axes;
+	 *   - the box really encloses the landscape -- every pedestal
+	 *     footprint in the tree lies inside it (walked below);
+	 *   - it is NOT origin-centered. The root pedestal sits at (0,0) and
+	 *     the tree grows towards +y only, so min_y is the root's own near
+	 *     edge (negative, half a pedestal deep) while max_y is far past
+	 *     it: a consumer that assumed a centered box and used the extents
+	 *     as half-widths would frame the wrong half of the landscape,
+	 *     which is exactly the bug this accessor exists to prevent. */
+	{
+		double min_x, max_x, min_y, max_y;
+
+		fsn_layout_bounds(&min_x, &max_x, &min_y, &max_y);
+		assert(fabs((max_x - min_x) - width) < TOL);
+		assert(fabs((max_y - min_y) - depth) < TOL);
+
+		assert(fabs(min_y - (p_root->z - 0.5 * p_root->d)) < TOL);
+		assert(max_y > 0.0);
+		assert(max_y > -min_y); /* strongly off-center towards +y */
+
+		check_inside_bounds(root, min_x, max_x, min_y, max_y);
+	}
+
+	/* 8. fsn_layout_nearest( ) (Task C1) resolves a ground point to the
+	 * pedestal a user clicking there meant. Checked at each pedestal's
+	 * own center (must return that pedestal, not merely "some" one) and
+	 * at a point far outside the landscape on dir-c's side, which has to
+	 * fall back to the nearest pedestal rather than to NULL.
+	 *
+	 * Deployment first: the search deliberately stops at a collapsed
+	 * directory, because the draw pass does (see fsn_nearest_recursive(
+	 * )). fsn_geometry_init( ) took every directory's deployment from
+	 * dirtree_entry_expanded( ), which is a FALSE-returning no-op in the
+	 * headless stubs -- so the whole fixture starts out collapsed and
+	 * nothing below the root would be reachable. Expanding it here is
+	 * what makes the assertions below test the walk rather than that
+	 * stub; the collapsed case gets its own check right after. */
+	expand_all(root);
+	assert(fsn_layout_nearest(p_root->x, p_root->z) == root);
+	assert(fsn_layout_nearest(p_a->x, p_a->z) == dir_a);
+	assert(fsn_layout_nearest(p_b->x, p_b->z) == dir_b);
+	assert(fsn_layout_nearest(p_c->x, p_c->z) == dir_c);
+
+	/* A collapsed directory hides its subdirectories from the search
+	 * exactly as it hides them from the screen: dir-b's own center now
+	 * resolves to dir-a, the deepest pedestal still drawn on that
+	 * branch. (dir-a is genuinely the nearest survivor here -- it is
+	 * dir-b's parent, one generation back along the same +y branch.) */
+	DIR_NODE_DESC(dir_a)->deployment = 0.0;
+	assert(fsn_layout_nearest(p_b->x, p_b->z) == dir_a);
+	DIR_NODE_DESC(dir_a)->deployment = 1.0;
+	assert(fsn_layout_nearest(p_b->x, p_b->z) == dir_b);
+
+	{
+		/* Straight out from dir-c, a long way past everything: still
+		 * dir-c, because distance is measured to pedestal centers and
+		 * nothing else is closer along that ray. */
+		const double far_x = p_c->x + 100.0 * (p_c->x - p_root->x);
+		GNode *near = fsn_layout_nearest(far_x, p_c->z);
+
+		assert(near != NULL);
+		assert(near == dir_c);
+	}
+
 	fsn_geometry_free();
 	assert(fsn_layout_get(root) == NULL);
+
+	/* No layout, no answers -- same convention as fsn_layout_get( ) */
+	assert(fsn_layout_nearest(0.0, 0.0) == NULL);
+	{
+		double min_x, max_x, min_y, max_y;
+
+		fsn_layout_bounds(&min_x, &max_x, &min_y, &max_y);
+		assert(min_x == 0.0 && max_x == 0.0);
+		assert(min_y == 0.0 && max_y == 0.0);
+	}
 
 	return 0;
 }
