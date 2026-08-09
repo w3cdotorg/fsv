@@ -282,6 +282,45 @@ static const FsnAgeBucket fsn_age_buckets[FSN_AGE_BUCKET_COUNT] = {
 #define FSN_WIRE_B 1.0f
 #define FSN_WIRE_WIDTH 1.0f
 
+/**** Warp-lite: directory double-click fly-in (fsn-mode Task C4, src/camera.c) ****/
+
+/* Upstream fsn's "warp": double-clicking a directory pedestal drops the
+ * camera down onto it, landing low and close so the file-box grid fills
+ * the view, rather than the wide establishing shot fsn_look_at( ) (an
+ * ordinary single click) frames the whole pedestal with. Same low-pitch
+ * language as camera.c's FSN_CAMERA_PHI -- its own comment cites the same
+ * reference screenshot -- just aimed tight at one pedestal instead of the
+ * whole landscape. No Search panel, no true in-directory paradigm: YAGNI,
+ * out of scope for this task (see the task brief). */
+
+/* Camera elevation for the landing pose. Higher than camera.c's own
+ * FSN_CAMERA_PHI (15 degrees, that function's grazing establishing-shot
+ * pitch): a low elevation here put the camera *between* two rows of
+ * file boxes, staring down a canyon of box side-walls rather than across
+ * their tops (confirmed empirically -- a first pass at 8 degrees, with
+ * the target sitting at the bare pedestal surface, produced exactly
+ * that canyon). This -- together with FSN_WARP_HEIGHT_LIFT below -- is
+ * what clears the camera over the box canopy instead of threading it
+ * through the aisle between two rows. */
+#define FSN_WARP_PHI           18.0
+
+/* World units the look-at target is raised above the pedestal's own top
+ * (FsnPedestal::h) -- aiming at roughly file-box height instead of the
+ * bare pedestal surface the boxes stand on. Between FSN_BOX_H_MIN (16)
+ * and FSN_BOX_H_MAX (320): a fixed guess at "typical" box height, not a
+ * per-box lookup (this function has no per-child geometry, only the
+ * parent pedestal's own FsnPedestal -- see fsn_warp_pose( )). */
+#define FSN_WARP_HEIGHT_LIFT  110.0
+
+/* How much of the pedestal's own footprint (MAX(w, d)) the frame is
+ * sized to fit, vs. fsn_look_at( )'s SQRT_2 * MAX(w, d) which frames the
+ * *whole* footprint (and, for an expanded directory, the next
+ * generation's wires too). Under 1.0 so the near boxes fill the view
+ * instead of the pedestal being seen whole from a diagonal, but not so
+ * tight that the elevated camera above ends up past the near edge of
+ * the box grid it is supposed to be looking across. */
+#define FSN_WARP_DIAMETER_FRAC  0.22
+
 /**** Flight navigation (fsn-mode Task B2, src/camera.c) ****/
 
 /* fsn's signature gesture: hold the middle button and the pointer's

@@ -111,6 +111,7 @@ draw_controls_window(bool *open)
 				{ "Left click (press)", "Select node under cursor" },
 				{ "Left click (release)", "Fly camera to selected node" },
 				{ "Double-click a directory", "Toggle expand/collapse (addition -- see docs/PORTING.md)" },
+				{ "Double-click a directory (FSN mode)", "\"Warp-lite\": auto-expand + fly onto its pedestal, close and low (re-click re-centers, never collapses -- see docs/PORTING.md)" },
 				{ "Double-click a file (FSN mode)", "Open with the system default app (first use asks; Always allow persists)" },
 				{ "Right click", "Context menu for node under cursor" },
 				{ "Escape", "Collapse current directory, or step out and collapse its parent (addition -- see docs/PORTING.md)" },

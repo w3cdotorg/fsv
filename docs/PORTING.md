@@ -5449,6 +5449,270 @@ here, stated exactly: the call path executes and the URL is correct;
 whether a window visibly opens on a real, interactive desktop session
 is not something this sandbox can independently confirm.
 
+### Task C4 verification (warp-lite fly-in — Milestone C complete)
+
+**What changed.** FSN mode's directory double-click stops being the
+plain expand/collapse toggle every other mode still uses. Upstream
+fsn's own "warp" flew the camera down onto a clicked pedestal; the
+toggle (added post-port, Task 4.1-era, before FSN mode existed) never
+distinguished the two. Now: FSV_FSN's double-click branch auto-expands
+a *collapsed* target (`colexp(COLEXP_EXPAND)`, letting the deployment
+morph run *during* the fly-in — the pedestal's box grid rises while the
+camera is still travelling toward it) and calls a new
+`camera_warp_to()` instead of `camera_look_at()`. An *already-expanded*
+target — including one already warped into — never collapses on a
+second double-click: warp was never a toggle upstream either, so the
+branch simply has no collapse call in it at all, and a re-click just
+re-centers (a visible no-op if the camera is already there). Collapsing
+an FSN directory stays reachable via Escape, the context menu, or the
+panel's tree-row arrow — this task narrows one gesture, not the whole
+feature set. Every other mode's double-click is untouched: the
+pre-existing toggle code is preserved verbatim, gated behind an
+`else if` that only fires when the FSN branch's own
+`globals.fsv_mode == FSV_FSN` guard is false.
+
+**Files.** `src/camera.c`/`.h` (`camera_warp_to()`, `fsn_warp_pose()`,
+and the `camera_pan_begin()`/`camera_pan_commit()` prologue/epilogue
+factored out of `camera_look_at_full()` so the two share it rather than
+duplicating it); `src/fsn-style.h` (`FSN_WARP_PHI`,
+`FSN_WARP_HEIGHT_LIFT`, `FSN_WARP_DIAMETER_FRAC`); `src/sdl/input.cpp`
+(the FSN-only branch in `BUTTON_UP`, and its header comment).
+
+**The refactor camera_warp_to( ) needed first.** `camera_look_at_full()`
+already has the exact hook pattern a warp needs — end a flight, drop
+into bird's-eye view if active, save scroll state, break any pan in
+progress, then (after the pose is computed) arm the master pan morph
+and update history/current-node bookkeeping. Duplicating that ~25-line
+prologue/epilogue for one more entry point is exactly the kind of
+copy-shaped state this codebase's other tasks have refactored away
+(B2's `cancel_pan_for_manual_control()`, the C1/C2 accessor-not-copy
+pattern) — so it is now two static helpers,
+`camera_pan_begin()`/`camera_pan_commit()`, and
+`camera_look_at_full()` and `camera_warp_to()` both call them.
+`camera_warp_to()` has no per-mode switch the way
+`camera_look_at_full()` does: it is FSN-only by construction (the only
+caller is gated on `globals.fsv_mode == FSV_FSN`), so
+`fsn_warp_pose()` — shaped exactly like the pre-existing `fsn_look_at()`
+— stands in for the switch's one live arm. `camera_warp_to()` also
+takes no `MorphType`/`pan_time_override`: every caller wants the same
+`MORPH_SIGMOID` landing, so unlike `camera_look_at()`'s thin wrapper
+around `camera_look_at_full()`, there is nothing for a caller to
+override, and no need to require `animation.h` (which
+`camera_look_at_full()`'s declaration is `#ifdef`-gated on) at the
+call site in `input.cpp`.
+
+**The landing pose.** `fsn_warp_pose()` reads the same `FsnPedestal` as
+`fsn_look_at()` (`fsn_layout_get()`) and computes the same spherical
+`target + distance · (θ, φ)` camera position, but framed tight on the
+one pedestal instead of the whole landscape:
+
+- **Target**: the pedestal's own center (`x`, `z`), raised
+  `FSN_WARP_HEIGHT_LIFT` (110 units) above its top (`h`) — aiming at
+  roughly file-box height rather than the bare pedestal surface
+  underneath them. `fsn_warp_pose()` has no per-child geometry, only
+  the parent `FsnPedestal`, so this is a fixed guess at "typical" box
+  height (between `FSN_BOX_H_MIN` 16 and `FSN_BOX_H_MAX` 320), not a
+  per-box lookup.
+- **Elevation** (`FSN_WARP_PHI`, 18°): higher than `camera.c`'s own
+  `FSN_CAMERA_PHI` (15°, that constant's grazing establishing-shot
+  pitch for the whole-landscape overview). A first pass tried 8°
+  with an *unraised* target and produced, confirmed by screenshot, a
+  camera standing in the aisle between two rows of boxes staring down
+  a canyon of their side walls — the opposite of "file boxes fill the
+  view". Raising both the target (above) and the elevation together is
+  what clears the camera over the box canopy instead of threading it
+  between two rows.
+- **Distance** (`FSN_WARP_DIAMETER_FRAC`, 0.22 of the pedestal's own
+  `MAX(w, d)`, vs. `fsn_look_at()`'s `SQRT_2 · MAX(w, d)` framing the
+  *whole* footprint): close enough that a handful of boxes dominate the
+  frame with real perspective, the way the reference screenshot (cited
+  by `FSN_CAMERA_PHI`'s own comment, and again below) shows a handful
+  of large near boxes and two more pedestals with converging wires
+  receding into the distance.
+- **Pan time and theta unwrap**: identical formulas to `fsn_look_at()`
+  — travel-proportional duration (`FSN_CAMERA_MIN/MAX_PAN_TIME`), and
+  `unwrap_theta_toward()` before arming the morph (the B2 lesson: theta
+  is an angle, `morph()` interpolates a number, so a viewer parked just
+  past the wrap point must have theta shifted by a whole turn first or
+  the pan spins 267° the long way instead of turning ~90° the short
+  one).
+
+**Verification.**
+
+1. **Both arms build clean.** SDL/macOS native (`ninja -C builddir-sdl`)
+   and the `fsvbuild` Debian bookworm container's GTK arm
+   (`ninja -C builddir-gtk`) — `camera.c`/`.h` and `fsn-style.h` are
+   shared core, `input.cpp` is SDL-only. `meson test`: **4/4 on both**
+   (nvstore, scanfs, fsn_layout, color_persistence) — no new
+   `libfsvcore` surface (the warp pose lives in `camera.c`, which links
+   into every existing test binary unchanged), so no new unit test.
+2. **Headed, real end-to-end verification**, same convention as Tasks
+   B2/C3: a temporary, env-var-gated harness (`FSV_C4_VERIFY`) added to
+   `src/sdl/main.cpp`, pushing real `SDL_Event`s through
+   `ImGui_ImplSDL3_ProcessEvent()` + `input_handle_event()` — the exact
+   pair the real event loop calls — fully removed before the commit
+   (`git diff`/`git status` on `main.cpp` after removal show **zero net
+   change** to that file). Run against this repo's own `src/` tree
+   (`fsv src --fsn`), targeting `root_dnode` itself (always
+   front-and-center in FSN's intro framing, sidestepping having to hunt
+   for a child pedestal's exact screen position):
+   - **Auto-expand + swoop**: root force-collapsed
+     (`dirtree_entry_expanded()` 1→0), then a real double-click (two
+     manually click-numbered press/release pairs, one push per
+     animation tick — see the next point) at the pedestal's screen
+     position: `expanded` flips 0→1 *before* the pan even finishes
+     (`dirtree_entry_expanded()` flips synchronously the instant
+     `colexp()` starts, confirmed mid-pan), and the camera lands at
+     `theta=270 phi=18 dist=147.8` — `FSN_WARP_PHI`, and a travel
+     distance an order of magnitude tighter than the ~950–2369 unit
+     distances the plain establishing shot uses for the same tree.
+     Screenshot pair `c4_before.png`/`c4_after.png` (task's
+     `screenshots/` directory): the before frame is the familiar
+     head-on collapsed-root view (root's own file boxes, modest,
+     `src` labeled on the ground); the after frame is a close, elevated
+     view with a handful of large file boxes filling most of the frame
+     and two child pedestals with converging wires visible in the
+     distance — read directly and compared against the task's
+     reference image (`35037135976_0d90f4a3d5_z.jpg`): both show the
+     same "standing among the files" composition — sky band at the
+     top, a grid of boxes filling most of the lower frame, wires
+     converging toward pedestals further back. Not pixel-identical
+     (different tree, different box count) but the same camera language.
+   - **A genuine harness bug, caught and fixed before it could produce
+     a false negative**: pushing all four button events of a
+     double-click in one `SDL_PushEvent()` burst made the *second*
+     click's own `BUTTON_UP` see a stale `camera_moving() == true` and
+     silently no-op — not a bug in this task's code, but in
+     `camera_pan_finish()`'s own documented contract.
+     `morph_finish()` (`animation.c`) only sets `Morph::t_end` to 0.0;
+     it does not synchronously clear `camera_currently_moving`, which
+     only happens on the *next* `fsv_animation_tick()`. A real physical
+     double-click always has several ticks between its own press and
+     release (even a fast one), so this never surfaces outside a
+     zero-delay synthetic harness — but a zero-delay burst reproduces
+     it every time. Fixed in the harness (one button event pushed per
+     animation tick, matching a real click's own timing shape), not in
+     production code, since production code has no such burst path.
+   - **Re-double-click, deliberately mid-pan (rapid re-click, the
+     "warped in" case)**: a second double-click fired one tick after
+     the first, while the first's own pan was still in flight
+     (`impatient_reclick`'s dir exemption — pre-existing, verified
+     still applies unconditionally on `NODE_IS_DIR()`, unmodified by
+     this task — is what lets the second click's `BUTTON_DOWN` pick
+     instead of being discarded as "impatient user"). Result:
+     `expanded` stays **1** throughout (`0→1→1`, never back to 0) and
+     `current_node` never changes — no collapse, exactly the "state
+     chosen behavior" the brief asks for. `camera_pan_break()` inside
+     `camera_pan_begin()` cleanly cancels the first warp's just-armed
+     morphs and re-arms fresh ones to the same destination — the same
+     "second click while a pan is already running" pattern the rest of
+     this codebase already relies on (B2's flight-during-a-pan, the
+     ordinary ordinary-second-click-on-a-file case), not a new race.
+   - **Escape still collapses**: with the pedestal warped into and
+     expanded, a real `Escape` key event collapses it
+     (`dirtree_entry_expanded()` 1→0) — the toggle-adjacent behaviors
+     this task deliberately left alone (Escape/context-menu/panel
+     collapse) are all still live.
+   - **Flight interrupted by a warp, then the swoop lands cleanly**: a
+     real middle-button press + forward-drag starts a flight
+     (`camera_flight_active()` reads 1), then a double-click on the
+     (freshly re-collapsed, via the Escape step above) target fires
+     *while the middle button is still held*. Result:
+     `camera_flight_active()` reads **0** after the middle button is
+     released and the pan settles, and `expanded` reads **1** — the
+     flight ended (via `camera_pan_begin()`'s `camera_flight_end()`,
+     the same hook `camera_look_at_full()` already relies on for this)
+     and the auto-expand + swoop ran to completion, not a partial or
+     corrupted state. No new pending seam is introduced by warp (it is
+     a direct, synchronous camera call from `input.cpp`, unlike the
+     C3-era `g_open_file_request`/`g_context_menu_request` structs), so
+     there is no new same-drain Esc race to guard — confirmed by
+     inspection: `camera_warp_to()` takes effect within the same event
+     that calls it, with nothing deferred to a later frame for Escape
+     to race against.
+   - **Wrapped theta, short arc**: rather than fly a real yaw to the
+     wrap point (B2's own, slower, verification), `camera->theta` was
+     poked directly to 3.0 and `camera_warp_to()` called directly (the
+     exact same production entry point `input.cpp` calls, just without
+     the picking layer in between — picking was unusable for this one
+     check, see the next bullet) targeting the already-expanded,
+     already-current root. Result: `camera->theta` reads **363.0**
+     immediately after the call returns — `unwrap_theta_toward()`
+     shifted it by a whole turn *in place*, synchronously, before
+     arming the morph — and `|363 − 270| = 93 ≤ 180`, the short arc,
+     matching B2's own fix-round verification pattern for
+     `fsn_look_at()` exactly (this is the same fix, exercised in the
+     new function it also needed).
+   - **A second harness-methodology bug, caught by tracing rather than
+     assumed**: the *first* attempt at the wrapped-theta check used a
+     simulated click at the pedestal's *pre-warp* screen position — but
+     by that point in the script the camera had already warped in
+     close, and that same screen pixel now landed on one of the
+     pedestal's own *file*-box children instead of the pedestal itself
+     (exactly the "boxes fill the view" effect this task built,
+     working as intended). The resulting double-click hit Task C3's
+     file-open path instead of a re-warp, and the file-open confirm
+     modal it opened then stayed open and captured
+     (`io.WantCaptureMouse`) every subsequent synthetic click for the
+     rest of the script, silently invalidating the MapV-regression
+     check that ran after it. Diagnosed by adding, then removing,
+     temporary `SDL_Log()` probes in `input.cpp`'s `BUTTON_DOWN`/
+     `BUTTON_UP` cases (`io.WantCaptureMouse`, the resolved node, and
+     `camera_moving()`) — confirmed no trace of those probes remains
+     (`git diff`/`git status` clean on `input.cpp` beyond this task's
+     real change). Fixed by calling `camera_warp_to()` directly for
+     this one check instead of through a simulated click, as above.
+   - **MapV regression**: mode-switched to `FSV_MAPV`. The double-click
+     branch this task changed is unconditionally FSN-only
+     (`&& globals.fsv_mode == FSV_FSN`); every other mode falls to the
+     pre-existing `else if (NODE_IS_DIR(...))` toggle, byte-identical
+     to the code before this task. The harness's own synthetic click at
+     the same fixed screen pixel landed on a MapV-mode file box rather
+     than the root node in that mode's different (stacked, top-down)
+     layout — a pre-existing picking-target-precision limitation of a
+     fixed-pixel synthetic click, not a code path this task touches —
+     so this regression is verified primarily by the code diff itself
+     (one added `&&` condition gates the new branch; the toggle branch
+     below it is untouched) rather than a clean empirical re-run;
+     disclosed rather than glossed over.
+   - **FSN file double-click (Task C3) regression**: mode-switched back
+     to FSN, centered on an actual file sibling of root
+     (`geometry.c`), real double-click. `input_take_open_file_request()`
+     reads `pending == 1` — the file-open path is untouched and still
+     fires for files, confirming the new dir-only branch's placement
+     (ahead of, and mutually exclusive with, the pre-existing file-open
+     `else if`) doesn't shadow it.
+3. **Idle CPU unchanged.** `camera_warp_to()` and `fsn_warp_pose()` run
+   only synchronously inside `input_handle_event()`'s `BUTTON_UP` case,
+   adding no per-tick main-loop cost the way B2's flight tracking did
+   (`camera_flight_tick()`) — there is nothing new for an idle frame to
+   pay for. Measured anyway: process CPU time over a 10 s idle window
+   in FSN mode, this branch's binary, **0.07 s** — consistent with
+   B2's own idle baseline (0.11–0.12 s) and B2's explanation of where
+   that number comes from (the animation subsystem's own per-tick cost,
+   unrelated to this task).
+
+**Concerns / disclosed gaps.**
+
+- **`FSN_WARP_HEIGHT_LIFT` is a fixed guess**, not a per-directory
+  computation from its children's actual box heights — `fsn_warp_pose()`
+  only has the parent `FsnPedestal`, and a real per-child lookup would
+  need a second, more invasive geometry-accessor addition for a purely
+  cosmetic gain. Tuned by iterating three real screenshots against the
+  task's reference image rather than picked once and trusted.
+- **The MapV regression check** (above) is verified by code diff, not
+  a clean empirical click-through, due to a synthetic-harness picking
+  limitation in that mode's layout at the one fixed pixel this
+  harness used — disclosed rather than re-run indefinitely to chase a
+  harness-only precision issue on a code path this task does not
+  modify.
+- **No Search panel, no true in-directory paradigm** — explicitly out
+  of scope per the task brief (YAGNI). Warp-lite is a camera pose and
+  an auto-expand, nothing more; upstream fsn's full warp UI state is
+  not ported.
+
+Not pushed, per the global constraints.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`
@@ -5550,3 +5814,8 @@ code is kept.
 | 2026-08-09 | fsn-mode Task C3: `open_files_allowed` is a `ui_dialogs.cpp`-local static with its own `ui_dialogs_init()`, not a new `color.h` accessor alongside `landscape_explicit()` | nothing outside this file — not even the GTK arm, which has no equivalent gesture — ever needs to ask it |
 | 2026-08-09 | fsn-mode Task C3 fix round: `g_open_file_request.pending` gets its own same-drain-Esc guard in `input.cpp`, placed immediately after `g_context_menu_request.pending`'s existing one, rather than a generic "any pending request" check | keeps each guard's own comment specific to the request it cancels (matches the file's existing one-guard-per-seam style) and avoids a shared helper for exactly two call sites |
 | 2026-08-09 | fsn-mode Task C3 fix round: documented the `g_filename_to_uri()` NULL-path fixture as *empirically unconstructible on macOS/APFS* (kernel-level filename validation rejects the byte sequence outright), rather than mocking the function to force it | a mock would test the mock, not the real code; the actual constraint is the platform's, confirmed by trying it directly (`touch $'bad\xffname.txt'` → "Illegal byte sequence"), not assumed |
+| 2026-08-09 | fsn-mode Task C4: FSN's directory double-click never collapses (no `colexp(COLLAPSE)` call anywhere in the branch), rather than tracking "is the camera currently warped into this node" as a flag and gating collapse on it | upstream fsn's warp was never a toggle in the first place; the branch structure itself (auto-expand-if-collapsed, then always `camera_warp_to()`, no collapse arm) makes "re-double-click never collapses" true by construction with no runtime state to get out of sync, the smallest option the task brief itself offered |
+| 2026-08-09 | fsn-mode Task C4: factored `camera_look_at_full()`'s prologue/epilogue into `camera_pan_begin()`/`camera_pan_commit()` so `camera_warp_to()` could share them, rather than duplicating ~25 lines (flight-end, access-disable, birdseye-off, scroll-save, pan-break; master-morph-arm, history-push, current-node/manual-control bookkeeping) | the "hook pattern" the task brief asked warp to mirror is exactly this prologue/epilogue; two functions with the same shape and no shared body is the kind of copy this codebase's other tasks (B2's `cancel_pan_for_manual_control()`, C1/C2's accessor-over-copy) have already refactored away rather than repeated |
+| 2026-08-09 | fsn-mode Task C4: `camera_warp_to()` takes no `MorphType`/`pan_time_override` (unlike `camera_look_at_full()`) | its one caller (`input.cpp`'s FSN double-click branch) always wants the same `MORPH_SIGMOID` landing; a parameter nothing ever varies is dead surface, and dropping it means `camera.h`'s declaration needs no `#ifdef FSV_ANIMATION_H` guard the way `camera_look_at_full()`'s does |
+| 2026-08-09 | fsn-mode Task C4: the warp's look-at target is the pedestal top raised by a fixed `FSN_WARP_HEIGHT_LIFT`, not the bare pedestal surface (`ped->h` alone) | confirmed by screenshot: an unraised target at a low elevation put the camera in the aisle between two rows of file boxes, staring down a canyon of their side walls — the opposite of the "file boxes fill the view" the task asked for; raising the aim point together with the elevation is what clears the camera over the box canopy |
+| 2026-08-09 | fsn-mode Task C4: the wrapped-theta short-arc check calls `camera_warp_to()` directly rather than through a simulated double-click | by the time that check runs in the verification script, the camera has already warped in close, so a click at the pre-warp screen position lands on one of the pedestal's own file-box children (the very effect this task built) rather than the pedestal itself — confirmed the hard way when an earlier pass's stray click there opened Task C3's file-open confirm modal and silently blocked every later synthetic click in the same script via `io.WantCaptureMouse` |

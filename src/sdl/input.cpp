@@ -29,6 +29,19 @@
 // under the second click keeps the ordinary camera_look_at() -- the
 // gate only fires for a directory node.
 //
+// FSV_FSN mode, ADDITION on top of the addition -- fsn-mode Task C4,
+// "warp-lite": the toggle above is *not* what a directory double-click
+// does in FSN. Upstream fsn's own double-click ("warp") flies the camera
+// down onto the pedestal and was never a toggle, so this mode's branch
+// auto-expands a collapsed target (colexp(COLEXP_EXPAND), letting the
+// deployment morph run *during* the fly-in) and calls camera_warp_to()
+// instead of camera_look_at() -- but never collapses on a second
+// double-click of an already-expanded pedestal (camera_warp_to() just
+// re-centers on it, which is a visible no-op if the camera is already
+// there). Collapsing an FSN directory stays reachable via Escape, the
+// context menu, or the panel's tree-row arrow -- see docs/PORTING.md's
+// Task C4 section. Every other mode keeps the toggle above, unchanged.
+//
 // Double-click-opens-a-file, ADDITION -- not a port, fsn-mode Task C3:
 // upstream fsn's original "execute or view a file" gesture, ported as
 // "hand it to the system's default opener" rather than a literal exec()
@@ -659,7 +672,29 @@ input_handle_event(const SDL_Event *ev)
 			// NODE_IS_DIR()) -- a file or empty space under the
 			// second click falls through to the ordinary
 			// camera_look_at() below, unchanged.
-			if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node)) {
+			if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node) &&
+			    globals.fsv_mode == FSV_FSN) {
+				// fsn-mode Task C4: warp-lite -- see this file's header
+				// comment. dirtree_entry_expanded() is the same
+				// synchronous flag the toggle branch below reads
+				// (flipped the instant colexp() starts, not
+				// DIR_EXPANDED()'s deployment-animation progress); only
+				// a *collapsed* target gets auto-expanded here, so the
+				// deployment morph runs during the fly-in rather than
+				// snapping the box grid in ahead of it. An
+				// already-expanded target (the re-double-click case)
+				// skips straight to camera_warp_to() -- never
+				// colexp(COLLAPSE): upstream fsn's warp was not a
+				// toggle, and camera_warp_to() re-centering on a
+				// pedestal the camera is already at is a visible no-op,
+				// exactly the "smallest" re-double-click behavior the
+				// task brief asks for. Collapsing stays reachable via
+				// Escape, the context menu, or the panel's tree-row
+				// arrow.
+				if (!dirtree_entry_expanded(g_indicated_node))
+					colexp(g_indicated_node, COLEXP_EXPAND);
+				camera_warp_to(g_indicated_node);
+			} else if (ev->button.clicks >= 2 && NODE_IS_DIR(g_indicated_node)) {
 				// Same single-level toggle ui_main.cpp's context menu
 				// (Expand/Collapse) and ui_panels.cpp's tree-row arrow
 				// click use: dirtree_entry_expanded() is the tree
@@ -667,7 +702,8 @@ input_handle_event(const SDL_Event *ev)
 				// colexp() starts), not DIR_EXPANDED()'s deployment-
 				// animation progress -- see ui_main.cpp's
 				// draw_context_menu() comment for why that distinction
-				// matters here too.
+				// matters here too. FSV_FSN is claimed by the warp-lite
+				// branch just above; every other mode reaches here.
 				if (dirtree_entry_expanded(g_indicated_node))
 					colexp(g_indicated_node, COLEXP_COLLAPSE_RECURSIVE);
 				else

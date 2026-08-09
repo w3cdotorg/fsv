@@ -1452,28 +1452,17 @@ pan_end_cb( Morph *morph )
 }
 
 
-/* Points the camera at the given node, using the specified motion
- * morph type and (optionally, if value is nonnegative) the specified
- * pan duration */
-void
-camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
+/* Shared prologue for any full camera re-pose -- camera_look_at_full( )
+ * and, fsn-mode Task C4, camera_warp_to( ) both start here. Claims the
+ * camera away from whatever was driving it before this call. */
+static void
+camera_pan_begin( void )
 {
-	double pan_time = 0.0;
-	GNode *prev_node = NULL;
-	boolean backtracking = FALSE;
-
-#ifdef DEBUG
-	/* Parent directory of target node must be expanded
-	 * (or at least be expanding) */
-	if (NODE_IS_DIR(node->parent))
-		g_assert( dirtree_entry_expanded( node->parent ) );
-#endif
-
 	/* An automatic pan and a flight are two things driving the same
 	 * camera variables. The pan wins here, because the user asked for
-	 * it (a click on a pedestal, a tree row, Go Back...) with the same
-	 * hands that would otherwise be flying -- the reverse case, a
-	 * flight started during a pan, is camera_flight_begin( )'s. */
+	 * it (a click on a pedestal, a tree row, Go Back, a warp...) with
+	 * the same hands that would otherwise be flying -- the reverse
+	 * case, a flight started during a pan, is camera_flight_begin( )'s. */
 	camera_flight_end( );
 
 	/* Temporarily disable part of the user interface */
@@ -1491,26 +1480,19 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 
 	/* Halt any ongoing camera pan */
 	camera_pan_break( );
+}
 
-	switch (globals.fsv_mode) {
-		case FSV_DISCV:
-		pan_time = discv_look_at( node, mtype, pan_time_override );
-		break;
 
-		case FSV_MAPV:
-		pan_time = mapv_look_at( node, mtype, pan_time_override );
-		break;
-
-		case FSV_TREEV:
-		pan_time = treev_look_at( node, mtype, pan_time_override );
-		break;
-
-		case FSV_FSN:
-		pan_time = fsn_look_at( node, mtype, pan_time_override );
-		break;
-
-		SWITCH_FAIL
-	}
+/* Shared epilogue, paired with camera_pan_begin( ) above: arms the
+ * master pan morph and updates history/current-node bookkeeping. `node`
+ * is the destination (becomes globals.current_node and the master
+ * morph's end-callback data); `pan_time` is whatever the per-mode (or,
+ * for camera_warp_to( ), the one fsn-only) pose function returned. */
+static void
+camera_pan_commit( GNode *node, double pan_time )
+{
+	GNode *prev_node = NULL;
+	boolean backtracking = FALSE;
 
 	/* Master morph */
 	camera->pan_part = 0.0;
@@ -1538,11 +1520,176 @@ camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
 }
 
 
+/* Points the camera at the given node, using the specified motion
+ * morph type and (optionally, if value is nonnegative) the specified
+ * pan duration */
+void
+camera_look_at_full( GNode *node, MorphType mtype, double pan_time_override )
+{
+	double pan_time = 0.0;
+
+#ifdef DEBUG
+	/* Parent directory of target node must be expanded
+	 * (or at least be expanding) */
+	if (NODE_IS_DIR(node->parent))
+		g_assert( dirtree_entry_expanded( node->parent ) );
+#endif
+
+	camera_pan_begin( );
+
+	switch (globals.fsv_mode) {
+		case FSV_DISCV:
+		pan_time = discv_look_at( node, mtype, pan_time_override );
+		break;
+
+		case FSV_MAPV:
+		pan_time = mapv_look_at( node, mtype, pan_time_override );
+		break;
+
+		case FSV_TREEV:
+		pan_time = treev_look_at( node, mtype, pan_time_override );
+		break;
+
+		case FSV_FSN:
+		pan_time = fsn_look_at( node, mtype, pan_time_override );
+		break;
+
+		SWITCH_FAIL
+	}
+
+	camera_pan_commit( node, pan_time );
+}
+
+
 /* This calls camera_look_at_full( ) with default arguments */
 void
 camera_look_at( GNode *node )
 {
 	camera_look_at_full( node, MORPH_SIGMOID, -1.0 );
+}
+
+
+/* Helper function for camera_warp_to( ), fsn-mode Task C4.
+ *
+ * Shaped exactly like fsn_look_at( ) (this file, above) -- same
+ * spherical position math (target + distance * (theta, phi) offset),
+ * same near/far clip ratios, same travel-based pan-time formula, same
+ * shortest-arc theta unwrap -- but framed to land low and close over
+ * `node`'s own pedestal instead of taking in the whole landscape (an
+ * ordinary look-at's job). See the FSN_WARP_* note in fsn-style.h. */
+static double
+fsn_warp_pose( GNode *node, MorphType mtype, double pan_time_override )
+{
+	MapVCamera new_mcam;
+	Camera *new_cam;
+	const FsnPedestal *ped;
+	XYZvec camera_pos, new_cam_pos, delta;
+	XYZvec ext;
+	double diameter, pan_time, k;
+
+	new_cam = CAMERA(&new_mcam);
+
+	ped = fsn_layout_get( node );
+	if (ped == NULL) {
+		/* Same defensive fallback as fsn_look_at( ): should not
+		 * happen (FSV_FSN lays out the whole tree), but a pedestal-
+		 * less warp target has nowhere to land. Stay put. */
+		return FSN_CAMERA_MIN_PAN_TIME;
+	}
+
+	/* Target point: the pedestal's own top, raised by
+	 * FSN_WARP_HEIGHT_LIFT -- aiming at roughly file-box height rather
+	 * than the bare pedestal surface underneath them. Confirmed by an
+	 * earlier pass's own screenshot: a target sitting exactly at the
+	 * pedestal surface put the camera in the aisle *between* two rows
+	 * of boxes, looking down a canyon of their side walls instead of
+	 * across their tops. */
+	MAPV_CAMERA(new_cam)->target.x = ped->x;
+	MAPV_CAMERA(new_cam)->target.y = ped->z;
+	MAPV_CAMERA(new_cam)->target.z = ped->h + FSN_WARP_HEIGHT_LIFT;
+
+	/* Same heading as every other FSN pose: the camera always faces
+	 * deeper into the tree, warp included. */
+	new_cam->theta = FSN_CAMERA_THETA;
+	new_cam->phi = FSN_WARP_PHI;
+
+	/* Framed to a *fraction* of the pedestal's own footprint (see
+	 * fsn-style.h's FSN_WARP_DIAMETER_FRAC), not the whole thing --
+	 * that is what makes the file-box grid fill the view instead of
+	 * being seen whole from a diagonal, the "swoop" fsn_look_at( )'s
+	 * plain establishing shot does not give. */
+	diameter = FSN_WARP_DIAMETER_FRAC * MAX(ped->w, ped->d);
+	new_cam->distance = field_distance( camera->fov, MAX(1.0, diameter) );
+	new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
+	new_cam->far_clip = FAR_TO_NEAR_RATIO * new_cam->near_clip;
+
+	/* Duration: fsn_look_at( )'s own travel-proportional formula,
+	 * unchanged -- a warp can be a short hop (already looking at this
+	 * pedestal, re-double-clicked) or a long one (from clear across the
+	 * landscape), and both should keep feeling like the same gesture. */
+	if (pan_time_override > 0.0)
+		pan_time = pan_time_override;
+	else {
+		mapv_get_camera_position( camera, &camera_pos );
+		mapv_get_camera_position( new_cam, &new_cam_pos );
+		delta.x = new_cam_pos.x - camera_pos.x;
+		delta.y = new_cam_pos.y - camera_pos.y;
+		delta.z = new_cam_pos.z - camera_pos.z;
+
+		fsn_layout_extents( &ext.x, &ext.y, NULL );
+		k = sqrt( XYZ_LEN(delta) / MAX(1.0, hypot( ext.x, ext.y )) );
+		pan_time = MAX(FSN_CAMERA_MIN_PAN_TIME,
+		    MIN(1.0, k) * FSN_CAMERA_MAX_PAN_TIME);
+	}
+
+	/* fsn-mode Task B2 lesson: theta is an angle, morph( ) is not
+	 * angle-aware, so a viewer parked just past the wrap point would
+	 * otherwise spin the long way round to FSN_CAMERA_THETA. */
+	unwrap_theta_toward( new_cam->theta );
+
+	morph( &camera->theta, mtype, new_cam->theta, pan_time );
+	morph( &camera->phi, mtype, new_cam->phi, pan_time );
+	morph( &camera->distance, mtype, new_cam->distance, pan_time );
+	morph( &camera->near_clip, mtype, new_cam->near_clip, pan_time );
+	morph( &camera->far_clip, mtype, new_cam->far_clip, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.x, mtype, MAPV_CAMERA(new_cam)->target.x, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.y, mtype, MAPV_CAMERA(new_cam)->target.y, pan_time );
+	morph( &MAPV_CAMERA(camera)->target.z, mtype, MAPV_CAMERA(new_cam)->target.z, pan_time );
+
+	return pan_time;
+}
+
+
+/* fsn-mode Task C4: warp-lite. FSV_FSN's directory double-click, guarded
+ * by src/sdl/input.cpp (this function assumes but does not itself check
+ * globals.fsv_mode == FSV_FSN -- fsn_warp_pose( ) above reads FSN-only
+ * geometry). Mirrors camera_look_at_full( )'s own hook pattern
+ * (camera_pan_begin( )/camera_pan_commit( ), factored out above
+ * specifically so the two share it) rather than duplicating it, with
+ * fsn_warp_pose( ) standing in for that function's per-mode switch --
+ * there is only ever one mode here, so there is nothing to switch on. */
+void
+camera_warp_to( GNode *node )
+{
+	double pan_time;
+
+#ifdef DEBUG
+	/* Same precondition as camera_look_at_full( )'s: the target's own
+	 * parent must already be expanded for it to have been pickable at
+	 * all. Unlike that function, `node` itself need not be expanded --
+	 * the caller auto-expands it first only when it was collapsed, but
+	 * a warp onto an already-expanded pedestal is exactly the
+	 * re-double-click case this task's "no collapse" behavior exists
+	 * for. */
+	if (NODE_IS_DIR(node->parent))
+		g_assert( dirtree_entry_expanded( node->parent ) );
+#endif
+
+	camera_pan_begin( );
+
+	pan_time = fsn_warp_pose( node, MORPH_SIGMOID, -1.0 );
+
+	camera_pan_commit( node, pan_time );
 }
 
 
