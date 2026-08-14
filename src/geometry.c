@@ -671,6 +671,7 @@ mapv_init_recursive( GNode *dnode )
 	double area, dir_area, total_block_area = 0.0;
 	double nominal_border, border;
 	double scale_factor;
+	double weight_sum, sqrt_weight_sum, prescale;
 	double a, b, k;
 	int n, i;
 
@@ -707,15 +708,75 @@ mapv_init_recursive( GNode *dnode )
 	dir_dims.y -= nominal_border;
 	dir_area = dir_dims.x * dir_dims.y;
 
+	/* Weight -> world pre-scale (2026 fix: mapv_map_size( )'s area_weight
+	 * is no longer bytes -- under the default SQRT scale it is
+	 * sqrt(bytes), under LOG it is log2(bytes) -- while nominal_border
+	 * and dir_area stay world-space lengths/areas descended from the
+	 * root's byte-based dims (mapv_init( )'s comment). The old
+	 * `k = sqrt(area_weight) + nominal_border` line silently assumed
+	 * weight and world were the same units (true only when weight WAS
+	 * bytes, i.e. never since MAPV_SCALE_SQRT became the default): as
+	 * the tree grows, sqrt(area_weight) drifts further from
+	 * nominal_border's scale and the border term dominates, collapsing
+	 * the realized fill factor.
+	 *
+	 * `prescale` is the scalar that converts one weight unit into one
+	 * world-area unit, chosen so the WITH-border block areas sum to
+	 * dir_area exactly (i.e. nominal_border really is a nominal border,
+	 * in world units, once blocks are built -- at any tree size or
+	 * scale). Expanding Sum_i (sqrt(prescale*w_i) + nb)^2 == dir_area
+	 * gives a quadratic not in prescale itself but in
+	 * x = sqrt(prescale):
+	 *
+	 *   Sw*x^2 + 2*nb*Sr*x + (n*nb^2 - dir_area) = 0
+	 *
+	 * with Sw = Sum(w_i), Sr = Sum(sqrt(w_i)) over the n children. Solve
+	 * for the positive root x and square it back to get prescale --
+	 * squaring is necessary (x is one sqrt removed from prescale); using
+	 * x itself in place of prescale below would under-scale by another
+	 * sqrt() and reintroduce the same unit mismatch this exists to
+	 * fix. */
+	n = 0;
+	weight_sum = 0.0;
+	sqrt_weight_sum = 0.0;
+	node = dnode->children;
+	while (node != NULL) {
+		double w = MAPV_GEOM_PARAMS(node)->area_weight;
+
+		weight_sum += w;
+		sqrt_weight_sum += sqrt( w );
+		++n;
+		node = node->next;
+	}
+
+	/* Guard: if n borderless blocks alone (n*nb^2) wouldn't fit in
+	 * dir_area, the quadratic's C term runs away positive and can push
+	 * the root nonsensical (reachable above ~10k entries in one
+	 * directory). Shrink the border first rather than let that happen. */
+	if (dir_area <= (double)n * SQR(nominal_border))
+		nominal_border = 0.5 * sqrt( dir_area / (double)n );
+
+	if (weight_sum > 0.0) {
+		double qa = weight_sum;
+		double qb = 2.0 * nominal_border * sqrt_weight_sum;
+		double qc = (double)n * SQR(nominal_border) - dir_area;
+		double x = (-qb + sqrt( MAX(0.0, SQR(qb) - 4.0 * qa * qc) )) / (2.0 * qa);
+
+		prescale = SQR(x);
+	} else {
+		/* No weight at all (shouldn't happen -- mapv_map_size( )
+		 * floors every size at 256), fall back to identity scale */
+		prescale = 1.0;
+	}
+
 	/* First pass
 	 * 1. Create blocks. (A block is equivalent to a node, except
 	 *    that it includes the node's surrounding border area)
 	 * 2. Find total area of the blocks
 	 * 3. Create a list of the blocks */
-	n = 0;
 	node = dnode->children;
 	while (node != NULL) {
-		k = sqrt( MAPV_GEOM_PARAMS(node)->area_weight ) + nominal_border;
+		k = sqrt( prescale * MAPV_GEOM_PARAMS(node)->area_weight ) + nominal_border;
 		area = SQR(k);
 		total_block_area += area;
 
@@ -724,7 +785,6 @@ mapv_init_recursive( GNode *dnode )
 		block->area = area;
 		G_LIST_APPEND(block_list, block);
 
-		++n;
 		node = node->next;
 	}
 
@@ -772,11 +832,26 @@ mapv_init_recursive( GNode *dnode )
 		block_dims.x = rects[i].w;
 		block_dims.y = rects[i].h;
 
-		area = scale_factor * MAPV_GEOM_PARAMS(nodes[i])->area_weight;
+		/* area == this node's own world-space area, WITHOUT border:
+		 * weight -> world via `prescale` (see above), then squarify's
+		 * own normalization via `scale_factor` -- the same two-step
+		 * conversion the block areas above went through, minus the
+		 * border term. */
+		area = scale_factor * prescale * MAPV_GEOM_PARAMS(nodes[i])->area_weight;
 
-		/* Calculate exact width of block's border region */
-		k = block_dims.x + block_dims.y;
-		/* Note: area == scaled area of node,
+		/* Calculate exact width of block's border region.
+		 * (w - 2*border)*(h - 2*border) == area, solved for border,
+		 * using k = w + h: 4*border^2 - 2*k*border + (w*h - area) == 0
+		 * -> border == 0.25*(k - sqrt(k^2 - 4*(w*h - area))). This
+		 * relies on block_dims.x * block_dims.y (== w*h) being
+		 * areas[i] * scale_factor exactly -- squarify_layout( )'s own
+		 * internal normalization guarantees that, which is also why
+		 * the discriminant k^2 - 4*(w*h - area) -- equivalently
+		 * (w-h)^2 + 4*w*h - 4*(w*h-area) == (w-h)^2 + 4*area -- can
+		 * only go negative to floating-point dust, never in principle
+		 * (area >= 0 by construction of `prescale` above): the MAX(0.0, ...)
+		 * clamp exists for that dust, not for a real negative case.
+		 * Note: area == scaled area of node,
 		 * areas[i] * scale_factor == scaled area of node + border */
 		border = 0.25 * (k - sqrt( MAX(0.0, SQR(k) - 4.0 * (areas[i] * scale_factor - area)) ));
 
