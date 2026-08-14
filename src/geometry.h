@@ -46,7 +46,20 @@ struct _MapVGeomParams {
 	XYvec	c1;	/* 2D right/rear corner (x1,y1) */
 	/* Note: x1 > x0 and y1 > y0 */
 	double	height;	/* Height of node (bottom to top) */
+	/* Scaled area weight (mapv_map_size sums), computed by the layout
+	 * pre-pass */
+	double	area_weight;
 };
+
+/* Area scale applied to byte sizes before they become MapV block areas.
+ * SQRT is the default (tames a checkout where a handful of huge files
+ * would otherwise erase everything else); LINEAR is the historical
+ * area-is-bytes look; LOG is for extreme skew. */
+typedef enum {
+	MAPV_SCALE_SQRT,
+	MAPV_SCALE_LINEAR,
+	MAPV_SCALE_LOG
+} MapVAreaScale;
 
 /* Geometry parameters for a node in TreeV mode */
 typedef struct _TreeVGeomParams TreeVGeomParams;
@@ -92,6 +105,11 @@ void geometry_treev_get_extents( GNode *dnode, RTvec *ext_c0, RTvec *ext_c1 );
  * definition in geometry.c. */
 void geometry_node_set_color( GNode *node );
 void geometry_queue_rebuild( GNode *dnode );
+/* MapV area scale: pure state, no relayout side effect -- the caller
+ * (ui_main.cpp's Display menu) decides whether/when to call
+ * geometry_init( FSV_MAPV ) afterward. */
+void mapv_set_area_scale( MapVAreaScale scale );
+MapVAreaScale mapv_get_area_scale( void );
 void geometry_init( FsvMode mode );
 void geometry_draw( boolean high_detail );
 void geometry_camera_pan_finished( void );

@@ -18,6 +18,11 @@
 //                                 rescan" action, only Change Root
 //          -> Quit            == on_file_exit_activate() -> exit(EXIT_SUCCESS)
 //   Vis    -> DiscV/MapV/TreeV == on_vis_*_activate() -> fsv_set_mode()
+//          -> Skip VCS/build dirs == addition (2026 scan-exclusion rework,
+//                                 scanfs.c's scanfs_set/get_exclusion()); GTK
+//                                 column: none -- no toggle there, see
+//                                 docs/PORTING.md's GTK-arm note (FSV_NO_EXCLUDE
+//                                 env var is the GTK-side escape hatch instead)
 //   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
 //                                 GTK's left pane has no show/hide toggle at all
 //          -> Camera Rail       == addition (fsn-mode Task A3, src/sdl/ui_rail.cpp);
@@ -34,6 +39,10 @@
 //                                 the GTK frontend's gpu_set_landscape() is a
 //                                 no-op (src/ogl-gpu-compat.c), so this menu is
 //                                 SDL-only, same as the View menu below
+//          -> MapV area scale == addition (2026 squarify rework, geometry.c's
+//                                 mapv_set/get_area_scale()); GTK column: none --
+//                                 GTK gets the same √size default with no UI to
+//                                 change it, see docs/PORTING.md
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
 //          -> About fsv...    == on_help_about_fsv_activate() -> about(ABOUT_BEGIN)
 //
@@ -58,6 +67,9 @@ extern "C" {
 #include "colexp.h"
 #include "dirtree.h"
 #include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- Display menu */
+#include "geometry.h" /* MapVAreaScale, mapv_get/set_area_scale(), geometry_init() -- Display menu */
+#include "nvstore.h" /* MapV area scale persistence, same API ui_dialogs.cpp's open_files_allowed uses */
+#include "scanfs.h" /* scanfs_get/set_exclusion() -- Vis menu's "Skip VCS/build dirs" toggle */
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -137,6 +149,62 @@ draw_controls_window(bool *open)
 // input.cpp already makes about nodes named by the current scan.
 
 static void *g_context_menu_node = nullptr; // GNode*; void* per input.h
+
+// ---- Display: MapV area scale ---------------------------------------------
+//
+// Write side of mapv_set_area_scale()'s persistence -- same nvstore idiom
+// as ui_dialogs.cpp's open_files_allowed. The READ side (startup load)
+// deliberately does NOT live here: main.cpp's default mode is MapV, and
+// its startup sequence lays out that first MapV geometry (load_filesystem()
+// -> enter_mode() -> geometry_init(FSV_MAPV) -> mapv_init(), main.cpp:1205)
+// before ui_main_draw() ever runs its first frame -- a lazy load here would
+// read the persisted scale too late to affect that first layout. Loaded
+// instead in ui_dialogs.cpp's ui_dialogs_init() (see its own doc comment),
+// which main.cpp calls at line 1110, ahead of load_filesystem(). This key
+// string must match ui_dialogs.cpp's own key_mapv_area_scale exactly.
+static const char key_mapv_area_scale[] = "mapv_area_scale";
+
+// Token table for key_mapv_area_scale -- must match ui_dialogs.cpp's own
+// tokens_mapv_area_scale exactly (index-for-index, matching
+// geometry.h's MapVAreaScale), for the same reason the two files each
+// carry their own copy of key_mapv_area_scale. See that file's doc
+// comment for why this is a token table (nvs_write_int_token( ) /
+// nvs_read_int_token_default( )) rather than a raw int
+// (nvs_write_int( ) / nvs_read_int_default( ) + cast).
+static const char *tokens_mapv_area_scale[] = {
+	"sqrt",
+	"linear",
+	"log2",
+	NULL
+};
+
+static void
+save_mapv_area_scale(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	nvs_write_int_token(fsvrc, key_mapv_area_scale, (int)mapv_get_area_scale(), tokens_mapv_area_scale);
+	nvs_close(fsvrc);
+}
+
+// ---- Vis: built-in scan exclusion -----------------------------------------
+//
+// Write side of scanfs_set_exclusion()'s persistence -- same nvstore idiom
+// as save_mapv_area_scale() just above. The READ side (startup load)
+// deliberately does NOT live here, for the same reason mapv_area_scale's
+// doesn't: it has to be in place before the very first scan
+// (load_filesystem(), main.cpp:1205), which runs before ui_main_draw()
+// ever gets a frame. Loaded instead in ui_dialogs.cpp's ui_dialogs_init()
+// (main.cpp:1110, ahead of load_filesystem()). This key string must match
+// ui_dialogs.cpp's own key_scan_exclusion exactly.
+static const char key_scan_exclusion[] = "scan_exclusion";
+
+static void
+save_scan_exclusion(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	nvs_write_boolean(fsvrc, key_scan_exclusion, scanfs_get_exclusion() ? TRUE : FALSE);
+	nvs_close(fsvrc);
+}
 
 static void
 draw_context_menu(void)
@@ -270,6 +338,20 @@ ui_main_draw(void)
 			// only has to keep building. See docs/PORTING.md.
 			if (ImGui::MenuItem("FSN", nullptr, mode == FSV_FSN))
 				app_switch_mode(FSV_FSN);
+			ImGui::Separator();
+			// Built-in scan exclusion (scanfs.c's conservative list).
+			// Toggling changes the tree's contents, so it queues a
+			// rescan -- same deferred machinery as File -> Rescan, and
+			// the same root_change_ok guard (a rescan mid-flight or
+			// mid-recording would be as meaningless here as it is there).
+			if (ImGui::MenuItem("Skip VCS/build dirs", nullptr,
+			    scanfs_get_exclusion() != 0, root_change_ok)) {
+				scanfs_set_exclusion(scanfs_get_exclusion() ? FALSE : TRUE);
+				save_scan_exclusion(); // nvstore, same pattern as the scale
+				app_request_rescan();
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(".git .svn .hg node_modules __pycache__ .venv .cache builddir .builddir");
 			ImGui::EndMenu();
 		}
 
@@ -335,6 +417,38 @@ ui_main_draw(void)
 					if (ImGui::MenuItem(fsn_landscapes[i].name, nullptr,
 					    current == i))
 						landscape_set(i);
+				}
+				ImGui::EndMenu();
+			}
+			// Enabled in every mode (nothing mode-specific gates it,
+			// unlike Landscape/Overview above), but only affects MapV --
+			// see mapv_map_size()'s doc comment in geometry.c. Changing
+			// it relayouts (geometry_init(), same rebuild path a
+			// colexp/deployment change uses), NOT a rescan: no bytes on
+			// disk changed, only how they map to area. Only relayout if
+			// MapV is the CURRENT mode -- fsv_set_mode() (fsv.c:118)
+			// already calls geometry_init() unconditionally on every
+			// mode entry, so switching into MapV later picks up the new
+			// scale on its own; calling geometry_init(FSV_MAPV) while
+			// e.g. TreeV is current would rebuild geometry nothing is
+			// showing.
+			if (ImGui::BeginMenu("MapV area scale")) {
+				// Radio semantics via checkmarks, same idiom as the
+				// Colors menu above.
+				static const struct { const char *label; int scale; } kScales[] = {
+					{ "Square root", MAPV_SCALE_SQRT },
+					{ "Linear (bytes)", MAPV_SCALE_LINEAR },
+					{ "Logarithmic", MAPV_SCALE_LOG },
+				};
+				for (const auto &s : kScales) {
+					if (ImGui::MenuItem(s.label, nullptr,
+					    mapv_get_area_scale() == s.scale)) {
+						mapv_set_area_scale((MapVAreaScale)s.scale);
+						save_mapv_area_scale();
+						if (globals.fsv_mode == FSV_MAPV)
+							geometry_init(FSV_MAPV);
+						globals.need_redraw = TRUE;
+					}
 				}
 				ImGui::EndMenu();
 			}

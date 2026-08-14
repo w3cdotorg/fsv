@@ -5775,6 +5775,48 @@ one pedestal instead of the whole landscape:
 
 Not pushed, per the global constraints.
 
+## Post-v0.3: MapV squarify + scan exclusion (2026-08-14)
+
+Closes two 1999-upstream `TODO` items (see `TODO.md`), independent of
+the fsn-mode work above. Three changes: (1) `src/squarify.c`, a pure
+squarified-treemap module (Bruls et al. 2000) replacing `geometry.c`'s
+old greedy row layout — no more paper-thin frontmost rows; (2) a
+√size default area scale (linear/log₂ as Display-menu alternatives,
+persisted, loaded pre-scan in `ui_dialogs_init()`); (3) `scanfs.c`'s
+built-in, conservative exclusion list (**exact basename match only** —
+`.git`, `builddir`, `node_modules`, etc. — dirs only, no prefix/glob
+matching, so differently-named build output such as `builddir-sdl`,
+`build/`, `target/`, or `dist/`, and other dot-directories such as
+`.superpowers`, still scan normally), on by default with a Vis-menu
+toggle. Two new tests (`squarify`, `scanfs_exclude`), suite now 8/8.
+GTK arm gets the same core defaults (squarify, √size, exclusion-on)
+with no dedicated GTK UI added for any of the three — the Vis toggle
+and Display option are SDL-frontend-only, matching this port's
+existing pattern of core-first, frontend-as-needed. Since the GTK arm
+has no toggle, it has no way to turn exclusion off from a menu either;
+`scanfs.c`'s `dir_name_excluded()` also honors an `FSV_NO_EXCLUDE`
+environment variable (any value disables exclusion for the process),
+which is that arm's escape hatch. Design:
+`docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
+
+**Deviation from the design spec (I3):** §2 of the design spec called
+for MapV's root dimensions to switch to the weighted area scale along
+with everything else. `490936f` deliberately kept them byte-based
+(`DIR_NODE_DESC(...)->subtree.size` in `mapv_init()`, not
+`area_weight`) instead: the root's absolute world size feeds directly
+into camera framing and the fixed `mapv_dir_height`/`mapv_leaf_height`
+constants (384/128), both tuned against byte-scaled worlds since
+upstream fsn, and weights are relative-only by design (squarify
+normalizes areas internally regardless of their absolute scale). The
+companion consequence of that choice is the weight→world unit
+mismatch the *Final-review fix wave* below (C1) had to correct:
+because the root stays byte-scaled while every level below it now
+plots at the current area scale (√size by default), a per-node
+constant like `nominal_border` — a world-space length — no longer
+lived in the same units as the weight-space quantities it was
+being added to, and `mapv_init_recursive()` needed an explicit
+weight→world pre-scale to reconcile the two.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`

@@ -20,6 +20,7 @@
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
 #include "geometry-fsn.h" /* FSV_FSN mode lives in its own file */
 #include "gpu.h"
+#include "squarify.h"
 #include "tmaptext.h"
 
 
@@ -543,6 +544,65 @@ static double mapv_leaf_height = 128.0;
 static XYZvec mapv_cursor_prev_c0;
 static XYZvec mapv_cursor_prev_c1;
 
+/* Current area scale (mapv_map_size below). Pure state: the setter does
+ * NOT relayout -- the caller (ui_main.cpp's Display menu) decides
+ * whether/when a geometry_init( FSV_MAPV ) is warranted. */
+static MapVAreaScale mapv_area_scale = MAPV_SCALE_SQRT;
+
+void
+mapv_set_area_scale( MapVAreaScale scale )
+{
+	mapv_area_scale = scale;
+}
+
+MapVAreaScale
+mapv_get_area_scale( void )
+{
+	return mapv_area_scale;
+}
+
+
+/* Area weight of a byte size under the current scale. The MAX(256,
+ * size) floor predates this (it kept tiny files visible under the
+ * linear scale) and applies to the INPUT, so its intent survives all
+ * three scales. */
+static double
+mapv_map_size( int64 size )
+{
+	double s = (double)MAX(256, size);
+
+	switch (mapv_area_scale) {
+		case MAPV_SCALE_SQRT:
+		return sqrt( s );
+
+		case MAPV_SCALE_LINEAR:
+		return s;
+
+		case MAPV_SCALE_LOG:
+		return log2( 1.0 + s );
+
+		SWITCH_FAIL
+	}
+	return s;
+}
+
+
+/* Recursive pre-pass: every node's area weight, files mapped
+ * directly, directories = own entry's mapped size + sum of children
+ * (mapping the SUM instead would break parent/child proportions) */
+static double
+mapv_weigh_recursive( GNode *node )
+{
+	double w = mapv_map_size( NODE_DESC(node)->size );
+	GNode *child;
+
+	if (NODE_IS_DIR(node))
+		for (child = node->children; child != NULL; child = child->next)
+			w += mapv_weigh_recursive( child );
+	MAPV_GEOM_PARAMS(node)->area_weight = w;
+	return w;
+}
+
 
 /* Returns the z-position of the bottom of a node */
 double
@@ -600,22 +660,20 @@ mapv_init_recursive( GNode *dnode )
 	struct MapVBlock {
 		GNode *node;
 		double area;
-	} *block, *next_first_block;
-	struct MapVRow {
-		struct MapVBlock *first_block;
-		double area;
-	} *row = NULL;
+	} *block;
 	MapVGeomParams *gparams;
 	GNode *node;
+	GNode **nodes;
 	GList *block_list = NULL, *block_llink;
-	GList *row_list = NULL, *row_llink;
+	SquarifyRect bounds, *rects;
+	double *areas;
 	XYvec dir_dims, block_dims;
-	XYvec start_pos, pos;
 	double area, dir_area, total_block_area = 0.0;
 	double nominal_border, border;
 	double scale_factor;
+	double weight_sum, sqrt_weight_sum, prescale;
 	double a, b, k;
-	int64 size;
+	int n, i;
 
 	g_assert( NODE_IS_DIR(dnode) );
 
@@ -650,6 +708,67 @@ mapv_init_recursive( GNode *dnode )
 	dir_dims.y -= nominal_border;
 	dir_area = dir_dims.x * dir_dims.y;
 
+	/* Weight -> world pre-scale (2026 fix: mapv_map_size( )'s area_weight
+	 * is no longer bytes -- under the default SQRT scale it is
+	 * sqrt(bytes), under LOG it is log2(bytes) -- while nominal_border
+	 * and dir_area stay world-space lengths/areas descended from the
+	 * root's byte-based dims (mapv_init( )'s comment). The old
+	 * `k = sqrt(area_weight) + nominal_border` line silently assumed
+	 * weight and world were the same units (true only when weight WAS
+	 * bytes, i.e. never since MAPV_SCALE_SQRT became the default): as
+	 * the tree grows, sqrt(area_weight) drifts further from
+	 * nominal_border's scale and the border term dominates, collapsing
+	 * the realized fill factor.
+	 *
+	 * `prescale` is the scalar that converts one weight unit into one
+	 * world-area unit, chosen so the WITH-border block areas sum to
+	 * dir_area exactly (i.e. nominal_border really is a nominal border,
+	 * in world units, once blocks are built -- at any tree size or
+	 * scale). Expanding Sum_i (sqrt(prescale*w_i) + nb)^2 == dir_area
+	 * gives a quadratic not in prescale itself but in
+	 * x = sqrt(prescale):
+	 *
+	 *   Sw*x^2 + 2*nb*Sr*x + (n*nb^2 - dir_area) = 0
+	 *
+	 * with Sw = Sum(w_i), Sr = Sum(sqrt(w_i)) over the n children. Solve
+	 * for the positive root x and square it back to get prescale --
+	 * squaring is necessary (x is one sqrt removed from prescale); using
+	 * x itself in place of prescale below would under-scale by another
+	 * sqrt() and reintroduce the same unit mismatch this exists to
+	 * fix. */
+	n = 0;
+	weight_sum = 0.0;
+	sqrt_weight_sum = 0.0;
+	node = dnode->children;
+	while (node != NULL) {
+		double w = MAPV_GEOM_PARAMS(node)->area_weight;
+
+		weight_sum += w;
+		sqrt_weight_sum += sqrt( w );
+		++n;
+		node = node->next;
+	}
+
+	/* Guard: if n borderless blocks alone (n*nb^2) wouldn't fit in
+	 * dir_area, the quadratic's C term runs away positive and can push
+	 * the root nonsensical (reachable above ~10k entries in one
+	 * directory). Shrink the border first rather than let that happen. */
+	if (dir_area <= (double)n * SQR(nominal_border))
+		nominal_border = 0.5 * sqrt( dir_area / (double)n );
+
+	if (weight_sum > 0.0) {
+		double qa = weight_sum;
+		double qb = 2.0 * nominal_border * sqrt_weight_sum;
+		double qc = (double)n * SQR(nominal_border) - dir_area;
+		double x = (-qb + sqrt( MAX(0.0, SQR(qb) - 4.0 * qa * qc) )) / (2.0 * qa);
+
+		prescale = SQR(x);
+	} else {
+		/* No weight at all (shouldn't happen -- mapv_map_size( )
+		 * floors every size at 256), fall back to identity scale */
+		prescale = 1.0;
+	}
+
 	/* First pass
 	 * 1. Create blocks. (A block is equivalent to a node, except
 	 *    that it includes the node's surrounding border area)
@@ -657,10 +776,7 @@ mapv_init_recursive( GNode *dnode )
 	 * 3. Create a list of the blocks */
 	node = dnode->children;
 	while (node != NULL) {
-		size = MAX(256, NODE_DESC(node)->size);
-		if (NODE_IS_DIR(node))
-			size += DIR_NODE_DESC(node)->subtree.size;
-		k = sqrt( (double)size ) + nominal_border;
+		k = sqrt( prescale * MAPV_GEOM_PARAMS(node)->area_weight ) + nominal_border;
 		area = SQR(k);
 		total_block_area += area;
 
@@ -676,104 +792,20 @@ mapv_init_recursive( GNode *dnode )
 	 * directory can provide, so they'll have to be scaled down */
 	scale_factor = dir_area / total_block_area;
 
-	/* Second pass
-	 * 1. Scale down the blocks
-	 * 2. Generate a first-draft set of rows */
+	/* Build parallel arrays from block_list for the squarify call,
+	 * then the list itself is no longer needed */
+	nodes = NEW_ARRAY(GNode *, n);
+	areas = NEW_ARRAY(double, n);
+	rects = NEW_ARRAY(SquarifyRect, n);
+	i = 0;
 	block_llink = block_list;
 	while (block_llink != NULL) {
 		block = (struct MapVBlock *)block_llink->data;
-		block->area *= scale_factor;
-
-		if (row == NULL) {
-			/* Begin new row */
-			row = NEW(struct MapVRow);
-			row->first_block = block;
-			row->area = 0.0;
-			G_LIST_APPEND(row_list, row);
-		}
-
-		/* Add block to row */
-		row->area += block->area;
-
-		/* Dimensions of block (block_dims.y == depth of row) */
-		block_dims.y = row->area / dir_dims.x;
-		block_dims.x = block->area / block_dims.y;
-
-		/* Check aspect ratio of block */
-		if ((block_dims.x / block_dims.y) < 1.0) {
-			/* Next block will go into next row */
-			row = NULL;
-		}
-
+		nodes[i] = block->node;
+		areas[i] = block->area;
+		++i;
 		block_llink = block_llink->next;
 	}
-
-	/* Third pass - optimize layout */
-	/* Note to self: write layout optimization routine sometime */
-
-	/* Fourth pass - output final arrangement
-	 * Start at right/rear corner, laying out rows of (mostly)
-	 * successively smaller blocks */
-	start_pos.x = MAPV_NODE_CENTER_X(dnode) + 0.5 * dir_dims.x;
-	start_pos.y = MAPV_NODE_CENTER_Y(dnode) + 0.5 * dir_dims.y;
-	pos.y = start_pos.y;
-	block_llink = block_list;
-	row_llink = row_list;
-	while (row_llink != NULL) {
-		row = (struct MapVRow *)row_llink->data;
-		block_dims.y = row->area / dir_dims.x;
-		pos.x = start_pos.x;
-
-		/* Note first block of next row */
-		if (row_llink->next == NULL)
-			next_first_block = NULL;
-		else
-			next_first_block = ((struct MapVRow *)row_llink->next->data)->first_block;
-
-		/* Output one row */
-		while (block_llink != NULL) {
-			block = (struct MapVBlock *)block_llink->data;
-			if (block == next_first_block)
-				break; /* finished with row */
-			block_dims.x = block->area / block_dims.y;
-
-			size = MAX(256, NODE_DESC(block->node)->size);
-			if (NODE_IS_DIR(block->node))
-				size += DIR_NODE_DESC(block->node)->subtree.size;
-			area = scale_factor * (double)size;
-
-			/* Calculate exact width of block's border region */
-			k = block_dims.x + block_dims.y;
-			/* Note: area == scaled area of node,
-			 * block->area == scaled area of node + border */
-			border = 0.25 * (k - sqrt( SQR(k) - 4.0 * (block->area - area) ));
-
-			/* Assign geometry
-			 * (Note: pos is right/rear corner of block) */
-			gparams = MAPV_GEOM_PARAMS(block->node);
-			gparams->c0.x = pos.x - block_dims.x + border;
-			gparams->c0.y = pos.y - block_dims.y + border;
-			gparams->c1.x = pos.x - border;
-			gparams->c1.y = pos.y - border;
-
-			if (NODE_IS_DIR(block->node)) {
-				gparams->height = mapv_dir_height;
-
-				/* Recurse into directory */
-				mapv_init_recursive( block->node );
-			}
-			else
-				gparams->height = mapv_leaf_height;
-
-			pos.x -= block_dims.x;
-			block_llink = block_llink->next;
-		}
-
-		pos.y -= block_dims.y;
-		row_llink = row_llink->next;
-	}
-
-	/* Clean up */
 
 	block_llink = block_list;
 	while (block_llink != NULL) {
@@ -782,12 +814,69 @@ mapv_init_recursive( GNode *dnode )
 	}
 	g_list_free( block_list );
 
-	row_llink = row_list;
-	while (row_llink != NULL) {
-		xfree( row_llink->data );
-		row_llink = row_llink->next;
+	/* Lay out the blocks with the squarify algorithm. squarify_layout
+	 * normalizes areas internally, so the (still-unscaled) block
+	 * areas are fine to pass in directly -- only relative sizes
+	 * matter for the tiling itself. */
+	bounds.x = MAPV_NODE_CENTER_X(dnode) - 0.5 * dir_dims.x;
+	bounds.y = MAPV_NODE_CENTER_Y(dnode) - 0.5 * dir_dims.y;
+	bounds.w = dir_dims.x;
+	bounds.h = dir_dims.y;
+	squarify_layout( &bounds, areas, n, rects );
+
+	/* Output final arrangement: assign geometry to each node,
+	 * computing the exact border inset so that each node's interior
+	 * has precisely its own (scaled) area, not the block's area
+	 * (which includes the surrounding border) */
+	for (i = 0; i < n; i++) {
+		block_dims.x = rects[i].w;
+		block_dims.y = rects[i].h;
+
+		/* area == this node's own world-space area, WITHOUT border:
+		 * weight -> world via `prescale` (see above), then squarify's
+		 * own normalization via `scale_factor` -- the same two-step
+		 * conversion the block areas above went through, minus the
+		 * border term. */
+		area = scale_factor * prescale * MAPV_GEOM_PARAMS(nodes[i])->area_weight;
+
+		/* Calculate exact width of block's border region.
+		 * (w - 2*border)*(h - 2*border) == area, solved for border,
+		 * using k = w + h: 4*border^2 - 2*k*border + (w*h - area) == 0
+		 * -> border == 0.25*(k - sqrt(k^2 - 4*(w*h - area))). This
+		 * relies on block_dims.x * block_dims.y (== w*h) being
+		 * areas[i] * scale_factor exactly -- squarify_layout( )'s own
+		 * internal normalization guarantees that, which is also why
+		 * the discriminant k^2 - 4*(w*h - area) -- equivalently
+		 * (w-h)^2 + 4*w*h - 4*(w*h-area) == (w-h)^2 + 4*area -- can
+		 * only go negative to floating-point dust, never in principle
+		 * (area >= 0 by construction of `prescale` above): the MAX(0.0, ...)
+		 * clamp exists for that dust, not for a real negative case.
+		 * Note: area == scaled area of node,
+		 * areas[i] * scale_factor == scaled area of node + border */
+		border = 0.25 * (k - sqrt( MAX(0.0, SQR(k) - 4.0 * (areas[i] * scale_factor - area)) ));
+
+		/* Assign geometry
+		 * (Note: rects[i] is the block's origin corner + extents) */
+		gparams = MAPV_GEOM_PARAMS(nodes[i]);
+		gparams->c0.x = rects[i].x + border;
+		gparams->c0.y = rects[i].y + border;
+		gparams->c1.x = rects[i].x + rects[i].w - border;
+		gparams->c1.y = rects[i].y + rects[i].h - border;
+
+		if (NODE_IS_DIR(nodes[i])) {
+			gparams->height = mapv_dir_height;
+
+			/* Recurse into directory */
+			mapv_init_recursive( nodes[i] );
+		}
+		else
+			gparams->height = mapv_leaf_height;
 	}
-	g_list_free( row_list );
+
+	/* Clean up */
+	xfree( nodes );
+	xfree( areas );
+	xfree( rects );
 }
 
 
@@ -799,7 +888,23 @@ mapv_init( void )
 	XYvec root_dims;
 	double k;
 
-	/* Determine dimensions of bottommost (root) node */
+	/* Weigh the whole tree first: every recursive call below reads
+	 * MAPV_GEOM_PARAMS(node)->area_weight, which this fills in. Weighed
+	 * from root_dnode, not the metanode (globals.fstree) -- the
+	 * metanode's own entry is never drawn, so its weight (which would
+	 * double as root_dnode's own, since the metanode has exactly one
+	 * child) is irrelevant here. */
+	mapv_weigh_recursive( root_dnode );
+
+	/* Determine dimensions of bottommost (root) node. Deliberately
+	 * byte-based (subtree.size), NOT area_weight: weights are relative-
+	 * only by design -- squarify_layout() normalizes areas internally
+	 * and the border-exactness math below scales by scale_factor*weight
+	 * consistently, so nothing needs the root's absolute area to be
+	 * weight-scaled. Keeping the world's physical size byte-scaled here
+	 * is what keeps the fixed mapv_dir_height/mapv_leaf_height (384/128)
+	 * proportionate and MapV's camera framing exactly as it always
+	 * was. */
 	root_dims.y = sqrt( (double)DIR_NODE_DESC(globals.fstree)->subtree.size / MAPV_ROOT_ASPECT_RATIO );
 	root_dims.x = MAPV_ROOT_ASPECT_RATIO * root_dims.y;
 

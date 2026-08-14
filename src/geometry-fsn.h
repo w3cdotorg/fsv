@@ -44,8 +44,9 @@
  *     the parent's h, top at the parent's h + this h).
  *
  * Stored in the node descriptor's own scratch space, like every other
- * mode's params (NodeDesc::geomparams is exactly 5 doubles, so this
- * struct fills it precisely). */
+ * mode's params (NodeDesc::geomparams is 6 doubles -- MapV's 2026
+ * squarify rework grew it from 5 to fit area_weight -- so this 5-double
+ * struct fills the first 5 of those 6, with one spare left over). */
 typedef struct _FsnPedestal FsnPedestal;
 struct _FsnPedestal {
 	double	x;	/* center, ground left/right */
