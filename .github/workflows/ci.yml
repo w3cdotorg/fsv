@@ -113,17 +113,45 @@ jobs:
         run: |
           set -euo pipefail
           files=(fsv.app/Contents/MacOS/fsv fsv.app/Contents/Frameworks/*)
-          if otool -l "${files[@]}" | grep '/opt/homebrew'; then
-            echo "::error::fsv.app still references /opt/homebrew after dylib bundling -- self-containment audit failed (otool -l), see matches above"
+          # Capture otool's output into a variable first, under set -e,
+          # instead of piping it straight into grep: `otool -l ... | grep`
+          # as the condition of an `if` is exempt from -e for BOTH
+          # commands (not just grep), so a broken/missing otool invocation
+          # would make the pipe produce no output, grep would find no
+          # match on empty input and exit 1, and the `if` would read that
+          # as a clean bill of health -- a false OK on a tool failure, not
+          # just on a genuinely clean bundle. Assigning `out=$(otool ...)`
+          # outside any `if`/`&&`/`||` keeps it subject to -e: a nonzero
+          # otool exit fails the step here, before grep ever runs.
+          out=$(otool -l "${files[@]}")
+          if printf '%s\n' "$out" | grep -q '/opt/homebrew'; then
+            echo "::error::fsv.app still references /opt/homebrew after dylib bundling -- self-containment audit failed (otool -l), see matches below"
+            printf '%s\n' "$out" | grep '/opt/homebrew'
             exit 1
           fi
           echo "OK -- no /opt/homebrew load-command references found in fsv.app (otool -l)"
+
+      # actions/upload-artifact@v4 makes the artifact's root the CONTENTS
+      # of `path:` when `path:` names a single directory -- so uploading
+      # `path: fsv.app` directly would produce an artifact whose root is
+      # `Contents/...`, with no `fsv.app/` wrapper, and the release job's
+      # `cp -R artifacts/fsv-macos-app/fsv.app ...` would find nothing
+      # there and hard-fail under `set -euo pipefail` on the first real
+      # tag push. Wrapping fsv.app inside a staging directory and
+      # uploading THAT keeps the artifact self-describing: its root
+      # contains `fsv.app/Contents/...`, matching what the release job's
+      # `cp -R` already expects.
+      - name: Stage .app bundle for upload
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          mv fsv.app stage/fsv.app
 
       - name: Upload macOS .app bundle
         uses: actions/upload-artifact@v4
         with:
           name: fsv-macos-app
-          path: fsv.app
+          path: stage
 
   linux-gtk:
     runs-on: ubuntu-24.04
