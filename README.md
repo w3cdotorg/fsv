@@ -7,7 +7,7 @@
 > for the full porting record. For the original GTK/OpenGL-only project,
 > use [jabl/fsv](https://github.com/jabl/fsv).
 
-![fsv navigating its own source tree](docs/media/demo.gif)
+![fsv flying its own source tree in fsn mode, ending on the squarified MapV](docs/media/demo.gif)
 
 *(GIF above is size-optimized — 15fps, downscaled. See
 [`docs/media/demo.mp4`](docs/media/demo.mp4) for the smooth, full-resolution

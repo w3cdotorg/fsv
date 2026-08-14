@@ -641,8 +641,8 @@ submit_frame(void)
 
 // ---- --record ----------------------------------------------------------
 //
-// Task 6.4: an offscreen, scripted "fly the camera around this checkout's
-// own src/ tree" recording, for a short demo video. Reuses the exact
+// The README demo: an offscreen, scripted flight through this checkout's
+// own src/ tree, in FSN mode, for a short demo video. Reuses the exact
 // frame shape submit_frame() above builds (ImGui::Render() while the
 // window's own swapchain-format pipelines are still what's bound, then
 // PrepareDrawData -> scene pass -> ImGui pass), but through
@@ -652,17 +652,35 @@ submit_frame(void)
 // pass at all (format-matched to the swapchain, not a fixed capture
 // format).
 //
-// Morphs (camera_look_at_full(), colexp()) time themselves off the real
-// wall clock (animation.c's xgettime(), same source --screenshot's
-// intro-pan wait already relies on -- see main()'s screenshot branch
-// below), not off how many ticks have been called. So this loop paces
-// itself to real time too, one iteration per ~1/30s of wall clock, and
-// keys its own script off that same wall clock -- otherwise a loop that
-// (being fully offscreen, no vsync) runs faster than real time would
-// let the morphs race ahead of the frame numbers meant to capture them,
-// and a slower one would leave them lagging. Pacing here is what makes
-// "frame N happens at video-time N/30s" and "the morph is M seconds into
-// a 2-second pan" agree.
+// Morphs (camera_look_at_full(), camera_warp_to(), camera_birdseye_view(),
+// colexp()) time themselves off the real wall clock (animation.c's
+// xgettime(), same source --screenshot's intro-pan wait already relies on
+// -- see main()'s screenshot branch below), not off how many ticks have
+// been called. So this loop paces itself to real time too, one iteration
+// per ~1/30s of wall clock, and keys its own script off that same wall
+// clock -- otherwise a loop that (being fully offscreen, no vsync) runs
+// faster than real time would let the morphs race ahead of the frame
+// numbers meant to capture them, and a slower one would leave them
+// lagging. Pacing here is what makes "frame N happens at video-time
+// N/30s" and "the morph is M seconds into a 2-second pan" agree.
+//
+// The script (~24s; tools/make-demo.sh passes --fsn, so main()'s
+// initial_mode is already FSV_FSN by the time run_record_mode() below
+// ever runs -- not hardcoded here, see run_record_mode()'s own doc
+// comment): FSN's own intro pan (fsv.c's load_filesystem() ->
+// initial_camera_pan()'s "new_fs" branch, unchanged, no cue needed)
+// reveals the landscape; then src/sdl/ expands and gets an establishing
+// look; then a look-at on src/sdl/gpu.cpp shows off the parent-distance
+// framing and the selection spotlight (fsn_draw_spotlight() reads
+// globals.current_node, which camera_pan_commit() sets the instant the
+// cue fires, well before the pan finishes flying there); then a
+// warp-lite swoop back onto src/sdl/'s own box grid; then bird's-eye,
+// mirroring the Camera Rail's own button; then a switch into MapV --
+// with globals.current_node pre-set to root_dnode so the mode-entry pan
+// (and camera_init()'s own root-aware top-down MapV framing) lands
+// squarely on the whole squarified, sqrt-scaled layout instead of
+// wherever FSN last looked -- with its built-in scan exclusion active
+// (no .git block), and a slow revolve for the closing few seconds.
 
 // One entry in the scripted timeline below: at t_seconds (wall-clock
 // seconds since recording started), call action(). Each fires once.
@@ -676,10 +694,13 @@ struct RecordCue {
 // this port's renderer core, and src/sdl/ is the directory this whole
 // SDD phase has been building. A path missing from a future checkout
 // (renamed file, different tree) degrades to "that cue's node is
-// nullptr and camera_look_at_full()/colexp() are skipped", not a crash.
+// nullptr and camera_look_at_full()/camera_warp_to()/colexp() are
+// skipped", not a crash. (The MapV finale flies to root_dnode instead --
+// see record_cue_switch_mapv() -- which is always valid once a
+// filesystem has loaded, so it needs no resolved-node global of its
+// own.)
 static GNode *g_record_sdl_dir;
 static GNode *g_record_gpu_cpp;
-static GNode *g_record_geometry_c;
 
 static void
 record_cue_expand_sdl(void)
@@ -708,35 +729,99 @@ record_cue_look_gpu_cpp(void)
 	if (NODE_IS_DIR(g_record_gpu_cpp->parent) &&
 	    !dirtree_entry_expanded(g_record_gpu_cpp->parent))
 		colexp(g_record_gpu_cpp->parent, COLEXP_EXPAND_ANY);
+	// FSV_FSN is the recorded mode throughout (see this section's header
+	// comment), so this lands with fsn_look_at()'s parent-distance
+	// framing and camera_pan_commit()'s globals.current_node update --
+	// which is what fsn_draw_spotlight() reads to draw the selection
+	// beam over gpu.cpp for the rest of the recording, until the next
+	// cue moves current_node again.
 	camera_look_at_full(g_record_gpu_cpp, MORPH_SIGMOID, 2.3);
 }
 
-// Points the switch straight at geometry.c instead of leaving it to land
-// wherever the mode switch's own automatic pan would otherwise take it.
-// app_switch_mode()'s enter path schedules initial_camera_pan() one tick
-// later, which -- entering TreeV -- calls camera_treev_lpan_look_at(
-// globals.current_node, 1.0); globals.current_node is still whatever the
-// *previous* cue last looked at (src/sdl/gpu.cpp), so without this the
-// camera would L-pan to gpu.cpp's new TreeV position first and only then
-// need a *second*, separate reorientation to reach geometry.c -- two
-// stacked camera cuts instead of one clean pan into the new mode.
+// fsn-mode Task C4's warp-lite. camera_warp_to() is FSN-only by mode
+// (fsn_warp_pose(), its pose helper, reads FSN-only pedestal geometry --
+// see camera_warp_to()'s own doc comment in camera.c), which is safe
+// here because the script never leaves FSN before this cue fires -- the
+// MapV switch below is the very last mode change. Re-warping onto the
+// src/sdl/ pedestal the previous cue already looked at is exactly the
+// "same node, close the last cut" case camera_warp_to()'s doc comment
+// describes (upstream fsn's own re-double-click), so this reads as
+// diving in for a close-up on the box grid rather than a cut to a new
+// place; `node` need not be re-expanded first for that (only its
+// *parent* -- src/, already expanded from load -- needs to be).
 static void
-record_cue_switch_treev(void)
+record_cue_warp_sdl(void)
 {
-	if (g_record_geometry_c != nullptr)
-		globals.current_node = g_record_geometry_c;
-	app_switch_mode((int)FSV_TREEV);
+	if (g_record_sdl_dir == nullptr)
+		return;
+	camera_warp_to(g_record_sdl_dir);
 }
 
-// Continuous cues (dolly, revolve) are driven per-frame by t-ranges in
-// run_record_mode() below, not one-shot RecordCue entries -- camera_
-// dolly()/camera_revolve() are immediate deltas (the same calls input.cpp
-// makes per mouse-motion event), not morphs, so "smooth" here means
-// "called with a small delta every recorded frame across the range".
+// Mirrors the Camera Rail's own "Birds eye" button (ui_rail.cpp) exactly:
+// camera_birdseye_view(TRUE) first -- which itself calls camera_flight_
+// end()/camera_pan_break() before installing its own theta/phi/distance
+// morphs, so it needs no separate unlock from the warp cue just before
+// it, mid-flight or not -- then window_birdseye_set_active(TRUE) to keep
+// this frontend's birdseye_view_active mirror (window.h) in sync with
+// the core flag, the same bookkeeping the rail button and app_reset_
+// camera() both rely on. Only ever goes up: the MapV switch after it is
+// what ends this flight, the same way any other mode switch would.
+static void
+record_cue_birdseye(void)
+{
+	camera_birdseye_view(TRUE);
+	window_birdseye_set_active(TRUE);
+}
+
+// Points the switch straight at root_dnode instead of leaving it to land
+// wherever the mode switch's own automatic pan would otherwise take it.
+// app_switch_mode()'s enter path schedules initial_camera_pan() one tick
+// later, which -- entering MapV, a non-TreeV mode -- calls camera_look_
+// at_full(globals.current_node, MORPH_INV_QUADRATIC, 1.0);
+// globals.current_node is still whatever the look-at cue above left it
+// (src/sdl/gpu.cpp -- neither the warp nor bird's-eye cues touch it), so
+// without this the camera would frame gpu.cpp's MapV counterpart first
+// and only then need a *second*, separate reorientation to take in the
+// whole squarified layout -- two stacked camera cuts instead of one.
+// Bonus: camera_init() (src/camera.c) special-cases globals.current_node
+// == root_dnode for MapV with a ready-made top-down framing sized to the
+// whole tree, so this is also what makes the mode-entry pan land on a
+// clean overhead establishing shot of the finale rather than an
+// arbitrary one.
+static void
+record_cue_switch_mapv(void)
+{
+	globals.current_node = root_dnode;
+	app_switch_mode((int)FSV_MAPV);
+}
+
+// The closing revolve is a continuous cue, driven per-frame by a
+// t-range in run_record_mode() below rather than a one-shot RecordCue
+// entry -- camera_revolve() is an immediate delta (the same call
+// input.cpp makes per mouse-motion event), not a morph, so "smooth"
+// here means "called with a small delta every recorded frame across
+// the range".
+// The 4.0s gap between the warp and bird's-eye cues (below) is not
+// arbitrary: fsn_warp_pose()'s own travel-proportional formula
+// (camera.c) lands on FSN_CAMERA_MAX_PAN_TIME (4.0s) for this checkout's
+// actual src/ tree -- confirmed by instrumenting a run -- because the
+// warp's low, close "swoop" pose sits far from camera_look_at_full()'s
+// wider establishing shot in the camera's own position space. Firing
+// the bird's-eye cue before that pan lands would interrupt it
+// mid-flight: camera_pan_break() (inside camera_birdseye_view())
+// cleanly cancels the warp's still-running theta/phi/distance *and*
+// target.x/y/z morphs, but leaves the target frozen wherever the
+// interrupted swoop happened to be -- partway toward a point
+// deliberately raised above the pedestal (fsn_warp_pose()'s
+// FSN_WARP_HEIGHT_LIFT) -- so bird's-eye would then orbit that odd
+// half-lifted point instead of a clean, settled one. Letting the warp
+// finish first keeps the two beats visually distinct.
 static const RecordCue g_record_cues[] = {
-	{ 4.6, record_cue_expand_sdl },
-	{ 7.2, record_cue_look_gpu_cpp },
-	{ 11.6, record_cue_switch_treev },
+	{ 4.5, record_cue_expand_sdl },
+	{ 7.5, record_cue_look_gpu_cpp },
+	{ 10.0, record_cue_warp_sdl },
+	{ 14.0, record_cue_birdseye },
+	{ 18.3, record_cue_switch_mapv },
 };
 
 // Resolves a script target by path relative to the recorded root (app_
@@ -787,9 +872,7 @@ run_record_mode(const char *outdir, double duration_seconds)
 
 	g_record_sdl_dir = record_find_node("sdl");
 	g_record_gpu_cpp = record_find_node("sdl/gpu.cpp");
-	g_record_geometry_c = record_find_node("geometry.c");
-	if (g_record_sdl_dir == nullptr || g_record_gpu_cpp == nullptr ||
-	    g_record_geometry_c == nullptr)
+	if (g_record_sdl_dir == nullptr || g_record_gpu_cpp == nullptr)
 		SDL_Log("fsv: --record: one or more scripted targets not "
 		    "found under \"%s\" -- recording will skip those cues",
 		    app_root_dir());
@@ -836,14 +919,13 @@ run_record_mode(const char *outdir, double duration_seconds)
 			g_record_cues[next_cue].action();
 			next_cue++;
 		}
-		// Continuous dolly-in (~1.5s) on gpu.cpp, then -- once the
-		// TreeV switch's own pan (record_cue_switch_treev(), 1s) has
-		// landed on geometry.c -- a slow revolve for the rest of the
-		// recording. Each is a per-frame delta exactly like a mouse
-		// drag would send input.cpp -- see the block comment above.
-		if (t >= 9.8 && t < 11.3)
-			camera_dolly(-2.0);
-		if (t >= 13.0 && t < 18.5)
+		// Slow revolve for the last few seconds, once the MapV
+		// switch's own mode-entry pan (record_cue_switch_mapv(),
+		// 18.3s + 1.0s) has landed on its establishing shot of the
+		// whole squarified layout. A per-frame delta exactly like a
+		// mouse drag would send input.cpp -- see the block comment
+		// above.
+		if (t >= 19.8 && t < 23.5)
 			camera_revolve(0.3, 0.0);
 
 		fsv_animation_tick();
