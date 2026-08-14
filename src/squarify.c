@@ -1,7 +1,6 @@
 /* squarify.c — SPDX-License-Identifier: MIT
  * See squarify.h. Pure stdlib on purpose. */
 
-#include <math.h>
 #include <stdlib.h>
 
 #include "squarify.h"
@@ -57,7 +56,16 @@ squarify_layout( const SquarifyRect *bounds, const double *areas, int n,
 	if (n <= 0)
 		return;
 
+	/* Degenerate bounds (zero or negative area): free_rect.w/h would be
+	 * <= 0 too, and every downstream length is a division by one of
+	 * them (run_worst_aspect( )'s `thickness`, the per-block `len`
+	 * below) -- bail out rather than hand the caller NaN/Inf rects. */
+	if (bounds->w <= 0.0 || bounds->h <= 0.0)
+		return;
+
 	blocks = (SqBlock *)calloc( (size_t)n, sizeof(SqBlock) );
+	if (blocks == NULL)
+		return;
 	for (i = 0; i < n; i++) {
 		blocks[i].area = (areas[i] > 0.0) ? areas[i] : 0.0;
 		blocks[i].index = i;
