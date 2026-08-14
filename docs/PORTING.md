@@ -4719,6 +4719,17 @@ is: DiscV/MapV/TreeV never wrap theta the way a flight does, and their
 own pre-existing "long way round" behavior after a manual revolve
 (recorded in the Task B2 fix-round note) is out of scope here.
 
+**Follow-up (post-v0.3, user QA on the framing fix):** the pool alone
+proved nearly invisible in real use — white at ~0.55 composited alpha
+on a light-grey pedestal top, mostly self-occluded inside a packed box
+row. `fsn_draw_spotlight()` now also draws US5861885's actual beam: a
+truncated translucent cone (`FSN_SPOTLIGHT_CONE_*`, fsn-style.h) from a
+node-height-scaled apex down to the pool ellipse, silhouetting against
+sky and pedestal faces instead of the surface it sits on. Same guards
+by construction (drawn by the same function); same deployment-caveat as
+the pool (below). Tuned via `--screenshot` captures, throwaway
+`FSV_TEST_SELECT` harness, removed before commit.
+
 **Verification.**
 
 1. **Both arms build clean, `meson test` 4/4 on each.** SDL/macOS

@@ -62,7 +62,7 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 - [ ] **File-open confirm modal (Task C3):** fixed corner position, never
   moves once chosen (`ImGuiCond_Always`); relax to `ImGuiCond_FirstUseEver`
   if a remembered/cascading position is ever wanted.
-- [ ] **Selection spotlight is not deployment-aware (Task B3):** during an
+- [ ] **Selection spotlight is not deployment-aware (Task B3; applies to the light cone too):** during an
   ancestor's expand/collapse morph it draws at the node's static layout
   height — brief visible glitch only during the animation window.
 - [ ] **Overview mini-map (Task C1):** framing ignores the camera — a camera
