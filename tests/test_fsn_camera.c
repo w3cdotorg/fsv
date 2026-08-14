@@ -146,9 +146,18 @@ main(void)
 
 	/* 3. Ancestor CHAIN, not just the immediate parent: collapse both
 	 * root and dir-a, then look at the file two levels under the
-	 * collapsed root. COLEXP_EXPAND_ANY must reopen the whole chain. */
+	 * collapsed root. COLEXP_EXPAND_ANY must reopen the whole chain --
+	 * though the stubs' own dirtree_entry_expand( ) already opens root
+	 * via expand_ancestors( ) before colexp's own parent recursion even
+	 * runs, so what this scenario actually pins is the end-state
+	 * invariant (the whole chain left flagged open), not colexp's
+	 * recursion path specifically. */
 	dirtree_entry_collapse_recursive(dir_a);
 	dirtree_entry_collapse_recursive(root);
+	assert(!dirtree_entry_expanded(dir_a));
+	/* root is the one node the depth<=2 policy starts expanded --
+	 * nothing else proves its flag can clear */
+	assert(!dirtree_entry_expanded(root));
 	camera_look_at(file2);
 	assert(dirtree_entry_expanded(root));
 	assert(dirtree_entry_expanded(dir_a));

@@ -9,13 +9,12 @@
  * NOT part of libfsvcore (geometry.c joins in M3 once its GL calls are
  * gone; the others are permanently frontend-side).
  *
- * This shim provides no-op/headless implementations of exactly the
- * symbols the smoke CLI (fsv-scan) and the fixture unit test need to
- * link, so libfsvcore can be exercised standalone without pulling in
- * any GTK/GL frontend code. Exception: the dirtree section below is
- * stateful to support camera.c's collapsed-parent tests. It is NOT part of
- * libfsvcore itself — real frontends (GTK today, SDL/Metal later) provide
- * their own real implementations of these functions instead of linking this file.
+ * This shim provides headless implementations of exactly the symbols
+ * the smoke CLI (fsv-scan) and the fixture unit tests need to link.
+ * Most are no-ops; the dirtree section below is deliberately stateful
+ * (see its own comment). This shim is not part of libfsvcore -- real
+ * frontends (GTK today, SDL/Metal) provide their own real
+ * implementations of these functions instead of linking this file.
  */
 
 #include "common.h"

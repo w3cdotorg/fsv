@@ -381,11 +381,13 @@ main(void)
 	 * Deployment first: the search deliberately stops at a collapsed
 	 * directory, because the draw pass does (see fsn_nearest_recursive(
 	 * )). fsn_geometry_init( ) took every directory's deployment from
-	 * dirtree_entry_expanded( ), which is a FALSE-returning no-op in the
-	 * headless stubs -- so the whole fixture starts out collapsed and
-	 * nothing below the root would be reachable. Expanding it here is
-	 * what makes the assertions below test the walk rather than that
-	 * stub; the collapsed case gets its own check right after. */
+	 * dirtree_entry_expanded( ), which the headless stubs implement
+	 * statefully (the metanode and the scanned root, depth <= 2, start
+	 * open; everything at depth >= 3 starts collapsed) -- so nothing
+	 * below the root would be reachable without expanding it first.
+	 * Expanding it here is what makes the assertions below test the
+	 * walk rather than that starting state; the collapsed case gets its
+	 * own check right after. */
 	expand_all(root);
 	assert(fsn_layout_nearest(p_root->x, p_root->z) == root);
 	assert(fsn_layout_nearest(p_a->x, p_a->z) == dir_a);
