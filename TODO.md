@@ -82,6 +82,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   re-pan can be cancelled by the warp that follows it (benign — the warp is
   the pan the user asked for); no Search panel / full in-directory warp
   paradigm from upstream fsn.
+- [ ] **Scan exclusion is exact-basename-only (2026 rework):** no
+  prefix/glob patterns (`build*`, `*.egg-info`), no user-editable
+  exclusion list (the set in `scanfs.c` is a compile-time constant), and
+  no `--exclude`/`--no-exclude` CLI flag — the only override today is the
+  SDL Vis-menu toggle or the GTK-only `FSV_NO_EXCLUDE` environment
+  variable, both all-or-nothing. A checkout with a differently-named
+  build directory (`builddir-sdl`, `build/`, `target/`, `dist/`) or any
+  other dot-directory the fixed list doesn't name still scans and renders
+  in full.
 
 ## Still-relevant items from the 1999 upstream `TODO`
 
@@ -111,14 +120,20 @@ has native Help → Controls / About windows). Still worth doing:
   start ("graphical diff" of the filesystem).
 - [x] ~~**A way to exclude directories from the scan**~~ **Fixed**:
   `scanfs.c` now carries a built-in, deliberately conservative
-  exclusion list (exact basename match, directories only — `.git`,
-  `.svn`, `.hg`, `node_modules`, `__pycache__`, `.venv`, `.cache`,
-  `builddir`, `.builddir`); excluded directories are never traversed
-  and never enter the tree. Default on, with a Vis-menu toggle
-  (meson test `scanfs_exclude`). Together with the MapV item above,
-  a checkout with `.git`/`builddir` now renders as its source tree
-  instead of one dominant plane with everything else squeezed into a
-  sliver. Design: `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
+  exclusion list (**exact basename match only**, directories only —
+  `.git`, `.svn`, `.hg`, `node_modules`, `__pycache__`, `.venv`,
+  `.cache`, `builddir`, `.builddir`); excluded directories are never
+  traversed and never enter the tree. Default on, with a Vis-menu
+  toggle (meson test `scanfs_exclude`); the GTK arm has no such toggle,
+  so it instead honors an `FSV_NO_EXCLUDE` environment variable as its
+  off switch. Together with the MapV item above, a checkout with
+  `.git`/`builddir` now renders as its source tree instead of one
+  dominant plane with everything else squeezed into a sliver — note
+  the exact-match caveat above: a differently-named build directory
+  (`builddir-sdl`, `build/`, `target/`, `dist/`) or any other
+  dot-directory (`.superpowers`) is NOT covered by this list and still
+  scans and renders normally. Design:
+  `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
 
 ## Test-harness limitations (not product code)
 

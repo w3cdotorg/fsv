@@ -29,10 +29,14 @@
 
 
 /* Per-directory scratch beyond the five doubles FsnPedestal already
- * claims in NodeDesc::geomparams. DirNodeDesc::geomparams2 is three
- * more doubles, which is exactly what the layout needs to carry from its
- * measuring pass into its placement pass. (TreeV uses the same eight
- * doubles as one contiguous struct; FSN keeps them as two, because only
+ * claims in NodeDesc::geomparams (which has one further spare double --
+ * geomparams[5] -- since MapV's 2026 squarify rework grew it to 6; FSN
+ * doesn't use it). DirNodeDesc::geomparams2 is three more doubles,
+ * which is exactly what this layout needs to carry from its measuring
+ * pass into its placement pass. (TreeV instead uses eight doubles as
+ * one contiguous struct spanning geomparams[0..5] + geomparams2[0..1] --
+ * a different mode's different use of the same shared scratch space;
+ * FSN keeps its two arrays conceptually separate, because only
  * directories have the second half.) */
 #define FSN_DIR_SPAN(dnode)	(DIR_NODE_DESC(dnode)->geomparams2[0])
 #define FSN_DIR_COLS(dnode)	(DIR_NODE_DESC(dnode)->geomparams2[1])
