@@ -813,16 +813,24 @@ mapv_init( void )
 	XYvec root_dims;
 	double k;
 
-	/* Weigh the whole tree first: root dims and every recursive call
-	 * below read MAPV_GEOM_PARAMS(node)->area_weight, which this fills
-	 * in. Weighed from root_dnode, not the metanode (globals.fstree) --
-	 * the metanode's own entry is never drawn, so its weight (which
-	 * would double as root_dnode's own, since the metanode has exactly
-	 * one child) is irrelevant here. */
+	/* Weigh the whole tree first: every recursive call below reads
+	 * MAPV_GEOM_PARAMS(node)->area_weight, which this fills in. Weighed
+	 * from root_dnode, not the metanode (globals.fstree) -- the
+	 * metanode's own entry is never drawn, so its weight (which would
+	 * double as root_dnode's own, since the metanode has exactly one
+	 * child) is irrelevant here. */
 	mapv_weigh_recursive( root_dnode );
 
-	/* Determine dimensions of bottommost (root) node */
-	root_dims.y = sqrt( MAPV_GEOM_PARAMS(root_dnode)->area_weight / MAPV_ROOT_ASPECT_RATIO );
+	/* Determine dimensions of bottommost (root) node. Deliberately
+	 * byte-based (subtree.size), NOT area_weight: weights are relative-
+	 * only by design -- squarify_layout() normalizes areas internally
+	 * and the border-exactness math below scales by scale_factor*weight
+	 * consistently, so nothing needs the root's absolute area to be
+	 * weight-scaled. Keeping the world's physical size byte-scaled here
+	 * is what keeps the fixed mapv_dir_height/mapv_leaf_height (384/128)
+	 * proportionate and MapV's camera framing exactly as it always
+	 * was. */
+	root_dims.y = sqrt( (double)DIR_NODE_DESC(globals.fstree)->subtree.size / MAPV_ROOT_ASPECT_RATIO );
 	root_dims.x = MAPV_ROOT_ASPECT_RATIO * root_dims.y;
 
 	/* Set up base geometry */
