@@ -70,3 +70,13 @@ test_fsn_framing = executable('test_fsn_framing',
   include_directories: incdir,
   c_args: fixture_c_args)
 test('fsn_framing', test_fsn_framing)
+
+# Pure squarified-treemap module (src/squarify.c) -- MapV's layout
+# algorithm, extracted precisely so it can be tested here without the
+# GL-bound geometry.c around it.
+test_squarify = executable('test_squarify',
+  ['test_squarify.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir)
+test('squarify', test_squarify)
