@@ -42,10 +42,14 @@ every platform. `[dir]` defaults to the current directory if omitted.
 
 - **`.app` bundle** (optional, for double-clicking instead of running from
   a terminal): `packaging/macos/make-bundle.sh` copies the binary built
-  above into a standard bundle layout and ad-hoc code-signs it —
-  `packaging/macos/make-bundle.sh && open fsv.app`. See
-  [`packaging/macos/make-bundle.sh`](packaging/macos/make-bundle.sh) for
-  details (also used to build the tarball layout below).
+  above into a standard bundle layout, bundles its runtime dylib closure
+  (SDL3, glib, and their own dependencies) into `Contents/Frameworks` so
+  the result doesn't depend on your Homebrew install either, and
+  ad-hoc code-signs it — `packaging/macos/make-bundle.sh && open
+  fsv.app`. See [`packaging/macos/make-bundle.sh`](packaging/macos/make-bundle.sh)
+  for details (also used to build the release tarball below); pass
+  `--no-bundle-dylibs` while iterating locally to skip the copy/re-sign
+  cost and keep depending on your Homebrew install instead.
 - **Xcode project** (optional, for people who'd rather hit Cmd-B than type
   `meson`/`ninja`): `open packaging/xcode/fsv.xcodeproj`. It's a thin
   wrapper around the same Meson build — see
@@ -53,12 +57,15 @@ every platform. `[dir]` defaults to the current directory if omitted.
 - **Prebuilt binaries**: every push builds macOS (arm64) and Linux
   (x86_64) binaries; tagged releases (`v*`) attach both as `.tar.gz`
   assets on the [GitHub Releases](../../releases) page — see
-  [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The macOS
-  binary still needs Homebrew's libraries at runtime (`brew install glib
-  sdl3`): it links them by their `/opt/homebrew/opt/…` install paths and
-  they are not bundled, so this applies to an `.app` built from it too.
-  Without them it exits immediately with a dyld "Library not loaded"
-  error.
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The release
+  macOS asset is a **self-contained `fsv.app`**: CI runs
+  `make-bundle.sh` on the macOS runner and audits the result (`otool -l`
+  across the binary and every bundled dylib) for any leftover
+  `/opt/homebrew` reference, failing the job if one slips through — so
+  no Homebrew install is required to run it, just unpack the tarball and
+  right-click → Open (it's ad-hoc signed, not notarized, so Gatekeeper
+  needs that one-time override). Building from source, per the commands
+  above, still needs the Homebrew deps.
 
 ### Linux
 

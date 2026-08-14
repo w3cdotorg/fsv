@@ -63,10 +63,22 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 
 ## Build / distribution debt
 
-- [ ] **Bundle runtime dylibs into `Contents/Frameworks`**
-  (`install_name_tool` / `dylibbundler`). The `.app` and tarball currently
-  require `brew install glib sdl3`; bundling is the real fix for distributing
-  to users without Homebrew. (PORTING.md, Task 6.2/6.3 notes)
+- [x] **Bundle runtime dylibs into `Contents/Frameworks`** — done.
+  `packaging/macos/make-bundle.sh` now computes the transitive non-system
+  dylib closure via `otool -L` (no hard-coded list), copies it into
+  `Contents/Frameworks`, rewrites ids/loads to `@rpath` and adds an
+  `@executable_path/../Frameworks` rpath with `install_name_tool`, strips
+  any stray absolute `LC_RPATH` entries left over from the link (these
+  don't show in `otool -L`, only `otool -l`, and could otherwise let dyld
+  silently fall back to a Homebrew copy on a machine that happens to have
+  one), and re-signs everything ad-hoc inside-out. On by default;
+  `--no-bundle-dylibs` keeps the old Homebrew-dependent behavior for local
+  dev iteration. CI runs this on the macOS runner (the only one with the
+  Homebrew deps the closure walk needs) and gates on a same-job audit —
+  `otool -l` across the bundled binary and every `Contents/Frameworks`
+  dylib, failing the job on any `/opt/homebrew` match — so the tagged
+  release's `fsv.app` is self-contained as a CI-enforced fact, not a
+  hoped-for one. (PORTING.md, Task 6.2/6.3 notes; `.github/workflows/ci.yml`)
 - [ ] **Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
   (`GL/glu.h` not found). Pre-existing; reserved for a future OpenGL-removal
   task. (PORTING.md, Task 1.1 notes)

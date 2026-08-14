@@ -3033,6 +3033,24 @@ Install section and `packaging/xcode/README.md`'s bundle section.
 into `Contents/Frameworks`) remains deferred, and is the real fix if
 this ever needs to be distributed to people who don't have Homebrew.
 
+**Closed** (dylib-bundling task, after this one): `make-bundle.sh`
+bundles by default now — it walks the transitive non-system dylib
+closure via `otool -L`, copies it into `Contents/Frameworks`, rewrites
+the binary's and each dylib's own load commands to `@rpath` with
+`install_name_tool`, strips stray absolute `LC_RPATH` entries left over
+from the link (invisible to `otool -L`, only `otool -l` shows them —
+and left in place, they'd let dyld silently prefer a Homebrew copy over
+the bundled one on a machine that happens to have both), and re-signs
+ad-hoc inside-out. `--no-bundle-dylibs` keeps this section's original,
+Homebrew-dependent behavior for local dev use. The release workflow now
+runs this on the macOS runner (the only place with the Homebrew deps
+the closure walk needs) and fails the job if a same-job `otool -l`
+audit over the binary + every bundled dylib finds any remaining
+`/opt/homebrew` reference — so the release `USAGE.txt`, README, and
+`packaging/xcode/README.md` no longer need the `brew install glib
+sdl3` runtime caveat this note describes; they've been updated
+accordingly. See `.github/workflows/ci.yml` and `TODO.md`.
+
 ### Minor: `--record` no longer offers dead menu items
 
 `--record`'s capture loop draws the real menu bar and pumps real
