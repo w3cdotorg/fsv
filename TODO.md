@@ -37,10 +37,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 - [x] ~~**"Long way round" theta on birds-eye return in DiscV/MapV/TreeV** after
   a manual revolve. Fixed for FSV_FSN with `unwrap_theta_toward()`; other
   modes' pre-existing behavior explicitly left open. (Task B2 fix-round note)~~
-  **Closed**: `unwrap_theta_toward()` was applied to all birds-eye arms
-  (FSV_FSN's up and down, plus MapV/TreeV going-down) and wrapped at both
-  `fsn_look_at()` and `camera_birdseye_view()` entry points. Regression-locked
-  by meson test `camera_theta`.
+  **Closed**: `unwrap_theta_toward()` is now called at six re-pose sites,
+  each immediately before that site's theta morph -- MapV's and TreeV's
+  bird's-eye going-up arms, the shared bird's-eye going-down restore (now
+  unconditional across all four modes, DiscV included), `mapv_look_at()`,
+  `treev_look_at()`, and `camera_treev_lpan_look_at()`. DiscV's own
+  bird's-eye going-up arm is the deliberate exception: theta is inert to
+  DiscV's pose math there, so it is initialized defensively (rather than
+  unwrapped toward anything) per the F1 fix in the fsn-mode final review.
+  Regression-locked by meson test `camera_theta`.
 
 **The Known-bugs section is now fully closed.**
 

@@ -99,7 +99,16 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
 		 * forced to ~2 degrees, near-level, exposing ~46% of the
 		 * gradient) confirming the fuller range still reads as night --
 		 * dark, smoothly graduated, no washed-out band -- not just the
-		 * thin strip the default framing shows. The ground is
+		 * thin strip the default framing shows. Even that tilted capture
+		 * does not reach sky_horizon's own endpoint value: camera.c
+		 * clamps camera->phi to [1, 90] (`CLAMP(camera->phi, 1.0, 90.0)`),
+		 * so near-straight-down is as level as the camera ever gets, and
+		 * at most roughly half the sky_top->sky_horizon gradient is ever
+		 * actually on screen -- the ~46% the tilted capture observed is
+		 * close to that ceiling, not a conservative sample of a much
+		 * larger visible range. sky_horizon itself is therefore
+		 * extrapolated from the visible ~14%/~46% bands, not directly
+		 * observed at the horizon itself. The ground is
 		 * deliberately unchanged -- see its own comment below. */
 		"night",
 		{ 0.012f, 0.02f, 0.09f }, /* sky_top: deep blue zenith, not pure black */
