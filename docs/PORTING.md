@@ -5775,6 +5775,23 @@ one pedestal instead of the whole landscape:
 
 Not pushed, per the global constraints.
 
+## Post-v0.3: MapV squarify + scan exclusion (2026-08-14)
+
+Closes two 1999-upstream `TODO` items (see `TODO.md`), independent of
+the fsn-mode work above. Three changes: (1) `src/squarify.c`, a pure
+squarified-treemap module (Bruls et al. 2000) replacing `geometry.c`'s
+old greedy row layout — no more paper-thin frontmost rows; (2) a
+√size default area scale (linear/log₂ as Display-menu alternatives,
+persisted, loaded pre-scan in `ui_dialogs_init()`); (3) `scanfs.c`'s
+built-in, conservative exclusion list (exact basename match, dirs
+only — `.git`, `builddir`, `node_modules`, etc.), on by default with
+a Vis-menu toggle. Two new tests (`squarify`, `scanfs_exclude`), suite
+now 8/8. GTK arm gets the same core defaults (squarify, √size,
+exclusion-on) with no dedicated GTK UI added for any of the three —
+the Vis toggle and Display option are SDL-frontend-only, matching this
+port's existing pattern of core-first, frontend-as-needed. Design:
+`docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
+
 ## Why this architecture
 
 The core of fsv is already cleanly separated: `scanfs.c`, `geometry.c`

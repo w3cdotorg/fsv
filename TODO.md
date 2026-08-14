@@ -91,14 +91,14 @@ the `lib/nvstore.c` stub for real). Obsolete with the SDL/ImGui frontend:
 the Glade/GTK-cruft rewrite and the `/bin/sh` online-help hack (the port
 has native Help → Controls / About windows). Still worth doing:
 
-- [ ] **Rewrite the MapV layout algorithm.** "Works, but doesn't generate
-  very optimal layouts — some nodes too wide, some too tall, frontmost rows
-  paper-thin." Still true: `geometry.c`'s third pass is literally
-  `/* Note to self: write layout optimization routine sometime */`, and the
-  effect is very visible on byte-skewed directories (a checkout with
-  builddirs + `.git` renders as a vast plane with all small files squeezed
-  into a sliver). A modern squarified-treemap pass — and/or an optional
-  non-linear area scale (√size or log) — would fix both complaints.
+- [x] ~~**Rewrite the MapV layout algorithm.**~~ **Fixed**: `geometry.c`'s
+  greedy row layout is replaced by a pure squarified-treemap module
+  (`src/squarify.c`, Bruls et al. 2000 — meson test `squarify`), and the
+  area scale defaults to √size instead of linear bytes, with linear/log₂
+  as Display-menu alternatives (persisted, loaded before the first scan
+  in `ui_dialogs_init()`). Together they fix both original complaints —
+  no more paper-thin frontmost rows, no more one node dwarfing the rest.
+  Design: `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
 - [ ] **Smarter pointing/selection for faraway nodes** (e.g. birds-eye
   view): picking returns exactly the node under the hotspot even when it's
   sub-pixel small; should walk up to an ancestor above a pixel-based
@@ -109,9 +109,16 @@ has native Help → Controls / About windows). Still worth doing:
   re-scan only subdirectories with updated timestamps on the next launch;
   would also let ColorByTimestamp use the previous scan as the spectrum
   start ("graphical diff" of the filesystem).
-- [ ] **A way to exclude directories from the scan** (originally about slow
-  AFS mount points; today the everyday case is `.git`/build dirs, which
-  also dominate MapV's byte-proportional layout — see the MapV item above).
+- [x] ~~**A way to exclude directories from the scan**~~ **Fixed**:
+  `scanfs.c` now carries a built-in, deliberately conservative
+  exclusion list (exact basename match, directories only — `.git`,
+  `.svn`, `.hg`, `node_modules`, `__pycache__`, `.venv`, `.cache`,
+  `builddir`, `.builddir`); excluded directories are never traversed
+  and never enter the tree. Default on, with a Vis-menu toggle
+  (meson test `scanfs_exclude`). Together with the MapV item above,
+  a checkout with `.git`/`builddir` now renders as its source tree
+  instead of one dominant plane with everything else squeezed into a
+  sliver. Design: `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
 
 ## Test-harness limitations (not product code)
 
