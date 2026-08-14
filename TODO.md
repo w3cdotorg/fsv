@@ -15,10 +15,13 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   "disclosed gaps" note without noticing the later fix round. Now
   regression-locked by `tests/test_fsn_camera.c` (meson test
   `fsn_camera`), which also made the headless dirtree stubs stateful.
-- [ ] **`fsn_look_at()` file-zoom framing lands the camera nose-first against
+- [x] ~~**`fsn_look_at()` file-zoom framing lands the camera nose-first against
   the box row** when click-to-fly targets a file in a densely packed
-  directory. `camera.c` framing rule from Task B1; surfaced by Task B3's
-  verification. (PORTING.md, Task B3/C1 gaps)
+  directory.~~ **Fixed**: a file is now framed at its parent directory's
+  establishing distance (parent-footprint diameter rule, expanded wire arm
+  included), target left on the file's box — the exact framing Task B3's
+  verification recorded as the legible shot. Regression-locked by
+  `tests/test_fsn_framing.c` (meson test `fsn_framing`).
 - [ ] **"Night" landscape preset was never calibrated** (Task A1 disclosed
   gap); auto-landscape only ever selects "classic", so it's currently
   unreachable in practice but still ships uncalibrated.
