@@ -112,7 +112,13 @@ gpu_set_depth_test( FsvDepthTest test )
 		 * expressible here any more than FSV_DEPTH_ALWAYS_NOWRITE's
 		 * is -- glDepthMask( ) is never toggled by this file at all --
 		 * documented rather than left to fall into the default: case
-		 * below by coincidence. */
+		 * below by coincidence. Now that the spotlight includes a
+		 * light cone as well as the ground pool, this gap is no
+		 * longer purely cosmetic: wiring FSN up on this frontend
+		 * without implementing "no write" here would draw an
+		 * opaque, depth-writing white cone over the selection --
+		 * occluding it and corrupting every later depth-tested draw
+		 * behind that cone, not just showing a wrong-looking disc. */
 		case FSV_DEPTH_LESS_NOWRITE:
 		glDepthFunc( GL_LESS );
 		break;

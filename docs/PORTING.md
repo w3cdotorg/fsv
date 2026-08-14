@@ -4727,8 +4727,8 @@ truncated translucent cone (`FSN_SPOTLIGHT_CONE_*`, fsn-style.h) from a
 node-height-scaled apex down to the pool ellipse, silhouetting against
 sky and pedestal faces instead of the surface it sits on. Same guards
 by construction (drawn by the same function); same deployment-caveat as
-the pool (below). Tuned via `--screenshot` captures, throwaway
-`FSV_TEST_SELECT` harness, removed before commit.
+the pool (see *Concerns / disclosed gaps* below). Tuned via `--screenshot`
+captures, throwaway `FSV_TEST_SELECT` harness, removed before commit.
 
 **Verification.**
 
@@ -4985,7 +4985,33 @@ Verified:
   the brief animation window, and only for a node whose ancestor is
   *also* the one currently being expanded/collapsed; accepted as YAGNI
   for a decorative decal rather than threading deployment through
-  `fsn_draw_spotlight()`.
+  `fsn_draw_spotlight()`. The light cone (follow-up above) amplifies the
+  same glitch rather than adding a new one: its apex rides `ped->h` off
+  the same static layout height the pool uses, so during the morph
+  window it is a 384–1536-unit beam anchored mid-air off a height the
+  node doesn't actually have yet, proportionally taller and more visible
+  than the pool's own mis-anchoring.
+- **The selected node's own color visibly desaturates under the beam** —
+  roughly 43% saturation loss measured against the unselected color. This
+  is the translucent-decal trade-off inherent to painting a white,
+  alpha-blended cone directly over the node's own box faces (same
+  mechanism as the pool); `FSN_SPOTLIGHT_CONE_ALPHA` and the ring alphas
+  are re-tunable if a future pass wants less wash-out, but the whole
+  design leans on "over" compositing (see the ring-table comment above),
+  so some desaturation under the decal is inherent to the approach, not a
+  bug to fix in isolation.
+- **The beam disappears entirely when the camera is inside the cone.**
+  The scene pipeline back-face culls (see `fsn_gldraw_spotlight_cone()`'s
+  own comment), so a camera whose position is within the cone's radius
+  sees only back faces and the beam vanishes — reachable in practice via
+  warp-lite (Task C4)'s `camera_warp_to()`, which can land the camera
+  inside a directory's own cone. Benign: recorded via a warp-lite pose in
+  this task's own `--screenshot` captures (nothing else in the scene is
+  affected), not a rendering defect. A fade-on-entry guard — skip or fade
+  the cone once the camera's horizontal distance to its axis drops inside
+  the cone's radius at camera height — is ticketed in `TODO.md` rather
+  than fixed here, since it would need the camera's live position
+  threaded into a function that today only reads layout state.
 - **"Night" landscape remains uncalibrated** (Task A1's own disclosed
   gap; untouched here, and auto-landscape only ever selects "classic").
 

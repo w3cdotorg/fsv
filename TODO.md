@@ -65,6 +65,13 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 - [ ] **Selection spotlight is not deployment-aware (Task B3; applies to the light cone too):** during an
   ancestor's expand/collapse morph it draws at the node's static layout
   height — brief visible glitch only during the animation window.
+- [ ] **Spotlight beam vanishes when the camera is inside the cone:** the
+  scene pipeline back-face culls, so a camera positioned inside the light
+  cone's radius sees only its back faces and the beam disappears entirely
+  — reachable via warp-lite (Task C4)'s `camera_warp_to()`. Benign (the
+  rest of the scene renders fine), but the intended fix is a fade-on-entry
+  guard: skip or fade the cone once the camera's horizontal distance to
+  its axis is inside the cone's radius at the camera's height.
 - [ ] **Overview mini-map (Task C1):** framing ignores the camera — a camera
   far outside the landscape pins its marker to the frame edge instead of
   zooming out, so the marker's distance is unreadable while clamped. Also
