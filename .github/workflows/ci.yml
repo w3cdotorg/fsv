@@ -6,7 +6,13 @@
 #   macos-metal  Build the SDL/Metal frontend on a real Apple Silicon
 #                runner, run the headless tests, best-effort a
 #                --screenshot smoke test (see the comment on that step
-#                for why it is best-effort), upload the binary.
+#                for why it is best-effort), bundle the runtime dylib
+#                closure into a self-contained fsv.app
+#                (packaging/macos/make-bundle.sh -- brew deps are only
+#                present on this runner, so bundling happens here, not
+#                in `release`), audit the bundle for any leftover
+#                /opt/homebrew load commands (fails the job if found --
+#                see the "Audit .app" step), and upload fsv.app.
 #   linux-gtk    Build the legacy GTK frontend + headless tests on
 #                Linux -- this is the anti-regression job: since Task
 #                5.3 the meson default frontend is `sdl`, so this job
@@ -16,9 +22,9 @@
 #                the "SDL3 on ubuntu" comment below for why this is
 #                continue-on-error and why SDL3 is compiled from
 #                source rather than apt-installed.
-#   release      Only on `v*` tag pushes: repackage the macOS and Linux
-#                binaries as tar.gz and attach them to a GitHub
-#                Release via the `gh` CLI.
+#   release      Only on `v*` tag pushes: repackage the self-contained
+#                macOS fsv.app and the Linux binary as tar.gz and
+#                attach them to a GitHub Release via the `gh` CLI.
 #
 # Every job runs on push and pull_request; only `release` is gated to
 # tag pushes.
@@ -80,11 +86,44 @@ jobs:
           path: fsv-screenshot.bmp
           if-no-files-found: ignore
 
-      - name: Upload macOS binary
+      # This runner has the brew deps make-bundle.sh's dylib closure
+      # walk needs to find (SDL3, glib, and their own deps) -- the
+      # release job runs on ubuntu-24.04 and has neither Homebrew nor
+      # otool/install_name_tool, so bundling has to happen here, not
+      # there. Default invocation (no --no-bundle-dylibs): the closure
+      # gets copied into Contents/Frameworks and re-signed ad-hoc, per
+      # packaging/macos/make-bundle.sh.
+      - name: Build self-contained .app bundle
+        run: packaging/macos/make-bundle.sh builddir fsv.app
+
+      # This is what makes the "self-contained" claim CI-enforced
+      # rather than hoped: make-bundle.sh strips stray absolute
+      # LC_RPATHs and rewrites LC_LOAD_DYLIB entries to @rpath, but a
+      # regression there (or a future dependency that slips past the
+      # closure walk) would only show up as a dyld "Library not
+      # loaded" error on someone else's machine that lacks the
+      # matching Homebrew install -- never on the maintainer's own,
+      # where /opt/homebrew already exists and dyld happily falls back
+      # to it. otool -l (not -L: this needs to catch stray LC_RPATH
+      # commands too, which -L doesn't show) on every Mach-O in the
+      # bundle, checked for any remaining /opt/homebrew reference,
+      # turns that silent, works-on-my-machine failure mode into a
+      # hard CI failure instead.
+      - name: Audit .app for leftover Homebrew load commands
+        run: |
+          set -euo pipefail
+          files=(fsv.app/Contents/MacOS/fsv fsv.app/Contents/Frameworks/*)
+          if otool -l "${files[@]}" | grep '/opt/homebrew'; then
+            echo "::error::fsv.app still references /opt/homebrew after dylib bundling -- self-containment audit failed (otool -l), see matches above"
+            exit 1
+          fi
+          echo "OK -- no /opt/homebrew load-command references found in fsv.app (otool -l)"
+
+      - name: Upload macOS .app bundle
         uses: actions/upload-artifact@v4
         with:
-          name: fsv-macos-arm64
-          path: builddir/src/sdl/fsv
+          name: fsv-macos-app
+          path: fsv.app
 
   linux-gtk:
     runs-on: ubuntu-24.04
@@ -270,35 +309,53 @@ jobs:
       # Neither tarball ships shaders/: shaders are compiled offline and
       # embedded in the binary (Task 3.2, tools/embed-shaders.py), so
       # nothing under shaders/ is needed at runtime.
+      #
+      # The macOS side ships the already-bundled, already-audited
+      # fsv.app built by the macos-metal job (see its "Build
+      # self-contained .app bundle" / "Audit .app" steps) as-is -- this
+      # job runs on ubuntu-24.04 and has no otool/install_name_tool to
+      # redo or verify any of that work, so it only repackages.
       - name: Assemble release tarballs
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           mkdir -p dist
 
-          # --- macOS (arm64): binary + Xcode-bundle packaging + docs ---
+          # --- macOS (arm64): self-contained .app bundle + docs ---
           macos_dir="fsv-${tag}-macos-arm64"
           mkdir -p "$macos_dir"
-          cp artifacts/fsv-macos-arm64/fsv "$macos_dir/"
-          chmod +x "$macos_dir/fsv"
-          cp packaging/macos/Info.plist packaging/macos/make-bundle.sh "$macos_dir/"
+          cp -R artifacts/fsv-macos-app/fsv.app "$macos_dir/fsv.app"
+          chmod +x "$macos_dir/fsv.app/Contents/MacOS/fsv"
           cp README.md LICENSE.md "$macos_dir/"
           cat > "$macos_dir/USAGE.txt" <<'EOF'
           fsv (SDL/Metal frontend) -- release tarball contents:
 
-            fsv             the arm64 binary -- run directly: ./fsv [rootdir]
-            Info.plist,
-            make-bundle.sh  packaging helpers to build a proper fsv.app bundle:
-                              ./make-bundle.sh ./fsv fsv.app && open fsv.app
+            fsv.app         self-contained macOS app bundle -- its runtime
+                              dependencies (SDL3, glib, and their own deps)
+                              are bundled inside Contents/Frameworks, so no
+                              Homebrew install is required to run it.
             README.md,
             LICENSE.md      project docs
 
-          Requires: brew install glib sdl3
+          To run: unpack this tarball, then right-click (Control-click)
+          fsv.app and choose "Open". fsv.app is ad-hoc code-signed (no paid
+          Apple Developer account/notarization), so Gatekeeper will warn
+          it's from an unidentified developer; "Open" on that dialog runs
+          it anyway and remembers the choice next time. Double-clicking
+          instead of right-click-Open hits the same Gatekeeper quarantine
+          and refuses to launch with no obvious fix -- use right-click Open
+          the first time.
 
-          The binary links against Homebrew's libglib-2.0 and libSDL3 by
-          their /opt/homebrew/opt/... install paths; they are not bundled,
-          so both the bare binary and an fsv.app built by make-bundle.sh
-          need them present on the machine that runs it.
+          Command-line use: fsv.app/Contents/MacOS/fsv [rootdir]
+
+          Building your own bundle from source (dev flow): `meson setup
+          builddir && ninja -C builddir` builds a bare, non-bundled binary
+          at builddir/src/sdl/fsv that still needs `brew install glib
+          sdl3` to run; packaging/macos/make-bundle.sh in the repo turns
+          that into a self-contained fsv.app the same way this tarball's
+          was built (or pass --no-bundle-dylibs while iterating, to skip
+          the copy/re-sign cost and keep depending on your Homebrew
+          install instead).
 
           Shaders are compiled offline and embedded in the binary (see
           docs/PORTING.md, Task 3.2) -- nothing under shaders/ is needed at
