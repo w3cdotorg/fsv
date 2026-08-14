@@ -17,5 +17,10 @@
 
 void scanfs( const char *dir );
 
+/* Built-in scan exclusion (see scanfs.c's excluded_dir_names[] doc
+ * comment). Default is TRUE. */
+void scanfs_set_exclusion( boolean enabled );
+boolean scanfs_get_exclusion( void );
+
 
 /* end scanfs.h */

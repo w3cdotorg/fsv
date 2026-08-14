@@ -50,6 +50,46 @@ static int64 size_counts[NUM_NODE_TYPES];
 static int stat_count = 0;
 
 
+/* Built-in scan exclusion (2026 rework; the upstream-1999 TODO's "way
+ * to exclude directories" -- originally slow AFS mounts, today
+ * .git/build dirs that also dominate MapV's byte-proportional
+ * layout). Deliberately conservative: exact basename match,
+ * DIRECTORIES only, no 'build'/'target'/'dist' (too many real-content
+ * false positives). The SDL frontend exposes a toggle (Vis menu);
+ * default is on. */
+static const char *excluded_dir_names[] = {
+	".git", ".svn", ".hg", "node_modules", "__pycache__",
+	".venv", ".cache", "builddir", ".builddir"
+};
+
+static boolean scanfs_exclusion = TRUE;
+
+void
+scanfs_set_exclusion( boolean enabled )
+{
+	scanfs_exclusion = enabled;
+}
+
+boolean
+scanfs_get_exclusion( void )
+{
+	return scanfs_exclusion;
+}
+
+static boolean
+dir_name_excluded( const char *name )
+{
+	int i;
+
+	if (!scanfs_exclusion)
+		return FALSE;
+	for (i = 0; i < (int)G_N_ELEMENTS(excluded_dir_names); i++)
+		if (strcmp( name, excluded_dir_names[i] ) == 0)
+			return TRUE;
+	return FALSE;
+}
+
+
 /* Display form of a directory entry's name, interned in the same
  * string chunk the raw name lives in (so it has the same lifetime and
  * costs one free, not one per node).
@@ -201,6 +241,16 @@ process_dir( const char *dir, GNode *dnode )
 			continue;
 		}
 		++stat_count;
+
+		if (NODE_IS_DIR(node) && dir_name_excluded( NODE_DESC(node)->name )) {
+			/* Excluded: never traversed, never in the tree -- same
+			 * removal the stat-failure path above uses. node_id is
+			 * NOT incremented (mirrors the stat-failure arm, which
+			 * also skips past this node without claiming an id) */
+			g_node_unlink( node );
+			g_node_destroy( node );
+			continue;
+		}
 		++node_id;
 
 		if (NODE_IS_DIR(node)) {

@@ -80,3 +80,14 @@ test_squarify = executable('test_squarify',
   dependencies: core_test_deps,
   include_directories: incdir)
 test('squarify', test_squarify)
+
+# Built-in scan exclusion (scanfs.c): excluded dir names never enter
+# the tree; files with those names always do; the toggle restores full
+# scanning. Builds its own mkdtemp tree (a committed .git fixture dir
+# would fight git itself).
+test_scanfs_exclude = executable('test_scanfs_exclude',
+  ['test_scanfs_exclude.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir)
+test('scanfs_exclude', test_scanfs_exclude)

@@ -55,6 +55,7 @@ extern "C" {
 #include "dirtree.h"
 #include "geometry.h" /* MapVAreaScale, mapv_set_area_scale() -- MapV area scale startup load, see ui_dialogs_init() */
 #include "nvstore.h" /* Task C3: open_files_allowed persistence, same API src/sdl/ui_rail.cpp's Marks panel already uses directly */
+#include "scanfs.h" /* scanfs_set_exclusion() -- scan exclusion startup load, see ui_dialogs_init() */
 }
 
 namespace {
@@ -666,6 +667,18 @@ bool g_open_files_allowed = false;
 // centralized).
 const char key_mapv_area_scale[] = "mapv_area_scale";
 
+// nvstore key for the built-in scan exclusion toggle (Vis -> "Skip
+// VCS/build dirs", src/sdl/ui_main.cpp). Same reasoning as
+// key_mapv_area_scale just above: the write side lives in ui_main.cpp
+// next to the menu item, but the read has to happen here, in
+// ui_dialogs_init() (main.cpp:1110), because that runs before
+// load_filesystem()'s initial scanfs() call (main.cpp:1205) -- a
+// persisted "off" has to be in effect for that very first scan, not
+// just for a later Rescan. This key string must match ui_main.cpp's
+// own key_scan_exclusion exactly (two literals, one per writer/reader,
+// same as key_mapv_area_scale/key_open_files_allowed above).
+const char key_scan_exclusion[] = "scan_exclusion";
+
 // Flips the persisted choice. The only caller is the confirm modal's
 // "Open" button below, and only when its "Always allow" checkbox is
 // ticked -- there is no UI path that can ever set this back to false
@@ -857,6 +870,12 @@ ui_dialogs_init(void)
 	// frame -- see key_mapv_area_scale's doc comment above.
 	mapv_set_area_scale((MapVAreaScale)nvs_read_int_default(
 	    fsvrc, key_mapv_area_scale, MAPV_SCALE_SQRT));
+	// Scan exclusion: read here too, and for the same reason -- it has
+	// to be in effect before the initial scanfs() call below (well,
+	// in main.cpp's load_filesystem()), not just for a later Rescan.
+	// Default TRUE matches scanfs.c's own scanfs_exclusion initializer.
+	scanfs_set_exclusion(nvs_read_boolean_default(
+	    fsvrc, key_scan_exclusion, TRUE) != 0);
 	nvs_close(fsvrc);
 }
 

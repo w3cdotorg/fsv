@@ -60,6 +60,7 @@ extern "C" {
 #include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- Display menu */
 #include "geometry.h" /* MapVAreaScale, mapv_get/set_area_scale(), geometry_init() -- Display menu */
 #include "nvstore.h" /* MapV area scale persistence, same API ui_dialogs.cpp's open_files_allowed uses */
+#include "scanfs.h" /* scanfs_get/set_exclusion() -- Vis menu's "Skip VCS/build dirs" toggle */
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -159,6 +160,26 @@ save_mapv_area_scale(void)
 {
 	NVStore *fsvrc = nvs_open(CONFIG_FILE);
 	nvs_write_int(fsvrc, key_mapv_area_scale, (int)mapv_get_area_scale());
+	nvs_close(fsvrc);
+}
+
+// ---- Vis: built-in scan exclusion -----------------------------------------
+//
+// Write side of scanfs_set_exclusion()'s persistence -- same nvstore idiom
+// as save_mapv_area_scale() just above. The READ side (startup load)
+// deliberately does NOT live here, for the same reason mapv_area_scale's
+// doesn't: it has to be in place before the very first scan
+// (load_filesystem(), main.cpp:1205), which runs before ui_main_draw()
+// ever gets a frame. Loaded instead in ui_dialogs.cpp's ui_dialogs_init()
+// (main.cpp:1110, ahead of load_filesystem()). This key string must match
+// ui_dialogs.cpp's own key_scan_exclusion exactly.
+static const char key_scan_exclusion[] = "scan_exclusion";
+
+static void
+save_scan_exclusion(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	nvs_write_boolean(fsvrc, key_scan_exclusion, scanfs_get_exclusion() ? TRUE : FALSE);
 	nvs_close(fsvrc);
 }
 
@@ -294,6 +315,20 @@ ui_main_draw(void)
 			// only has to keep building. See docs/PORTING.md.
 			if (ImGui::MenuItem("FSN", nullptr, mode == FSV_FSN))
 				app_switch_mode(FSV_FSN);
+			ImGui::Separator();
+			// Built-in scan exclusion (scanfs.c's conservative list).
+			// Toggling changes the tree's contents, so it queues a
+			// rescan -- same deferred machinery as File -> Rescan, and
+			// the same root_change_ok guard (a rescan mid-flight or
+			// mid-recording would be as meaningless here as it is there).
+			if (ImGui::MenuItem("Skip VCS/build dirs", nullptr,
+			    scanfs_get_exclusion() != 0, root_change_ok)) {
+				scanfs_set_exclusion(scanfs_get_exclusion() ? FALSE : TRUE);
+				save_scan_exclusion(); // nvstore, same pattern as the scale
+				app_request_rescan();
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(".git .svn .hg node_modules __pycache__ .venv .cache builddir .builddir");
 			ImGui::EndMenu();
 		}
 
