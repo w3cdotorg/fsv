@@ -92,8 +92,15 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
 		 * instead: a night sky with a readable horizon, the
 		 * wires/labels/age-spectrum colors staying legible, and the
 		 * selection spotlight's beam staying visible against the sky.
-		 * The ground is deliberately unchanged -- see its own comment
-		 * below. */
+		 * Validated against two capture framings: the default FSN
+		 * establishing shot (where the ground occludes all but the top
+		 * ~14% of the sky_top->sky_horizon gradient -- draw_landscape( ),
+		 * src/sdl/gpu.cpp) and one throwaway tilted capture (camera->phi
+		 * forced to ~2 degrees, near-level, exposing ~46% of the
+		 * gradient) confirming the fuller range still reads as night --
+		 * dark, smoothly graduated, no washed-out band -- not just the
+		 * thin strip the default framing shows. The ground is
+		 * deliberately unchanged -- see its own comment below. */
 		"night",
 		{ 0.012f, 0.02f, 0.09f }, /* sky_top: deep blue zenith, not pure black */
 		{ 0.22f, 0.28f, 0.48f }, /* sky_horizon: moonlit glow */
