@@ -6,14 +6,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 
 ## Known bugs (highest priority)
 
-- [ ] **Clicking a file child of a *collapsed* directory aborts DEBUG builds
-  (FSN mode).** A collapsed directory still draws its immediate file children
-  as boxes on its pedestal; clicking one runs the ordinary `camera_look_at()`
-  path with no `colexp()` pre-expand (unlike the Marks panel's "Go", which
-  needed one), tripping `camera_look_at_full()`'s "parent must be expanded"
-  assertion — process abort in DEBUG, silently wrong in release. Pre-dates
-  Task C3 but made prominent by it. Likely fix: the same pre-expand the Marks
-  "Go" path already does. (PORTING.md, Task C3 gaps)
+- [x] ~~**Clicking a file child of a *collapsed* directory aborts DEBUG builds
+  (FSN mode).**~~ **Was already fixed** when this file was first written —
+  commit fa9383c (final Milestone C review) added
+  `fsn_ensure_parent_expanded()` in `src/camera.c`, centralized ahead of
+  the DEBUG assertions in both `camera_look_at_full()` and
+  `camera_warp_to()`; this ticket was collected from PORTING.md's earlier
+  "disclosed gaps" note without noticing the later fix round. Now
+  regression-locked by `tests/test_fsn_camera.c` (meson test
+  `fsn_camera`), which also made the headless dirtree stubs stateful.
 - [ ] **`fsn_look_at()` file-zoom framing lands the camera nose-first against
   the box row** when click-to-fly targets a file in a densely packed
   directory. `camera.c` framing rule from Task B1; surfaced by Task B3's
@@ -113,3 +114,10 @@ has native Help → Controls / About windows). Still worth doing:
 - [ ] **Task C4's MapV regression check is verified by code diff**, not a
   clean empirical click-through (synthetic-harness picking limitation at the
   one fixed pixel used in that mode's layout).
+- [ ] **`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks
+  (`request_frame`, `render_frame`, `viewport_size`, `set_scroll`,
+  `get_scroll`) live in that test's own `main()`**, not in
+  `tools/fsv-headless-stubs.c`. Promote them into the shared shim once a
+  second headless test needs to drive `camera.c` -- but that needs thought
+  first, since `fsv-scan` links the same shim and doesn't want a real
+  `fsv_platform` populated underneath it.

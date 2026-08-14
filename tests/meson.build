@@ -37,3 +37,16 @@ test_fsn_layout = executable('test_fsn_layout',
   include_directories: incdir,
   c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
 test('fsn_layout', test_fsn_layout)
+
+# Regression lock for the FSN collapsed-parent camera fix (fa9383c,
+# fsn_ensure_parent_expanded() -- TODO.md "Known bugs" item 1):
+# camera_look_at()/camera_warp_to() on a node whose parent directory is
+# flag-collapsed must pre-expand it instead of tripping their DEBUG
+# assertion. Depends on the headless dirtree stubs being stateful.
+test_fsn_camera = executable('test_fsn_camera',
+  ['test_fsn_camera.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  include_directories: incdir,
+  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+test('fsn_camera', test_fsn_camera)

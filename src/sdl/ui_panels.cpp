@@ -84,6 +84,9 @@ extern "C" {
 // See the file header: DirNodeDesc::tnode, repurposed as a 0/1 "row
 // open" flag instead of a GtkTreePath. NULL/non-NULL rather than a
 // dedicated bool type so no header (src/common.h) needs touching.
+// tools/fsv-headless-stubs.c mirrors these exact semantics for the
+// headless unit tests (test_fsn_camera, test_fsn_layout) -- keep the
+// two in sync.
 static inline bool
 tree_row_expanded(GNode *dnode)
 {
