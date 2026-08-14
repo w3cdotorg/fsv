@@ -18,6 +18,11 @@
 //                                 rescan" action, only Change Root
 //          -> Quit            == on_file_exit_activate() -> exit(EXIT_SUCCESS)
 //   Vis    -> DiscV/MapV/TreeV == on_vis_*_activate() -> fsv_set_mode()
+//          -> Skip VCS/build dirs == addition (2026 scan-exclusion rework,
+//                                 scanfs.c's scanfs_set/get_exclusion()); GTK
+//                                 column: none -- no toggle there, see
+//                                 docs/PORTING.md's GTK-arm note (FSV_NO_EXCLUDE
+//                                 env var is the GTK-side escape hatch instead)
 //   View   -> Directory Tree && Files == addition (Task 5.2, src/sdl/ui_panels.cpp);
 //                                 GTK's left pane has no show/hide toggle at all
 //          -> Camera Rail       == addition (fsn-mode Task A3, src/sdl/ui_rail.cpp);
@@ -34,6 +39,10 @@
 //                                 the GTK frontend's gpu_set_landscape() is a
 //                                 no-op (src/ogl-gpu-compat.c), so this menu is
 //                                 SDL-only, same as the View menu below
+//          -> MapV area scale == addition (2026 squarify rework, geometry.c's
+//                                 mapv_set/get_area_scale()); GTK column: none --
+//                                 GTK gets the same √size default with no UI to
+//                                 change it, see docs/PORTING.md
 //   Help   -> Controls        == addition; doc/mouse.html has no GTK menu entry point
 //          -> About fsv...    == on_help_about_fsv_activate() -> about(ABOUT_BEGIN)
 //
@@ -155,11 +164,25 @@ static void *g_context_menu_node = nullptr; // GNode*; void* per input.h
 // string must match ui_dialogs.cpp's own key_mapv_area_scale exactly.
 static const char key_mapv_area_scale[] = "mapv_area_scale";
 
+// Token table for key_mapv_area_scale -- must match ui_dialogs.cpp's own
+// tokens_mapv_area_scale exactly (index-for-index, matching
+// geometry.h's MapVAreaScale), for the same reason the two files each
+// carry their own copy of key_mapv_area_scale. See that file's doc
+// comment for why this is a token table (nvs_write_int_token( ) /
+// nvs_read_int_token_default( )) rather than a raw int
+// (nvs_write_int( ) / nvs_read_int_default( ) + cast).
+static const char *tokens_mapv_area_scale[] = {
+	"sqrt",
+	"linear",
+	"log2",
+	NULL
+};
+
 static void
 save_mapv_area_scale(void)
 {
 	NVStore *fsvrc = nvs_open(CONFIG_FILE);
-	nvs_write_int(fsvrc, key_mapv_area_scale, (int)mapv_get_area_scale());
+	nvs_write_int_token(fsvrc, key_mapv_area_scale, (int)mapv_get_area_scale(), tokens_mapv_area_scale);
 	nvs_close(fsvrc);
 }
 

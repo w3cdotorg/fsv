@@ -667,6 +667,24 @@ bool g_open_files_allowed = false;
 // centralized).
 const char key_mapv_area_scale[] = "mapv_area_scale";
 
+// Token table for key_mapv_area_scale, same validated-enum idiom as
+// src/color.c's tokens_color_mode (nvs_read_int_token_default( )/
+// nvs_write_int_token( )): a stray ~/.fsvrc value maps to the token
+// table's `default_val` fallback instead of an unvalidated cast landing
+// on an enumerator SWITCH_FAIL doesn't recognize (mapv_map_size( )'s
+// switch in geometry.c, and MapVAreaScale itself, both abort on an
+// out-of-range value). Order must match geometry.h's MapVAreaScale
+// exactly (index-for-index) -- same hand-kept-in-sync convention every
+// other token array in this codebase relies on. Kept as two separate
+// literal arrays (one per writer/reader), matching key_mapv_area_scale's
+// own two-literals-not-a-shared-header pattern just above.
+const char *tokens_mapv_area_scale[] = {
+	"sqrt",
+	"linear",
+	"log2",
+	NULL
+};
+
 // nvstore key for the built-in scan exclusion toggle (Vis -> "Skip
 // VCS/build dirs", src/sdl/ui_main.cpp). Same reasoning as
 // key_mapv_area_scale just above: the write side lives in ui_main.cpp
@@ -867,9 +885,14 @@ ui_dialogs_init(void)
 	g_open_files_allowed = nvs_read_boolean_default(fsvrc, key_open_files_allowed, FALSE) != 0;
 	// MapV area scale: read here, not in ui_main.cpp, so it's in place
 	// before the default-mode (MapV) startup path lays out the first
-	// frame -- see key_mapv_area_scale's doc comment above.
-	mapv_set_area_scale((MapVAreaScale)nvs_read_int_default(
-	    fsvrc, key_mapv_area_scale, MAPV_SCALE_SQRT));
+	// frame -- see key_mapv_area_scale's doc comment above. Read through
+	// the token table (see tokens_mapv_area_scale's doc comment) rather
+	// than nvs_read_int_default( ) + a raw cast: a hand-edited or
+	// stale ~/.fsvrc with e.g. "mapv_area_scale = 99" would otherwise
+	// reach mapv_map_size( )'s switch as an unrecognized MapVAreaScale
+	// and hit SWITCH_FAIL (abort) the first time MapV lays out.
+	mapv_set_area_scale((MapVAreaScale)nvs_read_int_token_default(
+	    fsvrc, key_mapv_area_scale, tokens_mapv_area_scale, MAPV_SCALE_SQRT));
 	// Scan exclusion: read here too, and for the same reason -- it has
 	// to be in effect before the initial scanfs() call below (well,
 	// in main.cpp's load_filesystem()), not just for a later Rescan.

@@ -83,6 +83,20 @@ dir_name_excluded( const char *name )
 
 	if (!scanfs_exclusion)
 		return FALSE;
+
+	/* GTK escape hatch (I5): the GTK frontend builds no Vis-menu toggle
+	 * for scanfs_set_exclusion( ) (SDL-only UI, see
+	 * src/sdl/ui_main.cpp's Vis menu), so exclusion is default-on there
+	 * with no way to turn it off short of rebuilding. FSV_NO_EXCLUDE
+	 * gives that arm an override without a UI: set the environment
+	 * variable (any value) to disable exclusion for the process, same
+	 * effect as unchecking the SDL toggle. Checked on every call rather
+	 * than cached, matching this function's existing cost (a handful of
+	 * strcmp( )s against a fixed short list) and dodging any static-init
+	 * ordering question about when to snapshot the environment. */
+	if (g_getenv( "FSV_NO_EXCLUDE" ) != NULL)
+		return FALSE;
+
 	for (i = 0; i < (int)G_N_ELEMENTS(excluded_dir_names); i++)
 		if (strcmp( name, excluded_dir_names[i] ) == 0)
 			return TRUE;
@@ -238,6 +252,10 @@ process_dir( const char *dir, GNode *dnode )
 			/* Stat failed */
 			g_node_unlink( node );
 			g_node_destroy( node );
+			free( dir_entries[i] ); /* !xfree -- M11: this arm's
+			                         * continue used to skip past
+			                         * the loop-end free() below,
+			                         * leaking the scandir() entry */
 			continue;
 		}
 		++stat_count;
@@ -249,6 +267,8 @@ process_dir( const char *dir, GNode *dnode )
 			 * also skips past this node without claiming an id) */
 			g_node_unlink( node );
 			g_node_destroy( node );
+			free( dir_entries[i] ); /* !xfree -- same leak as the
+			                         * stat-failure arm above */
 			continue;
 		}
 		++node_id;
