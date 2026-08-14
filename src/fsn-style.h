@@ -467,6 +467,12 @@ static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
 #define FSN_SPOTLIGHT_CONE_ALPHA       0.14f /* the beam's one visible layer */
 #define FSN_SPOTLIGHT_CONE_MIN_HEIGHT  384.0 /* floor, world units above base */
 #define FSN_SPOTLIGHT_CONE_HEIGHT_MULT 3.0   /* x the node's own height */
-#define FSN_SPOTLIGHT_CONE_APEX_FRAC   0.25  /* apex ellipse : base ellipse */
+#define FSN_SPOTLIGHT_CONE_APEX_FRAC   0.05  /* apex ellipse : base ellipse --
+                                               * near-pointed, so the
+                                               * truncated top reads as a
+                                               * beam converging from
+                                               * above rather than a
+                                               * flat-topped wedge with a
+                                               * hard floating edge */
 
 #endif /* FSV_FSN_STYLE_H */

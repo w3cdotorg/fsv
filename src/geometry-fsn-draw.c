@@ -379,7 +379,7 @@ fsn_draw_spotlight( void )
 {
 	GNode *node = globals.current_node;
 	const FsnPedestal *ped, *parent_ped;
-	double cx, cz, base_z, rx, rz;
+	double cx, cz, base_z, cone_base_z, rx, rz;
 	double apex_z;
 	int i;
 
@@ -403,6 +403,13 @@ fsn_draw_spotlight( void )
 		cx = ped->x;
 		cz = ped->z;
 		base_z = 0.0; /* directories stand on the true ground */
+		/* ...but the light itself lands on the pedestal TOP, not the
+		 * ground it stands on -- a directory's own box occupies
+		 * everything between, so a beam based at the ground would
+		 * engulf the pedestal rather than fall onto it. The pool
+		 * stays on the ground (base_z, above): only the cone's own
+		 * base moves. */
+		cone_base_z = ped->h + FSN_SPOTLIGHT_LIFT;
 		rx = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->w;
 		rz = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->d;
 	}
@@ -415,6 +422,9 @@ fsn_draw_spotlight( void )
 		cx = ped->x;
 		cz = ped->z;
 		base_z = parent_ped->h; /* files stand on their parent's pedestal top */
+		/* Already the surface the light lands on -- nothing to lift
+		 * past, unlike the directory case above. */
+		cone_base_z = base_z + FSN_SPOTLIGHT_LIFT;
 		rx = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->w;
 		rz = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->d;
 	}
@@ -431,11 +441,16 @@ fsn_draw_spotlight( void )
 	/* The beam above the pool -- see FSN_SPOTLIGHT_CONE_ALPHA's comment
 	 * (fsn-style.h) for why the pool alone was not enough. Height rides
 	 * the node's own height with a floor, so a tall pedestal's beam
-	 * still clears it and a flat file box's beam is not a needle. */
+	 * still clears it and a flat file box's beam is not a needle. Rides
+	 * `base_z` (the ground/parent-top the pool sits on), not
+	 * `cone_base_z` -- a directory's max pedestal height is 512, so the
+	 * floor alone (384) would sit below `cone_base_z` (512 + lift); using
+	 * `base_z` keeps this the same generous margin the pool has always
+	 * had, and MAX(384, 3*512) == 1536 clears `cone_base_z` by a wide
+	 * margin regardless. */
 	apex_z = base_z + MAX(FSN_SPOTLIGHT_CONE_MIN_HEIGHT,
 	    FSN_SPOTLIGHT_CONE_HEIGHT_MULT * ped->h);
-	fsn_gldraw_spotlight_cone( cx, cz, base_z + FSN_SPOTLIGHT_LIFT,
-	    apex_z, rx, rz );
+	fsn_gldraw_spotlight_cone( cx, cz, cone_base_z, apex_z, rx, rz );
 
 	gpu_set_depth_test( FSV_DEPTH_LESS );
 }
