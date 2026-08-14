@@ -858,6 +858,13 @@ cancel_pan_for_manual_control( void )
 static void
 unwrap_theta_toward( double target_theta )
 {
+	/* Guard against non-finite input (e.g. an uninitialized or
+	 * otherwise garbage theta): the loops below terminate by shrinking
+	 * a finite gap below 180, which never happens for NaN/Inf, so this
+	 * must bail out before them rather than rely on the loop math. */
+	if (!isfinite( camera->theta ) || !isfinite( target_theta ))
+		return;
+
 	while ((target_theta - camera->theta) > 180.0)
 		camera->theta += 360.0;
 	while ((camera->theta - target_theta) > 180.0)
@@ -1994,7 +2001,15 @@ camera_birdseye_view( boolean going_up )
 			 * DISCV_CAMERA(camera)->target.{x,y} alone -- so
 			 * camera->theta is inert here and a bird's-eye hop
 			 * cannot spin the long way round regardless of how
-			 * it happens to be wound. */
+			 * it happens to be wound. But new_anycam is otherwise
+			 * uninitialized stack memory, and both the shared morph
+			 * below and the going-down arm's now-unconditional
+			 * unwrap_theta_toward( pre_cam->theta ) read
+			 * new_cam->theta unconditionally -- so it still needs a
+			 * defined value here, even though that value is inert
+			 * to DiscV's own pose math. A no-op morph is the
+			 * cheapest such value. */
+			new_cam->theta = camera->theta;
 			new_cam->distance = 2.0 * field_distance( camera->fov, 2.0 * DISCV_GEOM_PARAMS(root_dnode)->radius );
 			break;
 

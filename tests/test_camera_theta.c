@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: MIT
  *
  * Short-arc theta on fixed-heading re-poses (TODO.md's last Known bug):
- * camera_revolve( ) accumulates camera->theta without wrapping, and
- * morph( ) interpolates raw numbers, not angles -- so a bird's-eye hop
- * (or a look-at) after a manual revolve used to spin the long way
- * round to its fixed heading in DiscV/MapV/TreeV. FSV_FSN got
- * unwrap_theta_toward( ) in fsn-mode Task B2; this locks the same
- * treatment onto the other modes' re-pose sites.
+ * camera_revolve( ) normalizes camera->theta into [0, 360] on every
+ * call, but that does not make morph( )'s straight-line interpolation
+ * between two *numbers* take the short arc between two *headings* --
+ * see camera.c:846-852. Mid-flight and mid-pan states can leave theta
+ * outside [0, 360] altogether, but even a fully in-range heading can be
+ * the long way round: a heading of 10 degrees revolved to sit right at
+ * 350 is still 340 degrees from a fixed target of 270 the wrong way.
+ * FSV_FSN got unwrap_theta_toward( ) in fsn-mode Task B2; this locks
+ * the same treatment onto the other modes' re-pose sites.
  *
  * The revolve is simulated by assigning camera->theta directly (the
  * accumulation is the documented behavior under test's PREcondition,
@@ -19,10 +22,17 @@
  * morph never exceeded 180 degrees.
  *
  * LINKING: the standard libfsvcore + headless-stubs recipe. MapV's
- * geometry params are all zero headlessly (geometry.c never ran);
- * every quantity the exercised paths derive from them stays finite
+ * geometry params are all zero headlessly (geometry.c never ran); the
+ * quantities the bird's-eye paths derive from them stay finite
  * (field_distance( ) is floored), and theta -- the subject -- does not
- * depend on layout at all. */
+ * depend on layout at all. That does NOT extend to the look_at family:
+ * mapv_camera_theta( )/treev_camera_theta( ) (mapv_look_at( )'s and
+ * treev_look_at( )'s/camera_treev_lpan_look_at( )'s theta formulas)
+ * each divide by a headlessly-zero geometry extent -- MAPV_NODE_WIDTH(
+ * root_dnode) and a platform's arc_width respectively -- producing a
+ * NaN or infinite theta. That is exactly why those three re-pose sites
+ * have no scenarios here; this file only exercises the bird's-eye
+ * paths, whose geometry inputs are known-safe. */
 
 #include <assert.h>
 #include <math.h>
@@ -128,6 +138,16 @@ main(void)
 	 * 610 -> 270, a -340 sweep). */
 	check_birdseye_short_arc(FSV_MAPV, 610.0, 270.0);
 
+	/* REACHABLE without any flight or pan: an in-range heading (no
+	 * wrap needed to land in [0, 360)) that is still more than 180
+	 * degrees from the fixed target the wrong way round -- exactly the
+	 * camera.c:846-852 case camera_revolve( )'s own [0, 360]
+	 * normalization does not fix. 10 unwraps to 370 (still congruent
+	 * to 10 mod 360) and travels the short -100 arc to 270; the old
+	 * code went 10 -> 270 directly, a -260-degree sweep the long way
+	 * (or, read the other direction, a +340 sweep). */
+	check_birdseye_short_arc(FSV_MAPV, 10.0, 270.0);
+
 	/* TreeV: its bird's-eye heading depends on the camera's own
 	 * target.theta (90 - target.theta); read the expectation from the
 	 * live camera rather than hardcoding it. */
@@ -150,7 +170,49 @@ main(void)
 			assert(fabs(after - before) <= 180.0 + TOL);
 		}
 		camera_birdseye_view(FALSE);
+		{
+			double before = camera->theta, after;
+
+			snap_theta_morph();
+			after = camera->theta;
+			assert(angle_diff(after, expect + 360.0 + 20.0) < TOL);
+			assert(fabs(after - before) <= 180.0 + TOL);
+		}
+	}
+
+	/* DiscV: the up-arm's theta is inert to its pose math (no fixed
+	 * heading to unwrap toward -- see camera_birdseye_view( )'s
+	 * FSV_DISCV going-up arm), but with F1's new_cam->theta =
+	 * camera->theta fix it is still a defined no-op morph, and the
+	 * going-down restore's unwrap_theta_toward( pre_cam->theta ) is
+	 * unconditional across all four modes -- so this is the one mode
+	 * the unconditional restore touches with no coverage above. Round
+	 * trip a wound-up pre-hop heading through both arms and require it
+	 * comes back exactly, in at most 180 degrees of travel each way. */
+	{
+		double wound_theta = 610.0; /* several turns + 250, deliberately
+		                             * out of [0, 360) going in */
+		double before, after;
+
+		globals.fsv_mode = FSV_DISCV;
+		camera_init(FSV_DISCV, TRUE);
 		snap_theta_morph();
+
+		camera->theta = wound_theta;
+
+		camera_birdseye_view(TRUE);
+		before = camera->theta;
+		snap_theta_morph();
+		after = camera->theta;
+		assert(angle_diff(after, wound_theta) < TOL);
+		assert(fabs(after - before) <= 180.0 + TOL);
+
+		camera_birdseye_view(FALSE);
+		before = camera->theta;
+		snap_theta_morph();
+		after = camera->theta;
+		assert(angle_diff(after, wound_theta) < TOL);
+		assert(fabs(after - before) <= 180.0 + TOL);
 	}
 
 	return 0;
