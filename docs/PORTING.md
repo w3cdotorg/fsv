@@ -4544,7 +4544,9 @@ flight can hand a wrapped heading to. **Not** applied to
 `camera_revolve()`, whose identical normalization gives DiscV/MapV/TreeV
 the same long-way-round pan after a manual revolve: pre-existing upstream
 behavior in three modes this task is not touching, recorded here rather
-than changed under cover of an fsn task.
+than changed under cover of an fsn task. **Closed post-v0.3**: all
+birds-eye arms now call `unwrap_theta_toward()` at entry, including the
+MapV/TreeV going-down restoration; see meson test `camera_theta`.
 
 **3. Shift was only sampled on motion events (minor).** The rate model
 makes holding the pointer still a legitimate way to fly — and no motion
@@ -5012,8 +5014,10 @@ Verified:
   the cone's radius at camera height — is ticketed in `TODO.md` rather
   than fixed here, since it would need the camera's live position
   threaded into a function that today only reads layout state.
-- **"Night" landscape remains uncalibrated** (Task A1's own disclosed
-  gap; untouched here, and auto-landscape only ever selects "classic").
+- **"Night" landscape is now calibrated** (Task A1's disclosed gap, closed
+  post-v0.3; the sky colors were determined by screenshot iteration against
+  established constraints, validated at default and tilted framings; ground
+  is unchanged from "classic" and load-bearing for the overview mini-map pin).
 
 ### Task C2 verification (Marks panel — named node bookmarks)
 
