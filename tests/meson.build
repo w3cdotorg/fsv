@@ -91,3 +91,14 @@ test_scanfs_exclude = executable('test_scanfs_exclude',
   dependencies: core_test_deps,
   include_directories: incdir)
 test('scanfs_exclude', test_scanfs_exclude)
+
+# Short-arc theta on fixed-heading re-poses after a manual revolve
+# (TODO.md's last Known bug): DiscV/MapV/TreeV get the same
+# unwrap_theta_toward() treatment FSN's Task B2 fix round introduced.
+test_camera_theta = executable('test_camera_theta',
+  ['test_camera_theta.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir,
+  c_args: fixture_c_args)
+test('camera_theta', test_camera_theta)

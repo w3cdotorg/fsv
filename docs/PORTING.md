@@ -3422,9 +3422,14 @@ first draft guessed at. That guess undersold the brightness because it
 assumed the visible sky band reaches toward the zenith; in both
 references the camera is pitched down enough that the visible sky is a
 shallow band well above the horizon, nowhere near dark. "night" has no
-reference screenshot at all (both captures are daylight) and keeps the
-plan's original guess, flagged in `fsn-style.h` for correction once real
-reference material turns up. "slate" is not a guess — it is
+reference screenshot at all (both captures are daylight). **Closed
+post-v0.3**: the plan's original guess was replaced by a calibrated
+sky-only pass (2026-08-14-theta-unwrap-night-preset.md) against a
+legibility brief (readable navy, legible geometry, visible spotlight
+beam, unchanged ground), validated at both the default FSN establishing
+framing and a tilted near-level capture; see `fsn-style.h`'s
+`fsn_landscapes[]` comment for the calibrated values and validation
+detail. "slate" is not a guess — it is
 `src/sdl/gpu.cpp`'s existing Task 2.2 clear color
 (`{0.08, 0.10, 0.12}`), copied byte-for-byte so it reproduces today's
 look exactly (confirmed below, not just visually).
@@ -4544,7 +4549,16 @@ flight can hand a wrapped heading to. **Not** applied to
 `camera_revolve()`, whose identical normalization gives DiscV/MapV/TreeV
 the same long-way-round pan after a manual revolve: pre-existing upstream
 behavior in three modes this task is not touching, recorded here rather
-than changed under cover of an fsn task.
+than changed under cover of an fsn task. **Closed post-v0.3**:
+`unwrap_theta_toward()` is now called at six re-pose sites, each
+immediately before that site's own theta morph rather than at any
+function's entry -- MapV's and TreeV's bird's-eye going-up arms, the
+shared bird's-eye going-down restore (now unconditional across all four
+modes, DiscV included), `mapv_look_at()`, `treev_look_at()`, and
+`camera_treev_lpan_look_at()`. DiscV's own bird's-eye going-up arm is
+the deliberate exception: theta is inert to DiscV's pose math there,
+initialized defensively rather than unwrapped (see the final-review F1
+fix). See meson test `camera_theta`.
 
 **3. Shift was only sampled on motion events (minor).** The rate model
 makes holding the pointer still a legitimate way to fly — and no motion
@@ -4718,6 +4732,11 @@ already makes, gated to `FSV_FSN` for the same reason that arm's call
 is: DiscV/MapV/TreeV never wrap theta the way a flight does, and their
 own pre-existing "long way round" behavior after a manual revolve
 (recorded in the Task B2 fix-round note) is out of scope here.
+**Closed post-v0.3**: the guard was dropped, and this restore now calls
+`unwrap_theta_toward()` unconditionally in all four modes, DiscV
+included (its up-arm's `new_cam->theta` is now defensively initialized
+rather than left inert-and-undefined, since the restore reads it
+regardless of mode); see meson test `camera_theta`.
 
 **Follow-up (post-v0.3, user QA on the framing fix):** the pool alone
 proved nearly invisible in real use — white at ~0.55 composited alpha
@@ -5012,8 +5031,10 @@ Verified:
   the cone's radius at camera height — is ticketed in `TODO.md` rather
   than fixed here, since it would need the camera's live position
   threaded into a function that today only reads layout state.
-- **"Night" landscape remains uncalibrated** (Task A1's own disclosed
-  gap; untouched here, and auto-landscape only ever selects "classic").
+- **"Night" landscape is now calibrated** (Task A1's disclosed gap, closed
+  post-v0.3; the sky colors were determined by screenshot iteration against
+  established constraints, validated at default and tilted framings; ground
+  is unchanged from "classic" and load-bearing for the overview mini-map pin).
 
 ### Task C2 verification (Marks panel — named node bookmarks)
 

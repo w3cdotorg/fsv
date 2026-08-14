@@ -24,12 +24,30 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   `tests/test_fsn_framing.c` (meson test `fsn_framing`) — verified
   numerically (distance parity + target-on-file); the headed 30-second QA
   on a dense tree is still pending.
-- [ ] **"Night" landscape preset was never calibrated** (Task A1 disclosed
+- [x] ~~**"Night" landscape preset was never calibrated** (Task A1 disclosed
   gap); auto-landscape only ever selects "classic", so it's currently
-  unreachable in practice but still ships uncalibrated.
-- [ ] **"Long way round" theta on birds-eye return in DiscV/MapV/TreeV** after
+  unreachable in practice but still ships uncalibrated.~~ **Calibrated**: the
+  Night sky colors (`sky_top`, `sky_horizon`) were determined by screenshot
+  iteration against a four-constraint brief (readable navy, legible geometry,
+  visible spotlight beam against sky, unchanged ground); validated at both the
+  default FSN establishing framing (~14% of the gradient visible) and a tilted
+  sanity capture (~46% visible, near-level camera). The ground color (`rgb
+  65,140,90`) is unchanged from "classic" and is load-bearing for the overview
+  mini-map's pin feature.
+- [x] ~~**"Long way round" theta on birds-eye return in DiscV/MapV/TreeV** after
   a manual revolve. Fixed for FSV_FSN with `unwrap_theta_toward()`; other
-  modes' pre-existing behavior explicitly left open. (Task B2 fix-round note)
+  modes' pre-existing behavior explicitly left open. (Task B2 fix-round note)~~
+  **Closed**: `unwrap_theta_toward()` is now called at six re-pose sites,
+  each immediately before that site's theta morph -- MapV's and TreeV's
+  bird's-eye going-up arms, the shared bird's-eye going-down restore (now
+  unconditional across all four modes, DiscV included), `mapv_look_at()`,
+  `treev_look_at()`, and `camera_treev_lpan_look_at()`. DiscV's own
+  bird's-eye going-up arm is the deliberate exception: theta is inert to
+  DiscV's pose math there, so it is initialized defensively (rather than
+  unwrapped toward anything) per the F1 fix in the fsn-mode final review.
+  Regression-locked by meson test `camera_theta`.
+
+**The Known-bugs section is now fully closed.**
 
 ## Docs / demo
 

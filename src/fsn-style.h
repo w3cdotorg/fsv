@@ -86,18 +86,49 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
 	{
 		/* Neither reference screenshot is a night scene -- both are
 		 * plain daylight captures -- so unlike "classic" this has
-		 * nothing to sample a pixel from. Kept close to the plan's
-		 * original guess (darkened classic, starless) for lack of
-		 * anything better; flag for correction once real reference
-		 * material (or hardware) turns up. */
+		 * nothing to sample a pixel from. Calibrated by screenshot
+		 * iteration (2026-08, plan 2026-08-14-theta-unwrap-night-
+		 * preset.md) against the legibility constraints laid out there
+		 * instead: a night sky with a readable horizon, the
+		 * wires/labels/age-spectrum colors staying legible, and the
+		 * selection spotlight's beam staying visible against the sky.
+		 * Validated against two capture framings: the default FSN
+		 * establishing shot (where the ground occludes all but the top
+		 * ~14% of the sky_top->sky_horizon gradient -- draw_landscape( ),
+		 * src/sdl/gpu.cpp) and one throwaway tilted capture (camera->phi
+		 * forced to ~2 degrees, near-level, exposing ~46% of the
+		 * gradient) confirming the fuller range still reads as night --
+		 * dark, smoothly graduated, no washed-out band -- not just the
+		 * thin strip the default framing shows. Even that tilted capture
+		 * does not reach sky_horizon's own endpoint value: camera.c
+		 * clamps camera->phi to [1, 90] (`CLAMP(camera->phi, 1.0, 90.0)`),
+		 * so near-straight-down is as level as the camera ever gets, and
+		 * at most roughly half the sky_top->sky_horizon gradient is ever
+		 * actually on screen -- the ~46% the tilted capture observed is
+		 * close to that ceiling, not a conservative sample of a much
+		 * larger visible range. sky_horizon itself is therefore
+		 * extrapolated from the visible ~14%/~46% bands, not directly
+		 * observed at the horizon itself. The ground is
+		 * deliberately unchanged -- see its own comment below. */
 		"night",
-		{ 0.01f, 0.01f, 0.03f }, /* sky_top: near-black starless zenith (guess, uncalibrated) */
-		{ 0.10f, 0.12f, 0.25f }, /* sky_horizon: dim blue-violet glow (guess, uncalibrated) */
+		{ 0.012f, 0.02f, 0.09f }, /* sky_top: deep blue zenith, not pure black */
+		{ 0.22f, 0.28f, 0.48f }, /* sky_horizon: moonlit glow */
 		{ 0.255f, 0.549f, 0.353f }, /* ground: same green as classic -- the
 		                             * ground doesn't relight at night any
 		                             * more than the overview window's own
 		                             * green background does (reference
-		                             * screenshot 1's inset thumbnail) */
+		                             * screenshot 1's inset thumbnail).
+		                             * Deliberately NOT touched by this
+		                             * calibration pass: the overview
+		                             * mini-map (FSN_OVERVIEW_* below) is
+		                             * pinned to the night preset
+		                             * regardless of the main view's own
+		                             * landscape choice, and that inset's
+		                             * background IS this ground value --
+		                             * the pin makes it load-bearing for
+		                             * the overview, not merely a color
+		                             * this preset happens to share with
+		                             * "classic". */
 	},
 	{
 		/* Reproduces src/sdl/gpu.cpp's pre-A1 flat clear color exactly

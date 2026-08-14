@@ -839,16 +839,32 @@ cancel_pan_for_manual_control( void )
  * arithmetic on the number itself, can tell them apart -- which is
  * exactly the bug.
  *
- * Applied to the two FSN pans that can follow a flight (fsn_look_at( )
- * and camera_birdseye_view( )'s going-up arm) and deliberately nowhere
- * else. camera_revolve( ) normalizes theta the same way, so DiscV, MapV
- * and TreeV have the same long-way-round pan after a manual revolve --
- * pre-existing upstream behavior in three modes this task is not
- * touching, recorded in docs/PORTING.md rather than changed under cover
- * of an fsn task. */
+ * Originally applied only to the FSN pans that can follow a flight
+ * (fsn_look_at( ), fsn_warp_pose( ), and camera_birdseye_view( )'s
+ * going-up and going-down arms), on the theory that camera_revolve( )
+ * -- the only other thing that winds theta -- already normalizes it
+ * into [0, 360] on every call, so DiscV/MapV/TreeV could not need the
+ * same treatment. That theory missed that normalizing into [0, 360]
+ * does not make a morph take the short arc: a heading of 10 degrees
+ * revolved to sit right at 350 is fully in-range and still 340 degrees
+ * from a fixed target of 270 the wrong way round. TODO.md tracked the
+ * gap ("Long way round theta on birds-eye return in DiscV/MapV/TreeV")
+ * until this call was mirrored onto every fixed-heading re-pose in
+ * those three modes too: their bird's-eye arms (both directions) and
+ * their look_at helpers. DiscV is the one true exception, and for a
+ * different reason than the old "not touching it" note gave -- see
+ * camera_birdseye_view( )'s FSV_DISCV going-up arm for why camera->theta
+ * is inert there. */
 static void
 unwrap_theta_toward( double target_theta )
 {
+	/* Guard against non-finite input (e.g. an uninitialized or
+	 * otherwise garbage theta): the loops below terminate by shrinking
+	 * a finite gap below 180, which never happens for NaN/Inf, so this
+	 * must bail out before them rather than rely on the loop math. */
+	if (!isfinite( camera->theta ) || !isfinite( target_theta ))
+		return;
+
 	while ((target_theta - camera->theta) > 180.0)
 		camera->theta += 360.0;
 	while ((camera->theta - target_theta) > 180.0)
@@ -1181,6 +1197,13 @@ mapv_look_at( GNode *node, MorphType mtype, double pan_time_override )
 		apg_cam.far_clip = FAR_TO_NEAR_RATIO * apg_cam.near_clip;
 	}
 
+	/* Same short-arc treatment as fsn_look_at( )'s (task-B2 fix round):
+	 * theta is an angle, not a plain number, and a manual revolve can
+	 * leave camera->theta many multiples of 360 away from this node's
+	 * heading -- unwrap before arming the morph so it takes the short
+	 * way round. */
+	unwrap_theta_toward( new_cam->theta );
+
 	/* Get the camera moving */
 	morph( &camera->theta, mtype, new_cam->theta, pan_time );
 	morph( &camera->phi, mtype, new_cam->phi, pan_time );
@@ -1428,6 +1451,13 @@ treev_look_at( GNode *node, MorphType mtype, double pan_time_override )
 		k = RTZ_DIST(camera_pos, new_cam_pos) / TREEV_CAMERA_AVG_VELOCITY;
 		pan_time = CLAMP(k, TREEV_CAMERA_MIN_PAN_TIME, TREEV_CAMERA_MAX_PAN_TIME);
 	}
+
+	/* Same short-arc treatment as fsn_look_at( )'s (task-B2 fix round):
+	 * theta is an angle, not a plain number, and a manual revolve can
+	 * leave camera->theta many multiples of 360 away from this node's
+	 * heading -- unwrap before arming the morph so it takes the short
+	 * way round. */
+	unwrap_theta_toward( new_cam->theta );
 
 	/* Get the camera moving */
 	morph( &camera->theta, mtype, new_cam->theta, pan_time );
@@ -1859,6 +1889,15 @@ camera_treev_lpan_look_at( GNode *node, double pan_time_override )
 
 	camera_pan_break( );
 
+	/* Same short-arc treatment as treev_look_at( )'s (task-B2 fix
+	 * round): theta is an angle, not a plain number. Both of today's
+	 * callers (fsv.c, sdl/main.cpp) invoke this right after
+	 * camera_init( FSV_TREEV, ... ), which direct-assigns theta = 0.0,
+	 * so the wound precondition this guards against cannot occur
+	 * through them yet -- but the fix is one line, and any future
+	 * caller reached after a manual revolve gets it for free. */
+	unwrap_theta_toward( new_cam->theta );
+
 	/* Get the camera moving */
 	morph( &camera->theta, MORPH_INV_QUADRATIC, new_cam->theta, pan_time );
 	morph( &TREEV_CAMERA(camera)->target.r, MORPH_INV_QUADRATIC, TREEV_CAMERA(new_cam)->target.r, pan_time );
@@ -1955,16 +1994,40 @@ camera_birdseye_view( boolean going_up )
 		new_cam->phi = 90.0;
 		switch (globals.fsv_mode) {
 			case FSV_DISCV:
+			/* No theta to unwrap: DiscV's modelview transform
+			 * (ogl.c's setup_modelview_matrix( )) never reads
+			 * camera->theta at all -- the ring is rotated into
+			 * place by fixed 90-degree turns and positioned by
+			 * DISCV_CAMERA(camera)->target.{x,y} alone -- so
+			 * camera->theta is inert here and a bird's-eye hop
+			 * cannot spin the long way round regardless of how
+			 * it happens to be wound. But new_anycam is otherwise
+			 * uninitialized stack memory, and both the shared morph
+			 * below and the going-down arm's now-unconditional
+			 * unwrap_theta_toward( pre_cam->theta ) read
+			 * new_cam->theta unconditionally -- so it still needs a
+			 * defined value here, even though that value is inert
+			 * to DiscV's own pose math. A no-op morph is the
+			 * cheapest such value. */
+			new_cam->theta = camera->theta;
 			new_cam->distance = 2.0 * field_distance( camera->fov, 2.0 * DISCV_GEOM_PARAMS(root_dnode)->radius );
 			break;
 
 			case FSV_MAPV:
 			new_cam->theta = 270.0;
+			/* Same short-arc treatment as the FSN arm below: a
+			 * manual revolve can leave camera->theta many
+			 * multiples of 360 away from this fixed heading. */
+			unwrap_theta_toward( new_cam->theta );
 			new_cam->distance = field_distance( camera->fov, MAPV_NODE_WIDTH(root_dnode) );
 			break;
 
 			case FSV_TREEV:
 			new_cam->theta = 90.0 - TREEV_CAMERA(camera)->target.theta;
+			/* Same short-arc treatment as the FSN arm below: a
+			 * manual revolve can leave camera->theta many
+			 * multiples of 360 away from this fixed heading. */
+			unwrap_theta_toward( new_cam->theta );
 			if (dirtree_entry_expanded( root_dnode )) {
 				geometry_treev_get_extents( root_dnode, NULL, &ext_c1 );
 				new_cam->distance = field_distance( camera->fov, 2.0 * ext_c1.r );
@@ -2003,20 +2066,20 @@ camera_birdseye_view( boolean going_up )
 	else {
 		/* Restore pre-bird's-eye-view camera state */
 
-		/* Third consumer of the same whip fix as fsn_look_at( ) and the
-		 * going-up arm above (task-B2-report.md's fix round, item 2):
-		 * a flight can leave camera->theta unwrapped past a multiple of
-		 * 360, and morph( ) interpolates that raw number rather than
-		 * the angle it represents, so restoring straight to
-		 * pre_cam->theta can spin most of the way around instead of
-		 * taking the short arc back to where the user was before going
-		 * up. FSN-only, like the going-up arm's call: DiscV/MapV/TreeV
-		 * never wrap theta the way a flight does, so their own
-		 * pre-existing "long way round" behavior after a manual
-		 * revolve (documented in the same fix-round note) is left
-		 * alone here too. */
-		if (globals.fsv_mode == FSV_FSN)
-			unwrap_theta_toward( pre_cam->theta );
+		/* Same short-arc fix as fsn_look_at( ) and the going-up arm
+		 * above -- but, unlike those two, NOT FSN-only anymore.
+		 * morph( ) interpolates camera->theta as a plain number, not
+		 * an angle, so restoring straight to pre_cam->theta can spin
+		 * most of the way around instead of taking the short arc back
+		 * to where the user was before going up. That is not a
+		 * flight-only hazard: camera_revolve( ) lets a manual revolve
+		 * wind camera->theta in every mode, so DiscV/MapV/TreeV need
+		 * the same unwrap here as FSN, not the "their own pre-existing
+		 * long way round is left alone" carve-out this guard used to
+		 * encode (TODO.md's "Long way round theta on birds-eye return
+		 * in DiscV/MapV/TreeV" -- the left-open half of task-B2-report
+		 * .md's fix round, item 2, closed by dropping the guard). */
+		unwrap_theta_toward( pre_cam->theta );
 		morph( &camera->theta, MORPH_SIGMOID, pre_cam->theta, pan_time );
 		morph( &camera->phi, MORPH_SIGMOID, pre_cam->phi, pan_time );
 		morph( &camera->distance, MORPH_SIGMOID, pre_cam->distance, pan_time );
