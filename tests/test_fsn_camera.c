@@ -45,61 +45,17 @@ child_named(GNode *parent, const char *name)
 	return NULL;
 }
 
-/* fsv_platform (declared in fsv-platform.h, defined zero-initialized in
- * src/animation.c) is the frontend-services hook table libfsvcore calls
- * into -- camera.c's redraw( )/camera_update_scrollbars( ) path calls
- * request_frame( ) and set_scroll( ) unconditionally, in every mode,
- * including FSV_FSN. "Every field must be non-NULL after frontend
- * init" (the header's own comment) is a real precondition, normally
- * met by src/window.c (GTK) or the SDL frontend before any camera call;
- * this test plays that role with plain no-ops, since nothing here drives
- * an actual frame loop or scrollbar widget. */
-static void
-noop_request_frame(void)
-{
-}
-
-static void
-noop_render_frame(void)
-{
-}
-
-static void
-noop_viewport_size(int *width, int *height)
-{
-	if (width != NULL)
-		*width = 800;
-	if (height != NULL)
-		*height = 600;
-}
-
-static void
-noop_set_scroll(int axis, double lower, double upper, double page, double pos)
-{
-	(void)axis;
-	(void)lower;
-	(void)upper;
-	(void)page;
-	(void)pos;
-}
-
-static double
-noop_get_scroll(int axis)
-{
-	(void)axis;
-	return 0.0;
-}
+/* tools/fsv-headless-stubs.c -- opt-in fsv_platform no-op hooks (the
+ * shim has no header; see its own comment for why this is a function
+ * call rather than link-time population) */
+extern void fsv_headless_platform_init( void );
 
 int
 main(void)
 {
 	GNode *root, *dir_a, *dir_b, *file2;
 
-	fsv_platform.request_frame = noop_request_frame;
-	fsv_platform.render_frame = noop_render_frame;
-	fsv_platform.viewport_size = noop_viewport_size;
-	fsv_platform.set_scroll = noop_set_scroll;
-	fsv_platform.get_scroll = noop_get_scroll;
+	fsv_headless_platform_init();
 
 	scanfs(FIXTURE_DIR); /* FIXTURE_DIR injected by meson (-D) */
 	assert(globals.fstree != NULL);
