@@ -54,7 +54,7 @@ jobs:
       - name: Build
         run: ninja -C builddir
 
-      - name: Test (scanfs, nvstore, color_persistence)
+      - name: Test (meson test suite)
         run: meson test -C builddir --print-errorlogs
 
       # GitHub's macOS runners are real Apple Silicon VMs with a
@@ -111,7 +111,7 @@ jobs:
       - name: Build
         run: ninja -C builddir
 
-      - name: Test (scanfs, nvstore, color_persistence)
+      - name: Test (meson test suite)
         run: meson test -C builddir --print-errorlogs
 
       - name: Upload Linux (GTK) binary
@@ -207,7 +207,7 @@ jobs:
       - name: Build
         run: ninja -C builddir
 
-      - name: Test (scanfs, nvstore, color_persistence)
+      - name: Test (meson test suite)
         run: meson test -C builddir --print-errorlogs
 
       # Regression guard for the static-linking fix above: if a future

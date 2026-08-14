@@ -449,4 +449,30 @@ static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
  * pedestal/box footprint it surrounds) and nothing ties them together. */
 #define FSN_SPOTLIGHT_LIFT 0.5
 
+/* Task B3 follow-up (user QA, 2026-08-14): the ground pool alone reads
+ * as a faint rim -- white at ~0.55 composited alpha on a light-grey
+ * pedestal top is structurally low-contrast, and in a packed box row
+ * the ellipse is mostly hidden under the very boxes it surrounds. The
+ * visible light CONE above the selection (US5861885's actual spotlight:
+ * the beam, not just the pool it casts) silhouettes against sky,
+ * landscape and pedestal faces instead of the surface it sits on, so it
+ * stays legible at fsn_look_at( )'s parent-distance establishing shot.
+ * Same alpha-decal rules as the rings (unlit, FSV_DEPTH_LESS_NOWRITE,
+ * drawn only by fsn_draw_spotlight( ) so it inherits every guard); the
+ * scene pipeline back-face culls, so only the beam's near half draws --
+ * a single translucent layer, which is the wanted look. Starting values
+ * below were tuned against --screenshot captures of this repo's own
+ * src/ tree (see the plan doc); treat them as eyeballed, like the ring
+ * table above. */
+#define FSN_SPOTLIGHT_CONE_ALPHA       0.14f /* the beam's one visible layer */
+#define FSN_SPOTLIGHT_CONE_MIN_HEIGHT  384.0 /* floor, world units above base */
+#define FSN_SPOTLIGHT_CONE_HEIGHT_MULT 3.0   /* x the node's own height */
+#define FSN_SPOTLIGHT_CONE_APEX_FRAC   0.05  /* apex ellipse : base ellipse --
+                                               * near-pointed, so the
+                                               * truncated top reads as a
+                                               * beam converging from
+                                               * above rather than a
+                                               * flat-topped wedge with a
+                                               * hard floating edge */
+
 #endif /* FSV_FSN_STYLE_H */

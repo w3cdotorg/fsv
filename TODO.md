@@ -15,10 +15,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   "disclosed gaps" note without noticing the later fix round. Now
   regression-locked by `tests/test_fsn_camera.c` (meson test
   `fsn_camera`), which also made the headless dirtree stubs stateful.
-- [ ] **`fsn_look_at()` file-zoom framing lands the camera nose-first against
+- [x] ~~**`fsn_look_at()` file-zoom framing lands the camera nose-first against
   the box row** when click-to-fly targets a file in a densely packed
-  directory. `camera.c` framing rule from Task B1; surfaced by Task B3's
-  verification. (PORTING.md, Task B3/C1 gaps)
+  directory.~~ **Fixed**: a file is now framed at its parent directory's
+  establishing distance (parent-footprint diameter rule, expanded wire arm
+  included), target left on the file's box — the exact framing Task B3's
+  verification recorded as the legible shot. Regression-locked by
+  `tests/test_fsn_framing.c` (meson test `fsn_framing`) — verified
+  numerically (distance parity + target-on-file); the headed 30-second QA
+  on a dense tree is still pending.
 - [ ] **"Night" landscape preset was never calibrated** (Task A1 disclosed
   gap); auto-landscape only ever selects "classic", so it's currently
   unreachable in practice but still ships uncalibrated.
@@ -57,9 +62,16 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 - [ ] **File-open confirm modal (Task C3):** fixed corner position, never
   moves once chosen (`ImGuiCond_Always`); relax to `ImGuiCond_FirstUseEver`
   if a remembered/cascading position is ever wanted.
-- [ ] **Selection spotlight is not deployment-aware (Task B3):** during an
+- [ ] **Selection spotlight is not deployment-aware (Task B3; applies to the light cone too):** during an
   ancestor's expand/collapse morph it draws at the node's static layout
   height — brief visible glitch only during the animation window.
+- [ ] **Spotlight beam vanishes when the camera is inside the cone:** the
+  scene pipeline back-face culls, so a camera positioned inside the light
+  cone's radius sees only its back faces and the beam disappears entirely
+  — reachable via warp-lite (Task C4)'s `camera_warp_to()`. Benign (the
+  rest of the scene renders fine), but the intended fix is a fade-on-entry
+  guard: skip or fade the cone once the camera's horizontal distance to
+  its axis is inside the cone's radius at the camera's height.
 - [ ] **Overview mini-map (Task C1):** framing ignores the camera — a camera
   far outside the landscape pins its marker to the frame edge instead of
   zooming out, so the marker's distance is unreadable while clamped. Also
@@ -114,10 +126,9 @@ has native Help → Controls / About windows). Still worth doing:
 - [ ] **Task C4's MapV regression check is verified by code diff**, not a
   clean empirical click-through (synthetic-harness picking limitation at the
   one fixed pixel used in that mode's layout).
-- [ ] **`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks
-  (`request_frame`, `render_frame`, `viewport_size`, `set_scroll`,
-  `get_scroll`) live in that test's own `main()`**, not in
-  `tools/fsv-headless-stubs.c`. Promote them into the shared shim once a
-  second headless test needs to drive `camera.c` -- but that needs thought
-  first, since `fsv-scan` links the same shim and doesn't want a real
-  `fsv_platform` populated underneath it.
+- [x] ~~**`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks live in
+  that test's own `main()`**, not in `tools/fsv-headless-stubs.c`.~~
+  Promoted into the shim as opt-in `fsv_headless_platform_init()` when the
+  second camera-driving headless test (`fsn_framing`) arrived; `fsv-scan`
+  links the same shim but is unaffected because nothing populates
+  `fsv_platform` unless a test calls the init.

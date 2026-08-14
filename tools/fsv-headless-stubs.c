@@ -21,6 +21,7 @@
 #include "color.h"
 #include "dirtree.h"
 #include "filelist.h"
+#include "fsv-platform.h"
 #include "geometry.h"
 #include "gpu.h" /* gpu_set_landscape( ) -- see color.c's landscape_set()/_init() */
 #include "gui.h"
@@ -36,6 +37,63 @@ void
 gpu_set_landscape(int index)
 {
 	(void)index;
+}
+
+/* fsv-platform.h -- animation.c's frontend-hook table, which camera.c
+ * and redraw( ) call through unconditionally (request_frame( ),
+ * set_scroll( ), render_frame( ) via fsv_animation_tick( )). Headless
+ * tests that drive camera.c need every field non-NULL; fsv-scan links
+ * this same shim but never touches the camera, so the table stays
+ * unpopulated for it. Deliberately OPT-IN -- a test calls
+ * fsv_headless_platform_init( ) at the top of main( ) -- rather than a
+ * constructor, exactly so linking the shim alone changes nothing.
+ * Promoted here from tests/test_fsn_camera.c's main( ) when the second
+ * camera-driving test arrived (TODO.md, test-harness limitations). */
+
+static void
+headless_request_frame( void )
+{
+}
+
+static void
+headless_render_frame( void )
+{
+}
+
+static void
+headless_viewport_size( int *width, int *height )
+{
+	if (width != NULL)
+		*width = 800;
+	if (height != NULL)
+		*height = 600;
+}
+
+static void
+headless_set_scroll( int axis, double lower, double upper, double page, double pos )
+{
+	(void)axis;
+	(void)lower;
+	(void)upper;
+	(void)page;
+	(void)pos;
+}
+
+static double
+headless_get_scroll( int axis )
+{
+	(void)axis;
+	return 0.0;
+}
+
+void
+fsv_headless_platform_init( void )
+{
+	fsv_platform.request_frame = headless_request_frame;
+	fsv_platform.render_frame = headless_render_frame;
+	fsv_platform.viewport_size = headless_viewport_size;
+	fsv_platform.set_scroll = headless_set_scroll;
+	fsv_platform.get_scroll = headless_get_scroll;
 }
 
 /* gui.h */

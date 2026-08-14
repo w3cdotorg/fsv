@@ -311,6 +311,45 @@ fsn_gldraw_spotlight_ring( double cx, double cy, double z,
 }
 
 
+/* One truncated translucent cone: apex ellipse (APEX_FRAC of the base)
+ * at apex_z, base ellipse (the spotlight pool's own rx/ry) at base_z,
+ * as a single triangle strip around the perimeter. No caps: the pool
+ * rings already paint the base, and the apex is open sky. Winding puts
+ * the outward faces front (the pipeline back-face culls, gpu.cpp), so
+ * the viewer sees exactly one translucent layer -- the near side of the
+ * beam. */
+static void
+fsn_gldraw_spotlight_cone( double cx, double cy, double base_z,
+    double apex_z, double rx, double ry )
+{
+	FsvVertex verts[2 * (FSN_SPOTLIGHT_SEGMENTS + 1)];
+	int i, n = 0;
+
+	for (i = 0; i <= FSN_SPOTLIGHT_SEGMENTS; i++) {
+		double theta = 2.0 * G_PI * (double)i / (double)FSN_SPOTLIGHT_SEGMENTS;
+		double c = cos( theta ), s = sin( theta );
+
+		verts[n].pos[0] = (float)(cx + FSN_SPOTLIGHT_CONE_APEX_FRAC * rx * c);
+		verts[n].pos[1] = (float)(cy + FSN_SPOTLIGHT_CONE_APEX_FRAC * ry * s);
+		verts[n].pos[2] = (float)apex_z;
+		verts[n].normal[0] = (float)c;
+		verts[n].normal[1] = (float)s;
+		verts[n].normal[2] = 0.0f;
+		++n;
+		verts[n].pos[0] = (float)(cx + rx * c);
+		verts[n].pos[1] = (float)(cy + ry * s);
+		verts[n].pos[2] = (float)base_z;
+		verts[n].normal[0] = (float)c;
+		verts[n].normal[1] = (float)s;
+		verts[n].normal[2] = 0.0f;
+		++n;
+	}
+
+	gpu_set_color( 1.0f, 1.0f, 1.0f, FSN_SPOTLIGHT_CONE_ALPHA );
+	gpu_draw( FSV_TRIANGLE_STRIP, verts, n, NULL, 0 );
+}
+
+
 /* Selection spotlight (Task B3, US5861885's literal ground-glow under
  * the selected node): a soft white elliptical light pool on the surface
  * the current node actually stands on -- world z == 0 (the true ground)
@@ -340,7 +379,8 @@ fsn_draw_spotlight( void )
 {
 	GNode *node = globals.current_node;
 	const FsnPedestal *ped, *parent_ped;
-	double cx, cz, base_z, rx, rz;
+	double cx, cz, base_z, cone_base_z, rx, rz;
+	double apex_z;
 	int i;
 
 	if (gpu_render_mode( ) != FSV_RENDER_NORMAL)
@@ -363,6 +403,13 @@ fsn_draw_spotlight( void )
 		cx = ped->x;
 		cz = ped->z;
 		base_z = 0.0; /* directories stand on the true ground */
+		/* ...but the light itself lands on the pedestal TOP, not the
+		 * ground it stands on -- a directory's own box occupies
+		 * everything between, so a beam based at the ground would
+		 * engulf the pedestal rather than fall onto it. The pool
+		 * stays on the ground (base_z, above): only the cone's own
+		 * base moves. */
+		cone_base_z = ped->h + FSN_SPOTLIGHT_LIFT;
 		rx = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->w;
 		rz = FSN_SPOTLIGHT_DIR_SCALE * 0.5 * ped->d;
 	}
@@ -375,6 +422,9 @@ fsn_draw_spotlight( void )
 		cx = ped->x;
 		cz = ped->z;
 		base_z = parent_ped->h; /* files stand on their parent's pedestal top */
+		/* Already the surface the light lands on -- nothing to lift
+		 * past, unlike the directory case above. */
+		cone_base_z = base_z + FSN_SPOTLIGHT_LIFT;
 		rx = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->w;
 		rz = FSN_SPOTLIGHT_FILE_SCALE * 0.5 * ped->d;
 	}
@@ -387,6 +437,20 @@ fsn_draw_spotlight( void )
 		    fsn_spotlight_rings[i].radius_frac * rx,
 		    fsn_spotlight_rings[i].radius_frac * rz,
 		    fsn_spotlight_rings[i].alpha );
+
+	/* The beam above the pool -- see FSN_SPOTLIGHT_CONE_ALPHA's comment
+	 * (fsn-style.h) for why the pool alone was not enough. Height rides
+	 * the node's own height with a floor, so a tall pedestal's beam
+	 * still clears it and a flat file box's beam is not a needle. Rides
+	 * `base_z` (the ground/parent-top the pool sits on), not
+	 * `cone_base_z` -- a directory's max pedestal height is 512, so the
+	 * floor alone (384) would sit below `cone_base_z` (512 + lift); using
+	 * `base_z` keeps this the same generous margin the pool has always
+	 * had, and MAX(384, 3*512) == 1536 clears `cone_base_z` by a wide
+	 * margin regardless. */
+	apex_z = base_z + MAX(FSN_SPOTLIGHT_CONE_MIN_HEIGHT,
+	    FSN_SPOTLIGHT_CONE_HEIGHT_MULT * ped->h);
+	fsn_gldraw_spotlight_cone( cx, cz, cone_base_z, apex_z, rx, rz );
 
 	gpu_set_depth_test( FSV_DEPTH_LESS );
 }
