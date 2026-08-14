@@ -1220,6 +1220,8 @@ fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
 	MapVCamera new_mcam;
 	Camera *new_cam;
 	const FsnPedestal *ped;
+	const FsnPedestal *fped;
+	GNode *fnode;
 	XYZvec camera_pos, new_cam_pos, delta;
 	XYZvec ext;
 	double diameter, pan_time, k;
@@ -1248,10 +1250,25 @@ fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
 	/* Enough of the object in frame to make it identifiable -- and, for
 	 * an expanded directory, enough to take in the wires leaving it and
 	 * the near edge of the generation they lead to, which is the whole
-	 * point of the mode */
-	diameter = SQRT_2 * MAX(ped->w, ped->d);
-	if (NODE_IS_DIR(node) && dirtree_entry_expanded( node ))
-		diameter = MAX(diameter, ped->d + 2.0 * FSN_GENERATION_GAP);
+	 * point of the mode.
+	 *
+	 * A FILE is framed by its PARENT's footprint, not its own: a file
+	 * box's own record is box-scale, and sizing the shot to it put the
+	 * camera nose-first against the packed box row (TODO.md bug #2;
+	 * PORTING.md's Task B3 verification recorded parent-framing, with
+	 * the selection left on the file, as the legible shot). The target
+	 * above stays on the file's box -- only the framing scale changes. */
+	fnode = node;
+	fped = ped;
+	if (!NODE_IS_DIR(node) && node->parent != NULL &&
+	    NODE_IS_DIR(node->parent) &&
+	    fsn_layout_get( node->parent ) != NULL) {
+		fnode = node->parent;
+		fped = fsn_layout_get( node->parent );
+	}
+	diameter = SQRT_2 * MAX(fped->w, fped->d);
+	if (NODE_IS_DIR(fnode) && dirtree_entry_expanded( fnode ))
+		diameter = MAX(diameter, fped->d + 2.0 * FSN_GENERATION_GAP);
 	new_cam->distance = field_distance( camera->fov, MAX(1.0, diameter) );
 	new_cam->near_clip = NEAR_TO_DISTANCE_RATIO * new_cam->distance;
 	new_cam->far_clip = FAR_TO_NEAR_RATIO * new_cam->near_clip;

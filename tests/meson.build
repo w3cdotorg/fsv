@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: MIT
 
+# Shared linking recipe for every test that exercises libfsvcore
+# headlessly (all of them except nvstore's stub-free unit test):
+# core objects + tools/fsv-headless-stubs.c, and the fixture path.
+core_test_deps = [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep]
+fixture_c_args = ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')]
+
 test_scanfs = executable('test_scanfs', ['test_scanfs.c', headless_stubs_src],
   objects: libfsvcore.extract_all_objects(recursive: false),
-  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  dependencies: core_test_deps,
   include_directories: incdir,
-  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+  c_args: fixture_c_args)
 test('scanfs', test_scanfs)
 
 # lib/nvstore.c gained real logic in Task 5.3 of the SDL/Metal port
@@ -23,7 +29,7 @@ test('nvstore', test_nvstore)
 test_color_persistence = executable('test_color_persistence',
   ['test_color_persistence.c', headless_stubs_src],
   objects: libfsvcore.extract_all_objects(recursive: false),
-  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  dependencies: core_test_deps,
   include_directories: incdir)
 test('color_persistence', test_color_persistence)
 
@@ -33,9 +39,9 @@ test('color_persistence', test_color_persistence)
 test_fsn_layout = executable('test_fsn_layout',
   ['test_fsn_layout.c', headless_stubs_src],
   objects: libfsvcore.extract_all_objects(recursive: false),
-  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  dependencies: core_test_deps,
   include_directories: incdir,
-  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+  c_args: fixture_c_args)
 test('fsn_layout', test_fsn_layout)
 
 # Regression lock for the FSN collapsed-parent camera fix (fa9383c,
@@ -46,7 +52,19 @@ test('fsn_layout', test_fsn_layout)
 test_fsn_camera = executable('test_fsn_camera',
   ['test_fsn_camera.c', headless_stubs_src],
   objects: libfsvcore.extract_all_objects(recursive: false),
-  dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
+  dependencies: core_test_deps,
   include_directories: incdir,
-  c_args: ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')])
+  c_args: fixture_c_args)
 test('fsn_camera', test_fsn_camera)
+
+# Regression test for TODO.md bug #2 (fsn_look_at()'s nose-first
+# file-zoom framing): a file must be framed at its parent directory's
+# establishing distance -- target on the file, distance from the parent
+# pedestal's footprint -- not at its own box-scale footprint.
+test_fsn_framing = executable('test_fsn_framing',
+  ['test_fsn_framing.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir,
+  c_args: fixture_c_args)
+test('fsn_framing', test_fsn_framing)
