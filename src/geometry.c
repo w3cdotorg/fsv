@@ -20,6 +20,7 @@
 #include "dirtree.h" /* dirtree_entry_expanded( ) */
 #include "geometry-fsn.h" /* FSV_FSN mode lives in its own file */
 #include "gpu.h"
+#include "squarify.h"
 #include "tmaptext.h"
 
 
@@ -600,22 +601,20 @@ mapv_init_recursive( GNode *dnode )
 	struct MapVBlock {
 		GNode *node;
 		double area;
-	} *block, *next_first_block;
-	struct MapVRow {
-		struct MapVBlock *first_block;
-		double area;
-	} *row = NULL;
+	} *block;
 	MapVGeomParams *gparams;
 	GNode *node;
+	GNode **nodes;
 	GList *block_list = NULL, *block_llink;
-	GList *row_list = NULL, *row_llink;
+	SquarifyRect bounds, *rects;
+	double *areas;
 	XYvec dir_dims, block_dims;
-	XYvec start_pos, pos;
 	double area, dir_area, total_block_area = 0.0;
 	double nominal_border, border;
 	double scale_factor;
 	double a, b, k;
 	int64 size;
+	int n, i;
 
 	g_assert( NODE_IS_DIR(dnode) );
 
@@ -655,6 +654,7 @@ mapv_init_recursive( GNode *dnode )
 	 *    that it includes the node's surrounding border area)
 	 * 2. Find total area of the blocks
 	 * 3. Create a list of the blocks */
+	n = 0;
 	node = dnode->children;
 	while (node != NULL) {
 		size = MAX(256, NODE_DESC(node)->size);
@@ -669,6 +669,7 @@ mapv_init_recursive( GNode *dnode )
 		block->area = area;
 		G_LIST_APPEND(block_list, block);
 
+		++n;
 		node = node->next;
 	}
 
@@ -676,104 +677,20 @@ mapv_init_recursive( GNode *dnode )
 	 * directory can provide, so they'll have to be scaled down */
 	scale_factor = dir_area / total_block_area;
 
-	/* Second pass
-	 * 1. Scale down the blocks
-	 * 2. Generate a first-draft set of rows */
+	/* Build parallel arrays from block_list for the squarify call,
+	 * then the list itself is no longer needed */
+	nodes = NEW_ARRAY(GNode *, n);
+	areas = NEW_ARRAY(double, n);
+	rects = NEW_ARRAY(SquarifyRect, n);
+	i = 0;
 	block_llink = block_list;
 	while (block_llink != NULL) {
 		block = (struct MapVBlock *)block_llink->data;
-		block->area *= scale_factor;
-
-		if (row == NULL) {
-			/* Begin new row */
-			row = NEW(struct MapVRow);
-			row->first_block = block;
-			row->area = 0.0;
-			G_LIST_APPEND(row_list, row);
-		}
-
-		/* Add block to row */
-		row->area += block->area;
-
-		/* Dimensions of block (block_dims.y == depth of row) */
-		block_dims.y = row->area / dir_dims.x;
-		block_dims.x = block->area / block_dims.y;
-
-		/* Check aspect ratio of block */
-		if ((block_dims.x / block_dims.y) < 1.0) {
-			/* Next block will go into next row */
-			row = NULL;
-		}
-
+		nodes[i] = block->node;
+		areas[i] = block->area;
+		++i;
 		block_llink = block_llink->next;
 	}
-
-	/* Third pass - optimize layout */
-	/* Note to self: write layout optimization routine sometime */
-
-	/* Fourth pass - output final arrangement
-	 * Start at right/rear corner, laying out rows of (mostly)
-	 * successively smaller blocks */
-	start_pos.x = MAPV_NODE_CENTER_X(dnode) + 0.5 * dir_dims.x;
-	start_pos.y = MAPV_NODE_CENTER_Y(dnode) + 0.5 * dir_dims.y;
-	pos.y = start_pos.y;
-	block_llink = block_list;
-	row_llink = row_list;
-	while (row_llink != NULL) {
-		row = (struct MapVRow *)row_llink->data;
-		block_dims.y = row->area / dir_dims.x;
-		pos.x = start_pos.x;
-
-		/* Note first block of next row */
-		if (row_llink->next == NULL)
-			next_first_block = NULL;
-		else
-			next_first_block = ((struct MapVRow *)row_llink->next->data)->first_block;
-
-		/* Output one row */
-		while (block_llink != NULL) {
-			block = (struct MapVBlock *)block_llink->data;
-			if (block == next_first_block)
-				break; /* finished with row */
-			block_dims.x = block->area / block_dims.y;
-
-			size = MAX(256, NODE_DESC(block->node)->size);
-			if (NODE_IS_DIR(block->node))
-				size += DIR_NODE_DESC(block->node)->subtree.size;
-			area = scale_factor * (double)size;
-
-			/* Calculate exact width of block's border region */
-			k = block_dims.x + block_dims.y;
-			/* Note: area == scaled area of node,
-			 * block->area == scaled area of node + border */
-			border = 0.25 * (k - sqrt( SQR(k) - 4.0 * (block->area - area) ));
-
-			/* Assign geometry
-			 * (Note: pos is right/rear corner of block) */
-			gparams = MAPV_GEOM_PARAMS(block->node);
-			gparams->c0.x = pos.x - block_dims.x + border;
-			gparams->c0.y = pos.y - block_dims.y + border;
-			gparams->c1.x = pos.x - border;
-			gparams->c1.y = pos.y - border;
-
-			if (NODE_IS_DIR(block->node)) {
-				gparams->height = mapv_dir_height;
-
-				/* Recurse into directory */
-				mapv_init_recursive( block->node );
-			}
-			else
-				gparams->height = mapv_leaf_height;
-
-			pos.x -= block_dims.x;
-			block_llink = block_llink->next;
-		}
-
-		pos.y -= block_dims.y;
-		row_llink = row_llink->next;
-	}
-
-	/* Clean up */
 
 	block_llink = block_list;
 	while (block_llink != NULL) {
@@ -782,12 +699,57 @@ mapv_init_recursive( GNode *dnode )
 	}
 	g_list_free( block_list );
 
-	row_llink = row_list;
-	while (row_llink != NULL) {
-		xfree( row_llink->data );
-		row_llink = row_llink->next;
+	/* Lay out the blocks with the squarify algorithm. squarify_layout
+	 * normalizes areas internally, so the (still-unscaled) block
+	 * areas are fine to pass in directly -- only relative sizes
+	 * matter for the tiling itself. */
+	bounds.x = MAPV_NODE_CENTER_X(dnode) - 0.5 * dir_dims.x;
+	bounds.y = MAPV_NODE_CENTER_Y(dnode) - 0.5 * dir_dims.y;
+	bounds.w = dir_dims.x;
+	bounds.h = dir_dims.y;
+	squarify_layout( &bounds, areas, n, rects );
+
+	/* Output final arrangement: assign geometry to each node,
+	 * computing the exact border inset so that each node's interior
+	 * has precisely its own (scaled) area, not the block's area
+	 * (which includes the surrounding border) */
+	for (i = 0; i < n; i++) {
+		block_dims.x = rects[i].w;
+		block_dims.y = rects[i].h;
+
+		size = MAX(256, NODE_DESC(nodes[i])->size);
+		if (NODE_IS_DIR(nodes[i]))
+			size += DIR_NODE_DESC(nodes[i])->subtree.size;
+		area = scale_factor * (double)size;
+
+		/* Calculate exact width of block's border region */
+		k = block_dims.x + block_dims.y;
+		/* Note: area == scaled area of node,
+		 * areas[i] * scale_factor == scaled area of node + border */
+		border = 0.25 * (k - sqrt( MAX(0.0, SQR(k) - 4.0 * (areas[i] * scale_factor - area)) ));
+
+		/* Assign geometry
+		 * (Note: rects[i] is the block's origin corner + extents) */
+		gparams = MAPV_GEOM_PARAMS(nodes[i]);
+		gparams->c0.x = rects[i].x + border;
+		gparams->c0.y = rects[i].y + border;
+		gparams->c1.x = rects[i].x + rects[i].w - border;
+		gparams->c1.y = rects[i].y + rects[i].h - border;
+
+		if (NODE_IS_DIR(nodes[i])) {
+			gparams->height = mapv_dir_height;
+
+			/* Recurse into directory */
+			mapv_init_recursive( nodes[i] );
+		}
+		else
+			gparams->height = mapv_leaf_height;
 	}
-	g_list_free( row_list );
+
+	/* Clean up */
+	xfree( nodes );
+	xfree( areas );
+	xfree( rects );
 }
 
 
