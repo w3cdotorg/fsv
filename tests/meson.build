@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MIT
 
-# Shared linking recipe for every test that exercises libfsvcore
+# Shared bits factored out for every test that exercises libfsvcore
 # headlessly (all of them except nvstore's stub-free unit test):
-# core objects + tools/fsv-headless-stubs.c, and the fixture path.
+# core_test_deps is the common dependency list, fixture_c_args the
+# fixture path -Ddefine. objects: (extract_all_objects) and
+# include_directories: are still repeated per executable() below.
 core_test_deps = [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep]
 fixture_c_args = ['-DFIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixture')]
 

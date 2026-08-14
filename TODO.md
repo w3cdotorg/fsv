@@ -21,7 +21,9 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   establishing distance (parent-footprint diameter rule, expanded wire arm
   included), target left on the file's box — the exact framing Task B3's
   verification recorded as the legible shot. Regression-locked by
-  `tests/test_fsn_framing.c` (meson test `fsn_framing`).
+  `tests/test_fsn_framing.c` (meson test `fsn_framing`) — verified
+  numerically (distance parity + target-on-file); the headed 30-second QA
+  on a dense tree is still pending.
 - [ ] **"Night" landscape preset was never calibrated** (Task A1 disclosed
   gap); auto-landscape only ever selects "classic", so it's currently
   unreachable in practice but still ships uncalibrated.

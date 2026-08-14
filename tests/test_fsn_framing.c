@@ -75,7 +75,7 @@ int
 main(void)
 {
 	GNode *root, *dir_a, *file2;
-	const FsnPedestal *fped;
+	const FsnPedestal *file_ped;
 	double dir_distance;
 
 	fsv_headless_platform_init();
@@ -114,10 +114,12 @@ main(void)
 	snap_camera_morphs();
 
 	/* Target stays centered on the file's own box... */
-	fped = fsn_layout_get(file2);
-	assert(fped != NULL);
-	assert(fabs(MAPV_CAMERA(camera)->target.x - fped->x) < TOL);
-	assert(fabs(MAPV_CAMERA(camera)->target.y - fped->z) < TOL);
+	file_ped = fsn_layout_get(file2);
+	assert(file_ped != NULL);
+	assert(fabs(MAPV_CAMERA(camera)->target.x - file_ped->x) < TOL);
+	assert(fabs(MAPV_CAMERA(camera)->target.y - file_ped->z) < TOL);
+	assert(fabs(MAPV_CAMERA(camera)->target.z -
+	    (file_ped->h + fsn_layout_get(dir_a)->h)) < TOL);
 
 	/* ...but the camera stands at the PARENT's establishing distance,
 	 * not at the file box's own box-scale one. Pre-fix, this is the

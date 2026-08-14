@@ -4959,11 +4959,13 @@ Verified:
   the camera nose-first against the box row**, as noted above — a real
   UX rough edge surfaced by this task's own verification, not a
   spotlight defect, and out of B3's scope to fix (it is `camera.c`'s
-  framing rule, not the decal). **Update (post-v0.3): fixed.** `fsn_look_at()`
-  now frames a file by its parent directory's footprint (wire arm included),
-  target unchanged on the file — the parent-framing shot this very
-  verification recorded as legible. Regression-locked by
-  `tests/test_fsn_framing.c` (meson test `fsn_framing`).
+  framing rule, not the decal). **Update (post-v0.3): fixed.** Commit
+  `74df5a5` added the fix: `fsn_look_at()` now frames a file by its parent
+  directory's footprint (wire arm included), target unchanged on the file
+  — the parent-framing shot this very verification recorded as legible.
+  Regression-locked by `tests/test_fsn_framing.c` (meson test
+  `fsn_framing`) — verified numerically (distance parity + target-on-file);
+  the headed 30-second QA on a dense tree is still pending.
 - **The spotlight is not deployment-aware.** If the selected node's
   ancestor chain is mid-collapse/expand morph (`deployment` strictly
   between 0 and 1), `fsn_draw_spotlight()` draws at the node's static
