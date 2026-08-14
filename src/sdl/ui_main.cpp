@@ -142,12 +142,16 @@ static void *g_context_menu_node = nullptr; // GNode*; void* per input.h
 
 // ---- Display: MapV area scale ---------------------------------------------
 //
-// Persistence for mapv_set_area_scale()'s current value, same
-// read-at-startup-with-a-default/write-on-change nvstore idiom as
-// ui_dialogs.cpp's open_files_allowed (this frontend has no separate
-// startup-init hook of its own -- ui_main.h exports only ui_main_draw() --
-// so the one-time load happens lazily on this function's first call,
-// below).
+// Write side of mapv_set_area_scale()'s persistence -- same nvstore idiom
+// as ui_dialogs.cpp's open_files_allowed. The READ side (startup load)
+// deliberately does NOT live here: main.cpp's default mode is MapV, and
+// its startup sequence lays out that first MapV geometry (load_filesystem()
+// -> enter_mode() -> geometry_init(FSV_MAPV) -> mapv_init(), main.cpp:1205)
+// before ui_main_draw() ever runs its first frame -- a lazy load here would
+// read the persisted scale too late to affect that first layout. Loaded
+// instead in ui_dialogs.cpp's ui_dialogs_init() (see its own doc comment),
+// which main.cpp calls at line 1110, ahead of load_filesystem(). This key
+// string must match ui_dialogs.cpp's own key_mapv_area_scale exactly.
 static const char key_mapv_area_scale[] = "mapv_area_scale";
 
 static void
@@ -240,18 +244,6 @@ ui_main_draw(void)
 {
 	static bool show_about = false;
 	static bool show_controls = false;
-
-	// One-time nvstore load of the persisted MapV area scale (see
-	// save_mapv_area_scale() above for why the load lives here rather
-	// than in a dedicated init function).
-	static bool area_scale_loaded = false;
-	if (!area_scale_loaded) {
-		NVStore *fsvrc = nvs_open(CONFIG_FILE);
-		mapv_set_area_scale((MapVAreaScale)nvs_read_int_default(
-		    fsvrc, key_mapv_area_scale, MAPV_SCALE_SQRT));
-		nvs_close(fsvrc);
-		area_scale_loaded = true;
-	}
 
 	const bool scanning = app_is_scanning();
 	// Change Root.../Rescan are additionally unavailable during --record:

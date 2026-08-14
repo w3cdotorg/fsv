@@ -53,6 +53,7 @@ extern "C" {
 #include "colexp.h"
 #include "color.h"
 #include "dirtree.h"
+#include "geometry.h" /* MapVAreaScale, mapv_set_area_scale() -- MapV area scale startup load, see ui_dialogs_init() */
 #include "nvstore.h" /* Task C3: open_files_allowed persistence, same API src/sdl/ui_rail.cpp's Marks panel already uses directly */
 }
 
@@ -649,6 +650,22 @@ namespace {
 const char key_open_files_allowed[] = "open_files_allowed";
 bool g_open_files_allowed = false;
 
+// nvstore key for the MapV area scale (Display -> "MapV area scale"
+// submenu, src/sdl/ui_main.cpp). The write side (save_mapv_area_scale())
+// lives in ui_main.cpp, next to the menu that triggers it; the read has
+// to live here instead of there, because ui_dialogs_init() -- unlike
+// ui_main_draw() -- is called (main.cpp:1110) before load_filesystem()'s
+// enter_mode() -> geometry_init(FSV_MAPV) -> mapv_init() chain runs on
+// a normal startup (main.cpp:1205). A read in ui_main_draw()'s first
+// call would land too late: MapV's default mode means the first layout
+// is already built by the time any frame draws. This key string must
+// match ui_main.cpp's own key_mapv_area_scale exactly -- kept as two
+// separate literals (one per writer/reader) rather than a shared
+// header, matching this file's existing key_open_files_allowed pattern
+// (each nvstore key here is owned by whichever file uses it, not
+// centralized).
+const char key_mapv_area_scale[] = "mapv_area_scale";
+
 // Flips the persisted choice. The only caller is the confirm modal's
 // "Open" button below, and only when its "Always allow" checkbox is
 // ticked -- there is no UI path that can ever set this back to false
@@ -835,6 +852,11 @@ ui_dialogs_init(void)
 {
 	NVStore *fsvrc = nvs_open(CONFIG_FILE);
 	g_open_files_allowed = nvs_read_boolean_default(fsvrc, key_open_files_allowed, FALSE) != 0;
+	// MapV area scale: read here, not in ui_main.cpp, so it's in place
+	// before the default-mode (MapV) startup path lays out the first
+	// frame -- see key_mapv_area_scale's doc comment above.
+	mapv_set_area_scale((MapVAreaScale)nvs_read_int_default(
+	    fsvrc, key_mapv_area_scale, MAPV_SCALE_SQRT));
 	nvs_close(fsvrc);
 }
 
