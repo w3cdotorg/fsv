@@ -114,3 +114,10 @@ has native Help → Controls / About windows). Still worth doing:
 - [ ] **Task C4's MapV regression check is verified by code diff**, not a
   clean empirical click-through (synthetic-harness picking limitation at the
   one fixed pixel used in that mode's layout).
+- [ ] **`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks
+  (`request_frame`, `render_frame`, `viewport_size`, `set_scroll`,
+  `get_scroll`) live in that test's own `main()`**, not in
+  `tools/fsv-headless-stubs.c`. Promote them into the shared shim once a
+  second headless test needs to drive `camera.c` -- but that needs thought
+  first, since `fsv-scan` links the same shim and doesn't want a real
+  `fsv_platform` populated underneath it.
