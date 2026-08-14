@@ -33,12 +33,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 
 ## Docs / demo
 
-- [ ] **Refresh the README demo video with FSN mode.** `docs/media/demo.gif` /
-  `docs/media/demo.mp4` (referenced at the top of `README.md`) pre-date the
-  FSN landscape work (Milestones A–C: pedestal/wire landscape, age spectrum,
-  camera rail, flight, spotlight, overview mini-map, marks, warp-lite
-  fly-in). Re-record via `--record` / `tools/make-demo.sh` with a flythrough
-  that shows off FSN mode.
+- [x] ~~**Refresh the README demo video with FSN mode.**~~ **Done**:
+  `docs/media/demo.gif` / `docs/media/demo.mp4` pre-dated the FSN landscape
+  work entirely and showed a MapV/TreeV tour instead. Re-recorded via
+  `--record` / `tools/make-demo.sh` with a new ~24s script: the FSN intro
+  pan, an `sdl/` pedestal expansion, a file look-at on `sdl/gpu.cpp`
+  (parent-distance framing + the selection spotlight beam), a warp-lite
+  swoop, bird's-eye (mirroring the Camera Rail's button), and a finale on
+  the squarified, sqrt-scaled MapV with the built-in scan exclusion active
+  (no `.git` block).
 
 ## Build / distribution debt
 
