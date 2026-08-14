@@ -12,9 +12,10 @@
  * This shim provides no-op/headless implementations of exactly the
  * symbols the smoke CLI (fsv-scan) and the fixture unit test need to
  * link, so libfsvcore can be exercised standalone without pulling in
- * any GTK/GL frontend code. It is NOT part of libfsvcore itself — real
- * frontends (GTK today, SDL/Metal later) provide their own real
- * implementations of these functions instead of linking this file.
+ * any GTK/GL frontend code. Exception: the dirtree section below is
+ * stateful to support camera.c's collapsed-parent tests. It is NOT part of
+ * libfsvcore itself — real frontends (GTK today, SDL/Metal later) provide
+ * their own real implementations of these functions instead of linking this file.
  */
 
 #include "common.h"
@@ -44,7 +45,42 @@ gui_update(void)
 {
 }
 
-/* dirtree.h */
+/* dirtree.h -- stateful, not no-op: camera.c's fsn_ensure_parent_expanded( )
+ * (the fa9383c collapsed-parent fix) and its DEBUG assertions read and
+ * mutate real expansion state, so tests covering them need real semantics.
+ * Mirrors the SDL frontend (src/sdl/ui_panels.cpp): DirNodeDesc::tnode --
+ * the field dirtree.c used for its GtkTreePath, NULLed once by scanfs.c
+ * before the first dirtree_entry_new( ) call -- repurposed as a NULL /
+ * non-NULL "expanded" flag, so no header changes. */
+
+static void
+set_tree_row_expanded( GNode *dnode, boolean expanded )
+{
+	DIR_NODE_DESC(dnode)->tnode = expanded ? (void *)1 : NULL;
+}
+
+static void
+expand_ancestors( GNode *dnode )
+{
+	GNode *p;
+
+	for (p = dnode->parent; (p != NULL) && NODE_IS_DIR(p); p = p->parent)
+		set_tree_row_expanded( p, TRUE );
+}
+
+static void
+expand_subtree_recursive( GNode *dnode )
+{
+	GNode *c;
+
+	set_tree_row_expanded( dnode, TRUE );
+	for (c = dnode->children; c != NULL; c = c->next) {
+		if (!NODE_IS_DIR(c))
+			break; /* dirs sort first -- scanfs.c's compare_node */
+		expand_subtree_recursive( c );
+	}
+}
+
 void
 dirtree_clear(void)
 {
@@ -53,7 +89,9 @@ dirtree_clear(void)
 void
 dirtree_entry_new(GNode *dnode)
 {
-	(void)dnode;
+	/* Same initial policy as both real frontends: only the metanode
+	 * (depth 1) and the scanned root (depth 2) start open */
+	set_tree_row_expanded( dnode, g_node_depth( dnode ) <= 2 );
 }
 
 void
@@ -64,26 +102,37 @@ dirtree_no_more_entries(void)
 boolean
 dirtree_entry_expanded(GNode *dnode)
 {
-	(void)dnode;
-	return FALSE;
+	if (dnode == NULL)
+		return FALSE;
+	return (DIR_NODE_DESC(dnode)->tnode != NULL) ? TRUE : FALSE;
 }
 
 void
 dirtree_entry_collapse_recursive(GNode *dnode)
 {
-	(void)dnode;
+	if (dnode == NULL)
+		return;
+	/* Clears only dnode's own flag -- descendants keep theirs, exactly
+	 * like gtk_tree_view_collapse_row( ) / the SDL port */
+	set_tree_row_expanded( dnode, FALSE );
 }
 
 void
 dirtree_entry_expand(GNode *dnode)
 {
-	(void)dnode;
+	if (dnode == NULL)
+		return;
+	set_tree_row_expanded( dnode, TRUE );
+	expand_ancestors( dnode );
 }
 
 void
 dirtree_entry_expand_recursive(GNode *dnode)
 {
-	(void)dnode;
+	if (dnode == NULL)
+		return;
+	expand_subtree_recursive( dnode );
+	expand_ancestors( dnode );
 }
 
 /* filelist.h */
