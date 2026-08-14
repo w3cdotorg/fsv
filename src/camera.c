@@ -1882,6 +1882,15 @@ camera_treev_lpan_look_at( GNode *node, double pan_time_override )
 
 	camera_pan_break( );
 
+	/* Same short-arc treatment as treev_look_at( )'s (task-B2 fix
+	 * round): theta is an angle, not a plain number. Both of today's
+	 * callers (fsv.c, sdl/main.cpp) invoke this right after
+	 * camera_init( FSV_TREEV, ... ), which direct-assigns theta = 0.0,
+	 * so the wound precondition this guards against cannot occur
+	 * through them yet -- but the fix is one line, and any future
+	 * caller reached after a manual revolve gets it for free. */
+	unwrap_theta_toward( new_cam->theta );
+
 	/* Get the camera moving */
 	morph( &camera->theta, MORPH_INV_QUADRATIC, new_cam->theta, pan_time );
 	morph( &TREEV_CAMERA(camera)->target.r, MORPH_INV_QUADRATIC, TREEV_CAMERA(new_cam)->target.r, pan_time );
