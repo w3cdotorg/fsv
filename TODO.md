@@ -6,14 +6,15 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 
 ## Known bugs (highest priority)
 
-- [ ] **Clicking a file child of a *collapsed* directory aborts DEBUG builds
-  (FSN mode).** A collapsed directory still draws its immediate file children
-  as boxes on its pedestal; clicking one runs the ordinary `camera_look_at()`
-  path with no `colexp()` pre-expand (unlike the Marks panel's "Go", which
-  needed one), tripping `camera_look_at_full()`'s "parent must be expanded"
-  assertion — process abort in DEBUG, silently wrong in release. Pre-dates
-  Task C3 but made prominent by it. Likely fix: the same pre-expand the Marks
-  "Go" path already does. (PORTING.md, Task C3 gaps)
+- [x] ~~**Clicking a file child of a *collapsed* directory aborts DEBUG builds
+  (FSN mode).**~~ **Was already fixed** when this file was first written —
+  commit fa9383c (final Milestone C review) added
+  `fsn_ensure_parent_expanded()` in `src/camera.c`, centralized ahead of
+  the DEBUG assertions in both `camera_look_at_full()` and
+  `camera_warp_to()`; this ticket was collected from PORTING.md's earlier
+  "disclosed gaps" note without noticing the later fix round. Now
+  regression-locked by `tests/test_fsn_camera.c` (meson test
+  `fsn_camera`), which also made the headless dirtree stubs stateful.
 - [ ] **`fsn_look_at()` file-zoom framing lands the camera nose-first against
   the box row** when click-to-fly targets a file in a densely packed
   directory. `camera.c` framing rule from Task B1; surfaced by Task B3's
