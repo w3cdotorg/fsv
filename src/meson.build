@@ -71,7 +71,7 @@ if frontend == 'gtk' and gtkdep_found and host_machine.system() != 'darwin'
     'color.c', 'common.c', 'dialog.c', 'dirtree.c', 'filelist.c',
     'fontatlas.c', 'fsv.c',
     'geometry.c', 'geometry-fsn.c', 'geometry-fsn-draw.c',
-    'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c',
+    'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c', 'squarify.c',
     'tmaptext.c',
     'viewport.c', 'window.c']
   executable('fsv', sources: [srcs, gr],
