@@ -216,7 +216,9 @@ struct _NodeDesc {
 	time_t		mtime;		/* Last modification time */
 	time_t		ctime;		/* Last attribute change time */
 	const RGBcolor	*color;		/* Node color */
-	double		geomparams[5];	/* Geometry parameters */
+	double		geomparams[6];	/* Geometry parameters (6: MapV grew
+					 * area_weight in the 2026 squarify
+					 * rework) */
 };
 
 /* Directories have their own extended descriptor */

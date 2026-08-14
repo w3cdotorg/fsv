@@ -58,6 +58,8 @@ extern "C" {
 #include "colexp.h"
 #include "dirtree.h"
 #include "fsn-style.h" /* FsnLandscape, fsn_landscapes[] -- Display menu */
+#include "geometry.h" /* MapVAreaScale, mapv_get/set_area_scale(), geometry_init() -- Display menu */
+#include "nvstore.h" /* MapV area scale persistence, same API ui_dialogs.cpp's open_files_allowed uses */
 }
 
 // ---- Help: About ---------------------------------------------------------
@@ -137,6 +139,24 @@ draw_controls_window(bool *open)
 // input.cpp already makes about nodes named by the current scan.
 
 static void *g_context_menu_node = nullptr; // GNode*; void* per input.h
+
+// ---- Display: MapV area scale ---------------------------------------------
+//
+// Persistence for mapv_set_area_scale()'s current value, same
+// read-at-startup-with-a-default/write-on-change nvstore idiom as
+// ui_dialogs.cpp's open_files_allowed (this frontend has no separate
+// startup-init hook of its own -- ui_main.h exports only ui_main_draw() --
+// so the one-time load happens lazily on this function's first call,
+// below).
+static const char key_mapv_area_scale[] = "mapv_area_scale";
+
+static void
+save_mapv_area_scale(void)
+{
+	NVStore *fsvrc = nvs_open(CONFIG_FILE);
+	nvs_write_int(fsvrc, key_mapv_area_scale, (int)mapv_get_area_scale());
+	nvs_close(fsvrc);
+}
 
 static void
 draw_context_menu(void)
@@ -220,6 +240,18 @@ ui_main_draw(void)
 {
 	static bool show_about = false;
 	static bool show_controls = false;
+
+	// One-time nvstore load of the persisted MapV area scale (see
+	// save_mapv_area_scale() above for why the load lives here rather
+	// than in a dedicated init function).
+	static bool area_scale_loaded = false;
+	if (!area_scale_loaded) {
+		NVStore *fsvrc = nvs_open(CONFIG_FILE);
+		mapv_set_area_scale((MapVAreaScale)nvs_read_int_default(
+		    fsvrc, key_mapv_area_scale, MAPV_SCALE_SQRT));
+		nvs_close(fsvrc);
+		area_scale_loaded = true;
+	}
 
 	const bool scanning = app_is_scanning();
 	// Change Root.../Rescan are additionally unavailable during --record:
@@ -335,6 +367,38 @@ ui_main_draw(void)
 					if (ImGui::MenuItem(fsn_landscapes[i].name, nullptr,
 					    current == i))
 						landscape_set(i);
+				}
+				ImGui::EndMenu();
+			}
+			// Enabled in every mode (nothing mode-specific gates it,
+			// unlike Landscape/Overview above), but only affects MapV --
+			// see mapv_map_size()'s doc comment in geometry.c. Changing
+			// it relayouts (geometry_init(), same rebuild path a
+			// colexp/deployment change uses), NOT a rescan: no bytes on
+			// disk changed, only how they map to area. Only relayout if
+			// MapV is the CURRENT mode -- fsv_set_mode() (fsv.c:118)
+			// already calls geometry_init() unconditionally on every
+			// mode entry, so switching into MapV later picks up the new
+			// scale on its own; calling geometry_init(FSV_MAPV) while
+			// e.g. TreeV is current would rebuild geometry nothing is
+			// showing.
+			if (ImGui::BeginMenu("MapV area scale")) {
+				// Radio semantics via checkmarks, same idiom as the
+				// Colors menu above.
+				static const struct { const char *label; int scale; } kScales[] = {
+					{ "Square root", MAPV_SCALE_SQRT },
+					{ "Linear (bytes)", MAPV_SCALE_LINEAR },
+					{ "Logarithmic", MAPV_SCALE_LOG },
+				};
+				for (const auto &s : kScales) {
+					if (ImGui::MenuItem(s.label, nullptr,
+					    mapv_get_area_scale() == s.scale)) {
+						mapv_set_area_scale((MapVAreaScale)s.scale);
+						save_mapv_area_scale();
+						if (globals.fsv_mode == FSV_MAPV)
+							geometry_init(FSV_MAPV);
+						globals.need_redraw = TRUE;
+					}
 				}
 				ImGui::EndMenu();
 			}

@@ -544,6 +544,65 @@ static double mapv_leaf_height = 128.0;
 static XYZvec mapv_cursor_prev_c0;
 static XYZvec mapv_cursor_prev_c1;
 
+/* Current area scale (mapv_map_size below). Pure state: the setter does
+ * NOT relayout -- the caller (ui_main.cpp's Display menu) decides
+ * whether/when a geometry_init( FSV_MAPV ) is warranted. */
+static MapVAreaScale mapv_area_scale = MAPV_SCALE_SQRT;
+
+void
+mapv_set_area_scale( MapVAreaScale scale )
+{
+	mapv_area_scale = scale;
+}
+
+MapVAreaScale
+mapv_get_area_scale( void )
+{
+	return mapv_area_scale;
+}
+
+
+/* Area weight of a byte size under the current scale. The MAX(256,
+ * size) floor predates this (it kept tiny files visible under the
+ * linear scale) and applies to the INPUT, so its intent survives all
+ * three scales. */
+static double
+mapv_map_size( int64 size )
+{
+	double s = (double)MAX(256, size);
+
+	switch (mapv_area_scale) {
+		case MAPV_SCALE_SQRT:
+		return sqrt( s );
+
+		case MAPV_SCALE_LINEAR:
+		return s;
+
+		case MAPV_SCALE_LOG:
+		return log2( 1.0 + s );
+
+		SWITCH_FAIL
+	}
+	return s;
+}
+
+
+/* Recursive pre-pass: every node's area weight, files mapped
+ * directly, directories = own entry's mapped size + sum of children
+ * (mapping the SUM instead would break parent/child proportions) */
+static double
+mapv_weigh_recursive( GNode *node )
+{
+	double w = mapv_map_size( NODE_DESC(node)->size );
+	GNode *child;
+
+	if (NODE_IS_DIR(node))
+		for (child = node->children; child != NULL; child = child->next)
+			w += mapv_weigh_recursive( child );
+	MAPV_GEOM_PARAMS(node)->area_weight = w;
+	return w;
+}
+
 
 /* Returns the z-position of the bottom of a node */
 double
@@ -613,7 +672,6 @@ mapv_init_recursive( GNode *dnode )
 	double nominal_border, border;
 	double scale_factor;
 	double a, b, k;
-	int64 size;
 	int n, i;
 
 	g_assert( NODE_IS_DIR(dnode) );
@@ -657,10 +715,7 @@ mapv_init_recursive( GNode *dnode )
 	n = 0;
 	node = dnode->children;
 	while (node != NULL) {
-		size = MAX(256, NODE_DESC(node)->size);
-		if (NODE_IS_DIR(node))
-			size += DIR_NODE_DESC(node)->subtree.size;
-		k = sqrt( (double)size ) + nominal_border;
+		k = sqrt( MAPV_GEOM_PARAMS(node)->area_weight ) + nominal_border;
 		area = SQR(k);
 		total_block_area += area;
 
@@ -717,10 +772,7 @@ mapv_init_recursive( GNode *dnode )
 		block_dims.x = rects[i].w;
 		block_dims.y = rects[i].h;
 
-		size = MAX(256, NODE_DESC(nodes[i])->size);
-		if (NODE_IS_DIR(nodes[i]))
-			size += DIR_NODE_DESC(nodes[i])->subtree.size;
-		area = scale_factor * (double)size;
+		area = scale_factor * MAPV_GEOM_PARAMS(nodes[i])->area_weight;
 
 		/* Calculate exact width of block's border region */
 		k = block_dims.x + block_dims.y;
@@ -761,8 +813,16 @@ mapv_init( void )
 	XYvec root_dims;
 	double k;
 
+	/* Weigh the whole tree first: root dims and every recursive call
+	 * below read MAPV_GEOM_PARAMS(node)->area_weight, which this fills
+	 * in. Weighed from root_dnode, not the metanode (globals.fstree) --
+	 * the metanode's own entry is never drawn, so its weight (which
+	 * would double as root_dnode's own, since the metanode has exactly
+	 * one child) is irrelevant here. */
+	mapv_weigh_recursive( root_dnode );
+
 	/* Determine dimensions of bottommost (root) node */
-	root_dims.y = sqrt( (double)DIR_NODE_DESC(globals.fstree)->subtree.size / MAPV_ROOT_ASPECT_RATIO );
+	root_dims.y = sqrt( MAPV_GEOM_PARAMS(root_dnode)->area_weight / MAPV_ROOT_ASPECT_RATIO );
 	root_dims.x = MAPV_ROOT_ASPECT_RATIO * root_dims.y;
 
 	/* Set up base geometry */
