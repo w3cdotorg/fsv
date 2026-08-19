@@ -79,6 +79,22 @@ main(void)
 	/* a FILE named .git -- must never be excluded (dirs only) */
 	snprintf(sub, sizeof(sub), "%s/src", root);
 	make_file(sub, ".git", 10);
+	/* builddir-sdl/ -- must be excluded by the built-in "builddir*" glob
+	 * (this repo's own build directories are exactly this shape) */
+	snprintf(sub, sizeof(sub), "%s/builddir-sdl", root);
+	assert(mkdir(sub, 0755) == 0);
+	make_file(sub, "build.ninja", 32);
+	/* buildding/ -- pins the anchored-match semantics: fnmatch("builddir*",
+	 * "buildding", 0) must NOT match (extra 'i' before the doubled 'd'
+	 * breaks the "builddir" prefix), so this must survive every case */
+	snprintf(sub, sizeof(sub), "%s/buildding", root);
+	assert(mkdir(sub, 0755) == 0);
+	make_file(sub, "notes.txt", 8);
+	/* secrets/ -- excluded only once a caller adds a "secr*" pattern at
+	 * runtime via scanfs_add_exclude_pattern() */
+	snprintf(sub, sizeof(sub), "%s/secrets", root);
+	assert(mkdir(sub, 0755) == 0);
+	make_file(sub, "key.pem", 16);
 
 	/* Exclusion ON (the default) */
 	assert(scanfs_get_exclusion());
@@ -93,8 +109,19 @@ main(void)
 	/* the FILE named .git inside src/ survives */
 	assert(child_named(child_named(dnode, "src"), ".git") != NULL);
 	assert(!NODE_IS_DIR(child_named(child_named(dnode, "src"), ".git")));
+	/* the "builddir*" glob catches builddir-sdl but not buildding */
+	assert(child_named(dnode, "builddir-sdl") == NULL);
+	assert(child_named(dnode, "buildding") != NULL);
 
-	/* Exclusion OFF: everything scans */
+	/* A runtime user pattern rides the same gates as the built-ins */
+	scanfs_add_exclude_pattern("secr*");
+	scanfs(root);
+	dnode = root_dnode;
+	assert(child_named(dnode, "secrets") == NULL);
+	assert(child_named(dnode, "buildding") != NULL);
+
+	/* Exclusion OFF: everything scans, including builddir-sdl and
+	 * secrets -- the toggle gates user patterns too */
 	scanfs_set_exclusion(FALSE);
 	scanfs(root);
 	dnode = root_dnode;
@@ -102,6 +129,8 @@ main(void)
 	assert(NODE_IS_DIR(child_named(dnode, ".git")));
 	assert(child_named(child_named(dnode, ".git"), "pack.bin") != NULL);
 	assert(child_named(dnode, "node_modules") != NULL);
+	assert(child_named(dnode, "builddir-sdl") != NULL);
+	assert(child_named(dnode, "secrets") != NULL);
 
 	return 0;
 }

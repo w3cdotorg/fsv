@@ -351,7 +351,7 @@ ui_main_draw(void)
 				app_request_rescan();
 			}
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip(".git .svn .hg node_modules __pycache__ .venv .cache builddir .builddir");
+				ImGui::SetTooltip(".git .svn .hg node_modules __pycache__ .venv .cache builddir* .builddir* -- plus any --exclude patterns");
 			ImGui::EndMenu();
 		}
 
