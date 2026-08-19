@@ -506,4 +506,14 @@ static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
                                                * flat-topped wedge with a
                                                * hard floating edge */
 
+/* Fade-on-entry (TODO.md UX ticket): back-face culling makes the beam
+ * vanish the instant the camera crosses the cone wall -- warp-lite
+ * parks the camera exactly there. Fade the beam's alpha over a band
+ * of the ratio (camera horizontal distance to the cone axis) /
+ * (cone radius at the camera's height): 1 outside, 0 well inside,
+ * smoothstep between, so the beam dissolves on approach instead of
+ * snapping off. */
+#define FSN_SPOTLIGHT_CONE_FADE_OUTER 1.15 /* ratio at which fade begins */
+#define FSN_SPOTLIGHT_CONE_FADE_INNER 0.85 /* ratio at which alpha hits 0 */
+
 #endif /* FSV_FSN_STYLE_H */

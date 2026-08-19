@@ -20,6 +20,7 @@
 #include "common.h"
 #include "geometry-fsn.h"
 
+#include "camera.h"	/* camera_ground_position( ), the fade's own eye point */
 #include "fsn-style.h"
 #include "geometry.h"	/* geometry_node_set_color( ) */
 #include "gpu.h"
@@ -317,10 +318,21 @@ fsn_gldraw_spotlight_ring( double cx, double cy, double z,
  * rings already paint the base, and the apex is open sky. Winding puts
  * the outward faces front (the pipeline back-face culls, gpu.cpp), so
  * the viewer sees exactly one translucent layer -- the near side of the
- * beam. */
+ * beam.
+ *
+ * `alpha_scale` multiplies FSN_SPOTLIGHT_CONE_ALPHA -- the caller's
+ * fade-on-entry (fsn_draw_spotlight( ) below, see its own comment)
+ * rather than a property of the cone's geometry, but threaded through
+ * as a parameter instead of a second gpu_set_color( ) at the call site
+ * so this function keeps sole ownership of the beam's color/alpha, the
+ * same way it already owns every other draw-state detail here. Callers
+ * that want the unfaded look (the pool rings, any future caller) pass
+ * 1.0. Never called at 0.0 -- fsn_draw_spotlight( ) skips the call
+ * entirely once fully inside, rather than pay for a strip that paints
+ * nothing. */
 static void
 fsn_gldraw_spotlight_cone( double cx, double cy, double base_z,
-    double apex_z, double rx, double ry )
+    double apex_z, double rx, double ry, float alpha_scale )
 {
 	FsvVertex verts[2 * (FSN_SPOTLIGHT_SEGMENTS + 1)];
 	int i, n = 0;
@@ -345,7 +357,7 @@ fsn_gldraw_spotlight_cone( double cx, double cy, double base_z,
 		++n;
 	}
 
-	gpu_set_color( 1.0f, 1.0f, 1.0f, FSN_SPOTLIGHT_CONE_ALPHA );
+	gpu_set_color( 1.0f, 1.0f, 1.0f, FSN_SPOTLIGHT_CONE_ALPHA * alpha_scale );
 	gpu_draw( FSV_TRIANGLE_STRIP, verts, n, NULL, 0 );
 }
 
@@ -450,7 +462,65 @@ fsn_draw_spotlight( void )
 	 * margin regardless. */
 	apex_z = base_z + MAX(FSN_SPOTLIGHT_CONE_MIN_HEIGHT,
 	    FSN_SPOTLIGHT_CONE_HEIGHT_MULT * ped->h);
-	fsn_gldraw_spotlight_cone( cx, cz, cone_base_z, apex_z, rx, rz );
+
+	/* Fade-on-entry (fsn-style.h's FSN_SPOTLIGHT_CONE_FADE_* comment):
+	 * the cone's far half is already gone by construction (this file's
+	 * own note on fsn_gldraw_spotlight_cone( ) above), but the near
+	 * half the pipeline keeps still vanishes outright the instant the
+	 * camera's eye point crosses that same wall from outside to
+	 * inside -- and camera_warp_to( )'s landing pose (fsn-style.h's
+	 * FSN_WARP_* constants) parks the camera exactly there, so a
+	 * double-click could make the selection indicator disappear in the
+	 * very frame that selects it. Fade instead of snapping: find how
+	 * far outside the wall the camera itself sits, at the camera's own
+	 * height, and scale the cone's alpha down as that margin shrinks
+	 * to zero.
+	 *
+	 * `radius_at_cam`: the cone's radius at the camera's height,
+	 * linearly interpolated between the base radius (at cone_base_z)
+	 * and the apex radius (FSN_SPOTLIGHT_CONE_APEX_FRAC of the base, at
+	 * apex_z) -- the same two ends fsn_gldraw_spotlight_cone( ) itself
+	 * interpolates between -- with the camera's height clamped into
+	 * that [cone_base_z, apex_z] span first (a camera below the base or
+	 * above the apex is not "more inside", just outside the span this
+	 * linear law is defined over). MAX(rx, rz) stands in for both
+	 * radii, rather than the ellipse's two axes separately: the fade is
+	 * a rough "how close to the wall" cue, not a hit test, so treating
+	 * the cone as circular in x/y is a deliberately cheap approximation
+	 * -- an elliptical-exact point-in-cone test is overkill for it.
+	 *
+	 * `ratio`: the camera's ground-plane distance from the cone's axis
+	 * (cx, cz), divided by that radius -- 1.0 lands exactly on the
+	 * wall, less than 1.0 is inside. Compared against a band straddling
+	 * 1.0 (FSN_SPOTLIGHT_CONE_FADE_OUTER/_INNER, fsn-style.h) rather
+	 * than snapping at exactly 1.0, and smoothstepped rather than
+	 * linearly ramped across that band so the fade eases in/out instead
+	 * of kinking at the band's own edges. */
+	{
+		XYZvec eye;
+		double radius_base, radius_apex, height_frac, radius_at_cam, ratio, band_t;
+		float alpha_scale;
+
+		camera_ground_position( camera, &eye );
+
+		radius_base = MAX(rx, rz);
+		radius_apex = FSN_SPOTLIGHT_CONE_APEX_FRAC * radius_base;
+		height_frac = (apex_z > cone_base_z) ?
+		    CLAMP((eye.z - cone_base_z) / (apex_z - cone_base_z), 0.0, 1.0) : 0.0;
+		radius_at_cam = radius_base + height_frac * (radius_apex - radius_base);
+
+		ratio = hypot( eye.x - cx, eye.y - cz ) / MAX(EPSILON, radius_at_cam);
+
+		band_t = CLAMP(
+		    (ratio - FSN_SPOTLIGHT_CONE_FADE_INNER) /
+		    (FSN_SPOTLIGHT_CONE_FADE_OUTER - FSN_SPOTLIGHT_CONE_FADE_INNER),
+		    0.0, 1.0 );
+		alpha_scale = (float)(band_t * band_t * (3.0 - 2.0 * band_t)); /* smoothstep */
+
+		if (alpha_scale > 0.0f)
+			fsn_gldraw_spotlight_cone( cx, cz, cone_base_z, apex_z, rx, rz,
+			    alpha_scale );
+	}
 
 	gpu_set_depth_test( FSV_DEPTH_LESS );
 }
