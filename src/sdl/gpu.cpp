@@ -1495,18 +1495,23 @@ overview_fit_aspect(double *x0, double *x1, double *y0, double *y1)
 // layout), in which case nothing is drawn at all and the previous
 // mini-map stays on screen.
 //
-// The landscape's own bounding box is what gets framed -- NOT the box
-// extended to include the camera. The camera in FSN sits well behind and
-// above its target, so folding its position in would rescale the whole
-// mini-map continuously through every flight, which is precisely the
-// "stable map, moving marker" relationship a mini-map exists to provide.
-// The marker is clamped into the frame instead (see
-// draw_overview_marker()), so it stays visible even when the camera is
-// genuinely outside the landscape.
+// The landscape's own bounding box (plus margin) is the frame's baseline,
+// but a camera flown outside it pulls the frame open toward its own ground
+// position -- growing only the side(s) the camera is beyond, one more
+// margin past it -- so the mini-map still reads as "stable map, moving
+// marker" for a camera near or over the landscape, while a camera flown
+// well clear of it gets a wider map instead of a marker pinned unreadably
+// to the edge (TODO.md's "Overview mini-map (Task C1)" ticket). The growth
+// is capped at FSN_OVERVIEW_MAX_GROWTH times the landscape's own larger
+// dimension, so a camera flown arbitrarily far away doesn't shrink the
+// landscape to a speck; past the cap, draw_overview_marker()'s
+// pre-existing edge-clamp is the fallback, same as before this frame ever
+// tracked the camera.
 bool
 overview_frame_scene(void)
 {
-	double x0, x1, y0, y1, height, margin;
+	double x0, x1, y0, y1, height, margin, landscape_dim, growth_cap;
+	XYZvec cam_pos;
 
 	if (fsn_layout_root() == nullptr)
 		return false;
@@ -1517,11 +1522,29 @@ overview_frame_scene(void)
 		return false; // degenerate layout (should not happen: every
 			      // pedestal has a real footprint)
 
-	margin = FSN_OVERVIEW_MARGIN * MAX(x1 - x0, y1 - y0);
+	landscape_dim = MAX(x1 - x0, y1 - y0);
+	margin = FSN_OVERVIEW_MARGIN * landscape_dim;
 	x0 -= margin;
 	x1 += margin;
 	y0 -= margin;
 	y1 += margin;
+
+	// Chase the camera, per axis, only on the side it has actually left
+	// the (margined) frame on -- never recenter the landscape needlessly
+	// on an axis the camera hasn't left. `camera_ground_position()` is
+	// the same eye-point derivation draw_overview_marker() uses for its
+	// marker (src/camera.c).
+	camera_ground_position(camera, &cam_pos);
+	growth_cap = FSN_OVERVIEW_MAX_GROWTH * landscape_dim;
+	if (cam_pos.x < x0)
+		x0 = MAX(cam_pos.x - margin, x1 - growth_cap);
+	else if (cam_pos.x > x1)
+		x1 = MIN(cam_pos.x + margin, x0 + growth_cap);
+	if (cam_pos.y < y0)
+		y0 = MAX(cam_pos.y - margin, y1 - growth_cap);
+	else if (cam_pos.y > y1)
+		y1 = MIN(cam_pos.y + margin, y0 + growth_cap);
+
 	overview_fit_aspect(&x0, &x1, &y0, &y1);
 
 	g_overview_x0 = x0;
@@ -1574,16 +1597,13 @@ setup_overview_matrices(void)
 // The camera marker: a flat arrowhead on the ground at the camera's own
 // ground position, pointing the way it is looking.
 //
-// Position and heading come from the live camera the same way
-// setup_modelview_matrix()'s FSV_FSN/FSV_MAPV case reads them (FSN reuses
-// MapV's camera storage -- see camera.c's FSN_CAMERA_* note). Solving
-// that same transform for the eye point gives
-//
-//   camera = target + distance * (cos(phi)cos(theta),
-//                                 cos(phi)sin(theta), sin(phi))
-//
-// so the camera stands at that ground offset from its target and looks
-// back along -(cos(theta), sin(theta)) -- which is the arrow's direction.
+// Position comes from camera_ground_position() (src/camera.c), which
+// solves setup_modelview_matrix()'s FSV_FSN/FSV_MAPV eye-point transform
+// for the same live camera (FSN reuses MapV's camera storage -- see
+// camera.c's FSN_CAMERA_* note) -- overview_frame_scene() above uses the
+// identical call to chase this same camera when framing the mini-map.
+// Heading comes straight from camera->theta: the camera looks back along
+// -(cos(theta), sin(theta)), which is the arrow's direction.
 //
 // Drawn with the depth test off (FSV_DEPTH_ALWAYS_NOWRITE) so a pedestal
 // the camera happens to be standing over cannot hide it, and after
@@ -1601,10 +1621,10 @@ draw_overview_marker(void)
 	const double size = FSN_OVERVIEW_MARKER_FRAC *
 	    0.5 * (g_overview_x1 - g_overview_x0);
 
-	double cx = MAPV_CAMERA(camera)->target.x +
-	    camera->distance * cos(RAD(camera->phi)) * cos(theta);
-	double cy = MAPV_CAMERA(camera)->target.y +
-	    camera->distance * cos(RAD(camera->phi)) * sin(theta);
+	XYZvec cam_ground_pos;
+	camera_ground_position(camera, &cam_ground_pos);
+	double cx = cam_ground_pos.x;
+	double cy = cam_ground_pos.y;
 
 	// Clamped into the framed rectangle (inset by the marker's own size,
 	// so it is never half off the edge): a camera pulled far back sits

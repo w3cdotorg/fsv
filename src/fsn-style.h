@@ -167,6 +167,13 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
  * screenshot's inset, whose landscape sits well clear of its frame. */
 #define FSN_OVERVIEW_MARGIN 0.08
 
+/* The framed rect may grow to at most this multiple of the landscape's own
+ * larger dimension to chase the camera; beyond that the marker edge-clamps
+ * as before (TODO.md's "Overview mini-map (Task C1)" ticket: a camera
+ * outside the landscape used to pin the marker to the frame edge with its
+ * distance unreadable). */
+#define FSN_OVERVIEW_MAX_GROWTH 3.0
+
 /* The camera marker: an isoceles triangle pointing the way the camera is
  * looking, centered on the camera's ground position. Its size is a
  * fraction of the framed area's half-width rather than a world-unit
