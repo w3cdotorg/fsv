@@ -1507,6 +1507,19 @@ overview_fit_aspect(double *x0, double *x1, double *y0, double *y1)
 // landscape to a speck; past the cap, draw_overview_marker()'s
 // pre-existing edge-clamp is the fallback, same as before this frame ever
 // tracked the camera.
+//
+// "Camera near or over the landscape" is NOT FSN's own establishing shot:
+// that pose looks down at the whole tree from behind and above, so its
+// ground-projected eye point sits outside the pedestals' own bounding box
+// by construction -- the very first frame of any FSN session already
+// exercises this growth path, by a modest amount. That is intended, not a
+// regression: it is the direct fix for this ticket's complaint (the
+// marker pinned flush to the edge with its distance unreadable), and it
+// was confirmed against the reference and accepted as the new baseline
+// (2026-08-19) rather than chasing a "no growth at startup" deadband that
+// would just reintroduce the old edge-pinning for the establishing shot.
+// The true no-growth case is a camera that has flown to sit over or near
+// the landscape itself (e.g. after a look-at or warp onto a pedestal).
 bool
 overview_frame_scene(void)
 {
@@ -1534,6 +1547,15 @@ overview_frame_scene(void)
 	// on an axis the camera hasn't left. `camera_ground_position()` is
 	// the same eye-point derivation draw_overview_marker() uses for its
 	// marker (src/camera.c).
+	//
+	// growth_cap bounds each axis's extent *here*, before overview_fit_
+	// aspect() below stretches whichever axis is short to the mini-map's
+	// fixed 512x320 texture aspect. On a diagonal-outside pose, that
+	// aspect-fit step can itself push the capped axis up to roughly
+	// FSN_OVERVIEW_WIDTH/FSN_OVERVIEW_HEIGHT (1.6x) past growth_cap --
+	// bounded (aspect-fit only ever grows to a fixed ratio, never
+	// unboundedly) and accepted, not fixed here: it is still a hard,
+	// small multiple of growth_cap itself, not a new unbounded case.
 	camera_ground_position(camera, &cam_pos);
 	growth_cap = FSN_OVERVIEW_MAX_GROWTH * landscape_dim;
 	if (cam_pos.x < x0)
