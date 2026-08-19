@@ -491,11 +491,14 @@ fsn_draw_spotlight( void )
 	 *
 	 * `ratio`: the camera's ground-plane distance from the cone's axis
 	 * (cx, cz), divided by that radius -- 1.0 lands exactly on the
-	 * wall, less than 1.0 is inside. Compared against a band straddling
-	 * 1.0 (FSN_SPOTLIGHT_CONE_FADE_OUTER/_INNER, fsn-style.h) rather
-	 * than snapping at exactly 1.0, and smoothstepped rather than
-	 * linearly ramped across that band so the fade eases in/out instead
-	 * of kinking at the band's own edges. */
+	 * geometric wall, less than 1.0 is inside. Compared not against that
+	 * geometric wall but against FSN_SPOTLIGHT_CONE_FADE_INNER/_OUTER
+	 * (fsn-style.h) -- ratio 2.0-2.6, well outside it -- because the
+	 * shipped band is calibrated to where the cone is actually observed
+	 * to vanish on screen, not to the wall itself; see fsn-style.h's
+	 * CALIBRATION comment above those two constants for why the two
+	 * diverge. Smoothstepped rather than linearly ramped across the band
+	 * so the fade eases in/out instead of kinking at its own edges. */
 	{
 		XYZvec eye;
 		double radius_base, radius_apex, height_frac, radius_at_cam, ratio, band_t;

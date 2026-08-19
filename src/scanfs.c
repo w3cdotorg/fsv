@@ -128,9 +128,11 @@ dir_name_excluded( const char *name )
 			return TRUE;
 
 	if (user_exclude_patterns != NULL)
-		for (i = 0; i < (int)user_exclude_patterns->len; i++)
-			if (fnmatch( (const char *)g_ptr_array_index( user_exclude_patterns, i ), name, 0 ) == 0)
+		for (i = 0; i < (int)user_exclude_patterns->len; i++) {
+			const char *pat = (const char *)g_ptr_array_index( user_exclude_patterns, i );
+			if (fnmatch( pat, name, 0 ) == 0)
 				return TRUE;
+		}
 
 	return FALSE;
 }

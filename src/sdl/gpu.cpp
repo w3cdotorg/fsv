@@ -1497,11 +1497,11 @@ overview_fit_aspect(double *x0, double *x1, double *y0, double *y1)
 //
 // The landscape's own bounding box (plus margin) is the frame's baseline,
 // but a camera flown outside it pulls the frame open toward its own ground
-// position -- growing only the side(s) the camera is beyond, one more
-// margin past it -- so the mini-map still reads as "stable map, moving
-// marker" for a camera near or over the landscape, while a camera flown
-// well clear of it gets a wider map instead of a marker pinned unreadably
-// to the edge (TODO.md's "Overview mini-map (Task C1)" ticket). The growth
+// position -- growing only the side(s) the camera is beyond, one more pad
+// past it -- so the mini-map still reads as "stable map, moving marker"
+// for a camera near or over the landscape, while a camera flown well
+// clear of it gets a wider map instead of a marker pinned unreadably to
+// the edge (TODO.md's "Overview mini-map (Task C1)" ticket). The growth
 // is capped at FSN_OVERVIEW_MAX_GROWTH times the landscape's own larger
 // dimension, so a camera flown arbitrarily far away doesn't shrink the
 // landscape to a speck; past the cap, draw_overview_marker()'s
@@ -1520,11 +1520,39 @@ overview_fit_aspect(double *x0, double *x1, double *y0, double *y1)
 // would just reintroduce the old edge-pinning for the establishing shot.
 // The true no-growth case is a camera that has flown to sit over or near
 // the landscape itself (e.g. after a look-at or warp onto a pedestal).
+//
+// The pad used on the side being chased is NOT simply `margin` (below):
+// draw_overview_marker()'s own edge-clamp inset is FSN_OVERVIEW_MARKER_
+// FRAC * 0.5 * the *final*, post-aspect-fit x-extent, and on a
+// sufficiently stretched frame that inset outgrows `margin` -- FSN's own
+// establishing shot is the concrete case, whose aspect-fit stretch leaves
+// an x-extent of roughly 3.15x the landscape's own dimension, an inset of
+// ~0.087x versus an 0.08x margin. When the inset is the bigger of the
+// two, it -- not this function's padding -- ends up deciding how far
+// inside the edge the marker actually sits, silently overriding the
+// growth computed here. `chase_pad` below is padded by whichever of the
+// two is larger so the growth stays in charge and the marker lands a
+// full, honest margin inside the frame, matching draw_overview_marker()'s
+// own comment that its clamp is a rare fallback, not the normal source of
+// the marker's placement.
+//
+// Circular in principle -- the inset is sized off the extent this very
+// computation produces -- resolved with one extra trial layout rather
+// than an analytic solve: lay out and aspect-fit the rect with
+// `chase_pad` starting at `margin`, read the inset the *result* implies,
+// and redo the chase (only; the static per-axis margin above is
+// untouched) with that inset as `chase_pad` if it came out larger. A
+// second pass can only grow `chase_pad` further, never shrink it, so one
+// extra pass already lands within the same small, hard-capped multiple of
+// `margin` that FSN_OVERVIEW_MAX_GROWTH bounds everything else to here --
+// good enough to keep the clamp inert without an exact fixed point.
 bool
 overview_frame_scene(void)
 {
 	double x0, x1, y0, y1, height, margin, landscape_dim, growth_cap;
+	double base_x0, base_x1, base_y0, base_y1, chase_pad;
 	XYZvec cam_pos;
+	int pass;
 
 	if (fsn_layout_root() == nullptr)
 		return false;
@@ -1537,10 +1565,10 @@ overview_frame_scene(void)
 
 	landscape_dim = MAX(x1 - x0, y1 - y0);
 	margin = FSN_OVERVIEW_MARGIN * landscape_dim;
-	x0 -= margin;
-	x1 += margin;
-	y0 -= margin;
-	y1 += margin;
+	base_x0 = x0 - margin;
+	base_x1 = x1 + margin;
+	base_y0 = y0 - margin;
+	base_y1 = y1 + margin;
 
 	// Chase the camera, per axis, only on the side it has actually left
 	// the (margined) frame on -- never recenter the landscape needlessly
@@ -1558,16 +1586,36 @@ overview_frame_scene(void)
 	// small multiple of growth_cap itself, not a new unbounded case.
 	camera_ground_position(camera, &cam_pos);
 	growth_cap = FSN_OVERVIEW_MAX_GROWTH * landscape_dim;
-	if (cam_pos.x < x0)
-		x0 = MAX(cam_pos.x - margin, x1 - growth_cap);
-	else if (cam_pos.x > x1)
-		x1 = MIN(cam_pos.x + margin, x0 + growth_cap);
-	if (cam_pos.y < y0)
-		y0 = MAX(cam_pos.y - margin, y1 - growth_cap);
-	else if (cam_pos.y > y1)
-		y1 = MIN(cam_pos.y + margin, y0 + growth_cap);
 
-	overview_fit_aspect(&x0, &x1, &y0, &y1);
+	chase_pad = margin;
+	for (pass = 0; pass < 2; pass++) {
+		double inset;
+
+		x0 = base_x0;
+		x1 = base_x1;
+		y0 = base_y0;
+		y1 = base_y1;
+
+		if (cam_pos.x < x0)
+			x0 = MAX(cam_pos.x - chase_pad, x1 - growth_cap);
+		else if (cam_pos.x > x1)
+			x1 = MIN(cam_pos.x + chase_pad, x0 + growth_cap);
+		if (cam_pos.y < y0)
+			y0 = MAX(cam_pos.y - chase_pad, y1 - growth_cap);
+		else if (cam_pos.y > y1)
+			y1 = MIN(cam_pos.y + chase_pad, y0 + growth_cap);
+
+		overview_fit_aspect(&x0, &x1, &y0, &y1);
+
+		// draw_overview_marker()'s own inset, for the extent this
+		// pass just produced. If `chase_pad` already covers it,
+		// this layout is the final one; otherwise grow `chase_pad`
+		// to match and lay out once more.
+		inset = FSN_OVERVIEW_MARKER_FRAC * 0.5 * (x1 - x0);
+		if (inset <= chase_pad)
+			break;
+		chase_pad = inset;
+	}
 
 	g_overview_x0 = x0;
 	g_overview_x1 = x1;
@@ -1652,7 +1700,14 @@ draw_overview_marker(void)
 	// so it is never half off the edge): a camera pulled far back sits
 	// outside the landscape it is looking at, and a marker that silently
 	// vanished off the edge would read as "the overview is broken"
-	// rather than "you are standing outside the tree".
+	// rather than "you are standing outside the tree". Genuinely a
+	// fallback, not the normal source of the marker's placement:
+	// overview_frame_scene()'s `chase_pad` pads the chased side by at
+	// least this same inset (computed from the same final extent), so
+	// while the camera is within FSN_OVERVIEW_MAX_GROWTH the position
+	// above already lands inside these bounds and this CLAMP is a
+	// no-op. It only actually moves the marker once growth has hit that
+	// cap and the frame can no longer follow the camera out.
 	cx = CLAMP(cx, g_overview_x0 + size, g_overview_x1 - size);
 	cy = CLAMP(cy, g_overview_y0 + size, g_overview_y1 - size);
 
