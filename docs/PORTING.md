@@ -5001,7 +5001,16 @@ Verified:
   landscape pins its marker to the frame edge rather than zooming the map
   out to include it — the deliberate trade for a map that does not
   rescale under every flight, but it does mean the marker's *distance*
-  from the tree is not readable while it is clamped.
+  from the tree is not readable while it is clamped. **Update (ux-polish
+  batch, 2026-08-19): fixed.** The framed rect now grows toward the
+  camera, per axis, capped at `FSN_OVERVIEW_MAX_GROWTH` (3.0x the
+  landscape's larger dimension) — beyond the cap this section's old
+  edge-clamp remains the fallback. FSN's own establishing shot already
+  exercises the growth path by a modest amount (its ground-projected eye
+  point sits outside the pedestals' footprint by construction); that
+  startup growth is accepted as the new baseline (2026-08-19, user
+  decision) rather than chased with a no-growth-at-startup deadband. See
+  `TODO.md`'s "Overview mini-map (Task C1)" ticket.
 - **`fsn_look_at()`'s file-zoom diameter (Task B1, not touched here)
   makes a real click-to-fly on a file in a densely packed directory land
   the camera nose-first against the box row**, as noted above — a real
@@ -5048,7 +5057,16 @@ Verified:
   the cone once the camera's horizontal distance to its axis drops inside
   the cone's radius at camera height — is ticketed in `TODO.md` rather
   than fixed here, since it would need the camera's live position
-  threaded into a function that today only reads layout state.
+  threaded into a function that today only reads layout state. **Update
+  (ux-polish batch, 2026-08-19): fixed.** The beam's alpha now fades over
+  a smoothstep band of camera-distance-to-axis vs cone radius at camera
+  height, skipping the draw once fully inside; the ground pool is
+  deliberately left unfaded. The band was calibrated to the cone's
+  *observed* vanish boundary (ratio 2.0-2.6) rather than the geometric
+  wall (0.85-1.15) it was first aimed at, because the cone's geometry
+  turned out to stop rendering well outside that wall for a
+  still-undiagnosed reason — see `TODO.md`'s new "Spotlight cone stops
+  rendering entirely below ratio ~2.0-2.3" ticket, which stays open.
 - **"Night" landscape is now calibrated** (Task A1's disclosed gap, closed
   post-v0.3; the sky colors were determined by screenshot iteration against
   established constraints, validated at default and tilted framings; ground
@@ -5187,7 +5205,13 @@ dir-b` (two levels under the root).
 - **No de-duplication on "Mark here."** Marking the same node twice
   creates two rows with the same path. Not handled per the brief's "keep
   it simple" instruction; a minor UX rough edge, not a correctness one
-  (both rows resolve and behave independently).
+  (both rows resolve and behave independently). **Update (ux-polish
+  batch, 2026-08-19): fixed.** "Mark here" now walks `g_marks` for the
+  same stored `node_absname()` path before appending; on a match it
+  focuses that row's inline rename field (the same single-
+  `g_editing_index` mechanism the double-click-to-rename entry point
+  already used) instead of adding a duplicate, so the click still gives
+  visible feedback. The other two items below remain accepted-YAGNI.
 - **A missing mark's tooltip shows the raw stored path, not a display-
   safe form.** There is no live `GNode *` for a missing entry to ask
   `node_absname_display()` of; for the vanishingly rare case of a
@@ -5837,6 +5861,17 @@ has no toggle, it has no way to turn exclusion off from a menu either;
 environment variable (any value disables exclusion for the process),
 which is that arm's escape hatch. Design:
 `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
+
+**Update (ux-polish batch, 2026-08-19): the exact-basename-only gap above
+is closed.** The built-in list is now `fnmatch(3)` glob patterns anchored
+on the basename (`builddir*`/`.builddir*` replace the two exact names),
+so `builddir-sdl` and friends are excluded without naming every variant.
+A repeatable `--exclude PATTERN` CLI flag appends user patterns onto the
+same list, gated by the same Vis-menu toggle and `FSV_NO_EXCLUDE` escape
+hatch as the built-ins. The `scanfs_exclude` test above was extended
+rather than duplicated (glob match, a pinned near-miss, a runtime
+`--exclude` pattern, the exclusion-off case); suite now 9/9. See
+`TODO.md`'s "Scan exclusion is exact-basename-only" ticket.
 
 **Deviation from the design spec (I3):** §2 of the design spec called
 for MapV's root dimensions to switch to the weighted area scale along
