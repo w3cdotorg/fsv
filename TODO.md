@@ -105,6 +105,32 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   rest of the scene renders fine), but the intended fix is a fade-on-entry
   guard: skip or fade the cone once the camera's horizontal distance to
   its axis is inside the cone's radius at the camera's height.
+- [ ] **Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
+  full alpha, cause undiagnosed (Task 2 fix-round finding):** independent
+  of the fade-on-entry band above (`FSN_SPOTLIGHT_CONE_FADE_INNER`/`_OUTER`,
+  fsn-style.h) -- the cone's geometry drops out of the rendered frame
+  entirely once the camera's ratio (ground distance from the cone's axis /
+  cone radius at the camera's height) falls below roughly 2.0-2.3, well
+  outside the geometric cone wall (ratio 1.0) the fade band was originally
+  calibrated to bracket. Confirmed **not** back-face culling: forcing the
+  spotlight's depth test from `FSV_DEPTH_LESS_NOWRITE` to
+  `FSV_DEPTH_ALWAYS_NOWRITE` made the geometry flash fully white at ratios
+  where it was otherwise invisible, proving the triangles reach the
+  rasterizer and are only failing the depth *comparison*. Confirmed
+  independent of how the pose is built (reproduced with
+  `camera_look_at()`-style, `camera_warp_to()`-style, and a from-scratch
+  pose with the look-at target decoupled from the eye-to-axis distance)
+  and reproducible across two very differently scaled pedestals
+  (radius-294 and radius-110), a strong signal it's ratio-driven rather
+  than distance- or scale-driven. Root cause undiagnosed -- a leading
+  theory involving near/far clip interaction with the cone's own tall,
+  close-up geometry did not reproduce or disappear under direct
+  manipulation of the clip planes, which weakens but doesn't rule it out.
+  The fade band was recalibrated (2.0-2.6) to bracket this *observed*
+  boundary instead of the geometric wall, so the user-facing symptom is a
+  dissolve rather than a snap, but that masks rather than fixes the
+  underlying invisibility -- once root-caused, retune the band back
+  toward 0.85-1.15, the original theoretical target.
 - [ ] **Overview mini-map (Task C1):** framing ignores the camera — a camera
   far outside the landscape pins its marker to the frame edge instead of
   zooming out, so the marker's distance is unreadable while clamped. Also
