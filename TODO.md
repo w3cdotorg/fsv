@@ -118,6 +118,13 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   geometry turned out to stop rendering well outside that wall for an
   undiagnosed reason — see the next ticket below, which stays open until
   that's root-caused. Verified with outside/edge/inside posed captures.
+  Effective width note: the 2.0-2.6 band is where the *alpha math* runs,
+  but the next ticket's own undiagnosed cutoff already drops the cone
+  entirely, at full alpha, somewhere around ratio 2.0-2.3 on the tested
+  pedestal — so in practice the *visible* dissolve is narrower than the
+  nominal band, roughly ratio 2.4-2.6, with the band's lower reaches
+  masked by that separate bug rather than doing any fading of their own.
+  Bounded by, and closes with, the open cutoff ticket below.
 - [ ] **Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
   full alpha, cause undiagnosed (Task 2 fix-round finding):** independent
   of the fade-on-entry band above (`FSN_SPOTLIGHT_CONE_FADE_INNER`/`_OUTER`,
@@ -179,7 +186,14 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   escape hatch as the built-ins — directories only, no new dependencies.
   Regression-locked by the extended `scanfs_exclude` meson test (a glob
   match, a pinned near-miss, a runtime `--exclude` pattern, and the
-  exclusion-off case).
+  exclusion-off case). Two caveats: `--exclude` is the **SDL frontend
+  only** — the GTK arm's `getopt_long()` table (`src/fsv.c`) has no case
+  for it, so it is silently unrecognized there (GTK keeps the built-in
+  list plus its existing `FSV_NO_EXCLUDE` escape hatch, unchanged); and
+  the ticket's other half, a `--no-exclude` CLI flag to disable exclusion
+  outright, was not shipped — `FSV_NO_EXCLUDE` (the environment variable)
+  and the SDL Vis-menu toggle already cover that need without a dedicated
+  flag.
 
 ## Still-relevant items from the 1999 upstream `TODO`
 

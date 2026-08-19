@@ -1082,6 +1082,9 @@ usage(const char *argv0)
 {
 	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev|--fsn] "
 	    "[--exclude PATTERN] [--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
+	// --exclude matches directory basenames only (fnmatch(3) glob
+	// patterns, e.g. "builddir*"), never full paths or file names.
+	SDL_Log("  --exclude matches directory basenames only, not paths or files");
 }
 
 int

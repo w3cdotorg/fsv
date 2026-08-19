@@ -5067,6 +5067,12 @@ Verified:
   turned out to stop rendering well outside that wall for a
   still-undiagnosed reason — see `TODO.md`'s new "Spotlight cone stops
   rendering entirely below ratio ~2.0-2.3" ticket, which stays open.
+  Because that cutoff already drops the cone entirely, at full alpha,
+  somewhere around ratio 2.0-2.3 on the tested pedestal, the 2.0-2.6 band
+  is wider than what actually reads as a dissolve on screen: the visible
+  fade is effectively only its upper reach, roughly ratio 2.4-2.6, with
+  the rest of the nominal band masked by that separate, still-open bug
+  rather than doing any fading of its own.
 - **"Night" landscape is now calibrated** (Task A1's disclosed gap, closed
   post-v0.3; the sky colors were determined by screenshot iteration against
   established constraints, validated at default and tilted framings; ground
@@ -5872,6 +5878,14 @@ hatch as the built-ins. The `scanfs_exclude` test above was extended
 rather than duplicated (glob match, a pinned near-miss, a runtime
 `--exclude` pattern, the exclusion-off case); suite now 9/9. See
 `TODO.md`'s "Scan exclusion is exact-basename-only" ticket.
+
+Two caveats, also recorded there: `--exclude` is **SDL-frontend only** --
+the GTK arm's `getopt_long()` option table (`src/fsv.c`) has no case for
+it, so GTK silently ignores the flag and keeps only the built-in list
+plus its pre-existing `FSV_NO_EXCLUDE` escape hatch; and the ticket's
+`--no-exclude` half -- a CLI flag to disable exclusion outright -- was
+not shipped as a flag, since `FSV_NO_EXCLUDE` (env var) and the SDL
+Vis-menu toggle already cover that need.
 
 **Deviation from the design spec (I3):** §2 of the design spec called
 for MapV's root dimensions to switch to the weighted area scale along

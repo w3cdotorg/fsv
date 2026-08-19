@@ -171,7 +171,14 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
  * larger dimension to chase the camera; beyond that the marker edge-clamps
  * as before (TODO.md's "Overview mini-map (Task C1)" ticket: a camera
  * outside the landscape used to pin the marker to the frame edge with its
- * distance unreadable). */
+ * distance unreadable).
+ *
+ * Implicit floor: below 1 + 2*FSN_OVERVIEW_MARGIN (~1.16 at the margin
+ * above), this cap would be tighter than the landscape-plus-margin
+ * baseline itself (gpu.cpp's overview_frame_scene() -- the un-chased
+ * base rect is already landscape_dim * (1 + 2*FSN_OVERVIEW_MARGIN)), so
+ * a value that low would crop the baseline frame on every render, not
+ * just cap how far it can chase the camera. Never set it below that. */
 #define FSN_OVERVIEW_MAX_GROWTH 3.0
 
 /* The camera marker: an isoceles triangle pointing the way the camera is
