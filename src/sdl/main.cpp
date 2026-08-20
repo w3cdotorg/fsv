@@ -1081,7 +1081,10 @@ static void
 usage(const char *argv0)
 {
 	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev|--fsn] "
-	    "[--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
+	    "[--exclude PATTERN] [--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
+	// --exclude matches directory basenames only (fnmatch(3) glob
+	// patterns, e.g. "builddir*"), never full paths or file names.
+	SDL_Log("  --exclude matches directory basenames only, not paths or files");
 }
 
 int
@@ -1108,6 +1111,8 @@ main(int argc, char **argv)
 			initial_mode = FSV_TREEV;
 		else if (strcmp(argv[i], "--fsn") == 0)
 			initial_mode = FSV_FSN;
+		else if (strcmp(argv[i], "--exclude") == 0 && i + 1 < argc)
+			scanfs_add_exclude_pattern(argv[++i]);
 		else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
 			screenshot_path = argv[++i];
 		else if (strcmp(argv[i], "--record") == 0 && i + 2 < argc) {

@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <fnmatch.h>
 
 #include "animation.h" /* morph_break_all( ), scheduled_events_clear( ) */
 #include "dirtree.h"
@@ -53,14 +54,28 @@ static int stat_count = 0;
 /* Built-in scan exclusion (2026 rework; the upstream-1999 TODO's "way
  * to exclude directories" -- originally slow AFS mounts, today
  * .git/build dirs that also dominate MapV's byte-proportional
- * layout). Deliberately conservative: exact basename match,
- * DIRECTORIES only, no 'build'/'target'/'dist' (too many real-content
- * false positives). The SDL frontend exposes a toggle (Vis menu);
- * default is on. */
-static const char *excluded_dir_names[] = {
+ * layout). Entries are fnmatch(3) glob patterns matched anchored
+ * against the basename (FNM_PATHNAME is irrelevant -- basenames never
+ * contain '/'), DIRECTORIES only. "builddir*"/".builddir*" (rather
+ * than the exact names "builddir"/".builddir") catch the variants
+ * real checkouts actually use -- this repo's own builddir-sdl and
+ * builddir-gtk among them -- while still leaving "build"/"target"/
+ * "dist" off the list (too many real-content false positives). The
+ * SDL frontend exposes a toggle (Vis menu) plus a --exclude PATTERN
+ * CLI flag that appends to user_exclude_patterns below; default is
+ * on. */
+static const char *excluded_dir_patterns[] = {
 	".git", ".svn", ".hg", "node_modules", "__pycache__",
-	".venv", ".cache", "builddir", ".builddir"
+	".venv", ".cache", "builddir*", ".builddir*"
 };
+
+/* User-supplied patterns (--exclude PATTERN, repeatable). Lazily
+ * allocated since most runs pass none. Patterns here match with the
+ * exact same anchored-basename, directories-only semantics as
+ * excluded_dir_patterns[], and ride the same scanfs_set_exclusion( )/
+ * FSV_NO_EXCLUDE gates -- there is no separate on/off switch for
+ * them. */
+static GPtrArray *user_exclude_patterns = NULL;
 
 static boolean scanfs_exclusion = TRUE;
 
@@ -74,6 +89,16 @@ boolean
 scanfs_get_exclusion( void )
 {
 	return scanfs_exclusion;
+}
+
+void
+scanfs_add_exclude_pattern( const char *pattern )
+{
+	if (pattern == NULL || pattern[0] == '\0')
+		return;
+	if (user_exclude_patterns == NULL)
+		user_exclude_patterns = g_ptr_array_new( );
+	g_ptr_array_add( user_exclude_patterns, g_strdup( pattern ) );
 }
 
 static boolean
@@ -92,14 +117,23 @@ dir_name_excluded( const char *name )
 	 * variable (any value) to disable exclusion for the process, same
 	 * effect as unchecking the SDL toggle. Checked on every call rather
 	 * than cached, matching this function's existing cost (a handful of
-	 * strcmp( )s against a fixed short list) and dodging any static-init
-	 * ordering question about when to snapshot the environment. */
+	 * fnmatch( )es against a fixed short list) and dodging any
+	 * static-init ordering question about when to snapshot the
+	 * environment. */
 	if (g_getenv( "FSV_NO_EXCLUDE" ) != NULL)
 		return FALSE;
 
-	for (i = 0; i < (int)G_N_ELEMENTS(excluded_dir_names); i++)
-		if (strcmp( name, excluded_dir_names[i] ) == 0)
+	for (i = 0; i < (int)G_N_ELEMENTS(excluded_dir_patterns); i++)
+		if (fnmatch( excluded_dir_patterns[i], name, 0 ) == 0)
 			return TRUE;
+
+	if (user_exclude_patterns != NULL)
+		for (i = 0; i < (int)user_exclude_patterns->len; i++) {
+			const char *pat = (const char *)g_ptr_array_index( user_exclude_patterns, i );
+			if (fnmatch( pat, name, 0 ) == 0)
+				return TRUE;
+		}
+
 	return FALSE;
 }
 

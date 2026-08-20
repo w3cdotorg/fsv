@@ -88,42 +88,112 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 
 ## UX rough edges (accepted as YAGNI, documented)
 
-- [ ] **Marks panel (Task C2):** no de-duplication on "Mark here" (marking the
-  same node twice creates two identical rows); only one row renamable at a
+- [x] ~~**Marks panel (Task C2): no de-duplication on "Mark here."**~~
+  **Closed**: marking an already-bookmarked node no longer pushes a
+  duplicate row — the button now walks `g_marks` for the same stored
+  `node_absname()` path and, on a match, focuses that row's inline rename
+  field (the same single-`g_editing_index` mechanism the row's own
+  double-click-to-rename entry point uses) instead of adding, so the
+  click still gives visible feedback.
+- [ ] **Marks panel (Task C2), remaining:** only one row renamable at a
   time (single `g_editing_index`); a missing mark's tooltip shows the raw
-  stored path rather than a display-safe form.
+  stored path rather than a display-safe form. Both still accepted-YAGNI
+  per the brief's "keep it simple" instruction (PORTING.md's Task C2
+  disclosed-gaps note).
 - [ ] **File-open confirm modal (Task C3):** fixed corner position, never
   moves once chosen (`ImGuiCond_Always`); relax to `ImGuiCond_FirstUseEver`
   if a remembered/cascading position is ever wanted.
 - [ ] **Selection spotlight is not deployment-aware (Task B3; applies to the light cone too):** during an
   ancestor's expand/collapse morph it draws at the node's static layout
   height — brief visible glitch only during the animation window.
-- [ ] **Spotlight beam vanishes when the camera is inside the cone:** the
-  scene pipeline back-face culls, so a camera positioned inside the light
-  cone's radius sees only its back faces and the beam disappears entirely
-  — reachable via warp-lite (Task C4)'s `camera_warp_to()`. Benign (the
-  rest of the scene renders fine), but the intended fix is a fade-on-entry
-  guard: skip or fade the cone once the camera's horizontal distance to
-  its axis is inside the cone's radius at the camera's height.
-- [ ] **Overview mini-map (Task C1):** framing ignores the camera — a camera
-  far outside the landscape pins its marker to the frame edge instead of
-  zooming out, so the marker's distance is unreadable while clamped. Also
-  the overview never appears in `--screenshot` output (ImGui window; that
-  path renders the scene alone), so it can't be regression-checked headlessly.
+- [x] ~~**Spotlight beam vanishes when the camera is inside the cone.**~~
+  **Fixed**: the beam's alpha now fades over a smoothstep band of
+  camera-distance-to-axis vs cone radius at camera height, skipping the
+  draw entirely once fully inside, instead of snapping off the instant
+  the camera crosses the cone wall (reachable in practice via warp-lite
+  (Task C4)'s `camera_warp_to()`). The ground pool is deliberately left
+  unfaded — it reads fine from inside. The band itself is calibrated to
+  the *observed* vanish boundary (ratio 2.0-2.6), not the geometric cone
+  wall (0.85-1.15) the fix originally targeted, because the cone's
+  geometry turned out to stop rendering well outside that wall for an
+  undiagnosed reason — see the next ticket below, which stays open until
+  that's root-caused. Verified with outside/edge/inside posed captures.
+  Effective width note: the 2.0-2.6 band is where the *alpha math* runs,
+  but the next ticket's own undiagnosed cutoff already drops the cone
+  entirely, at full alpha, somewhere around ratio 2.0-2.3 on the tested
+  pedestal — so in practice the *visible* dissolve is narrower than the
+  nominal band, roughly ratio 2.4-2.6, with the band's lower reaches
+  masked by that separate bug rather than doing any fading of their own.
+  Bounded by, and closes with, the open cutoff ticket below.
+- [ ] **Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
+  full alpha, cause undiagnosed (Task 2 fix-round finding):** independent
+  of the fade-on-entry band above (`FSN_SPOTLIGHT_CONE_FADE_INNER`/`_OUTER`,
+  fsn-style.h) -- the cone's geometry drops out of the rendered frame
+  entirely once the camera's ratio (ground distance from the cone's axis /
+  cone radius at the camera's height) falls below roughly 2.0-2.3, well
+  outside the geometric cone wall (ratio 1.0) the fade band was originally
+  calibrated to bracket. Confirmed **not** back-face culling: forcing the
+  spotlight's depth test from `FSV_DEPTH_LESS_NOWRITE` to
+  `FSV_DEPTH_ALWAYS_NOWRITE` made the geometry flash fully white at ratios
+  where it was otherwise invisible, proving the triangles reach the
+  rasterizer and are only failing the depth *comparison*. Confirmed
+  independent of how the pose is built (reproduced with
+  `camera_look_at()`-style, `camera_warp_to()`-style, and a from-scratch
+  pose with the look-at target decoupled from the eye-to-axis distance)
+  and reproducible across two very differently scaled pedestals
+  (radius-294 and radius-110), a strong signal it's ratio-driven rather
+  than distance- or scale-driven. Root cause undiagnosed -- a leading
+  theory involving near/far clip interaction with the cone's own tall,
+  close-up geometry did not reproduce or disappear under direct
+  manipulation of the clip planes, which weakens but doesn't rule it out.
+  The fade band was recalibrated (2.0-2.6) to bracket this *observed*
+  boundary instead of the geometric wall, so the user-facing symptom is a
+  dissolve rather than a snap, but that masks rather than fixes the
+  underlying invisibility -- once root-caused, retune the band back
+  toward 0.85-1.15, the original theoretical target.
+- [x] ~~**Overview mini-map (Task C1): framing ignores the camera.**~~
+  **Closed**: the framed rect now grows toward the camera, per axis, up to
+  `FSN_OVERVIEW_MAX_GROWTH` (3.0x the landscape's larger dimension) —
+  beyond the cap the old edge-clamp remains the fallback — so the marker
+  stays inside the frame with readable separation instead of pinned flush
+  to the edge. `overview_fit_aspect()`'s fixed 512x320 stretch is applied
+  after the cap, which can itself push a capped axis up to ~1.6x past
+  `FSN_OVERVIEW_MAX_GROWTH` on a diagonal-outside pose — bounded and
+  accepted, documented inline. FSN's own establishing shot already
+  exercises this growth path by a modest amount (it looks down at the
+  whole tree from behind and above, so its ground-projected eye point
+  sits outside the pedestals' footprint by construction); that startup
+  growth is accepted as the new baseline (2026-08-19, user decision), not
+  a regression to chase with a no-growth-at-startup deadband — the true
+  no-growth case is a camera over or near the landscape itself. Also now
+  consumes Task 2's `camera_ground_position()` accessor in
+  `draw_overview_marker()` instead of its own inlined copy of the same
+  derivation. Verified via `--record` frame extraction at
+  inside/outside/beyond-cap poses.
+- [ ] **Overview mini-map (Task C1), remaining:** the overview never
+  appears in `--screenshot` output (ImGui window; that path renders the
+  scene alone), so it still can't be regression-checked headlessly.
 - [ ] **Warp-lite (Task C4):** `FSN_WARP_HEIGHT_LIFT` is a fixed tuned guess,
   not computed from the children's actual box heights; `colexp()`'s internal
   re-pan can be cancelled by the warp that follows it (benign — the warp is
   the pan the user asked for); no Search panel / full in-directory warp
   paradigm from upstream fsn.
-- [ ] **Scan exclusion is exact-basename-only (2026 rework):** no
-  prefix/glob patterns (`build*`, `*.egg-info`), no user-editable
-  exclusion list (the set in `scanfs.c` is a compile-time constant), and
-  no `--exclude`/`--no-exclude` CLI flag — the only override today is the
-  SDL Vis-menu toggle or the GTK-only `FSV_NO_EXCLUDE` environment
-  variable, both all-or-nothing. A checkout with a differently-named
-  build directory (`builddir-sdl`, `build/`, `target/`, `dist/`) or any
-  other dot-directory the fixed list doesn't name still scans and renders
-  in full.
+- [x] ~~**Scan exclusion is exact-basename-only (2026 rework).**~~ **Fixed**:
+  the built-in list is now `fnmatch(3)` glob patterns anchored on the
+  basename (`builddir*`/`.builddir*` replace the two exact names), and a
+  repeatable `--exclude PATTERN` CLI flag appends user patterns onto the
+  same list, gated by the same Vis-menu toggle and `FSV_NO_EXCLUDE`
+  escape hatch as the built-ins — directories only, no new dependencies.
+  Regression-locked by the extended `scanfs_exclude` meson test (a glob
+  match, a pinned near-miss, a runtime `--exclude` pattern, and the
+  exclusion-off case). Two caveats: `--exclude` is the **SDL frontend
+  only** — the GTK arm's `getopt_long()` table (`src/fsv.c`) has no case
+  for it, so it is silently unrecognized there (GTK keeps the built-in
+  list plus its existing `FSV_NO_EXCLUDE` escape hatch, unchanged); and
+  the ticket's other half, a `--no-exclude` CLI flag to disable exclusion
+  outright, was not shipped — `FSV_NO_EXCLUDE` (the environment variable)
+  and the SDL Vis-menu toggle already cover that need without a dedicated
+  flag.
 
 ## Still-relevant items from the 1999 upstream `TODO`
 
@@ -167,6 +237,8 @@ has native Help → Controls / About windows). Still worth doing:
   dot-directory (`.superpowers`) is NOT covered by this list and still
   scans and renders normally. Design:
   `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
+  **Update (2026-08-19):** the exact-match caveat above is closed — see
+  the "Scan exclusion is exact-basename-only" ticket below.
 
 ## Test-harness limitations (not product code)
 

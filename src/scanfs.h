@@ -17,10 +17,17 @@
 
 void scanfs( const char *dir );
 
-/* Built-in scan exclusion (see scanfs.c's excluded_dir_names[] doc
+/* Built-in scan exclusion (see scanfs.c's excluded_dir_patterns[] doc
  * comment). Default is TRUE. */
 void scanfs_set_exclusion( boolean enabled );
 boolean scanfs_get_exclusion( void );
+
+/* Appends a glob pattern (fnmatch(3) syntax) to the exclusion list,
+ * on equal footing with the built-ins -- same anchored-basename,
+ * directories-only matching, and the same scanfs_set_exclusion( )/
+ * FSV_NO_EXCLUDE gates. The string is copied; the caller retains
+ * ownership of pattern. */
+void scanfs_add_exclude_pattern( const char *pattern );
 
 
 /* end scanfs.h */

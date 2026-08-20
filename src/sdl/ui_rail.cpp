@@ -341,12 +341,36 @@ draw_marks_section(bool access_ok, float btn_w)
 	// block it the way Reset/Go back/Front view are blocked above.
 	ImGui::BeginDisabled(globals.current_node == nullptr);
 	if (ImGui::Button("Mark here", ImVec2(btn_w, 0.0f))) {
-		Mark m;
-		m.path = node_absname(globals.current_node);
-		const char *dname = NODE_DNAME(globals.current_node);
-		m.name = (strlen(dname) > 0) ? dname : _("/. (root)");
-		g_marks.push_back(std::move(m));
-		marks_write_config();
+		// Task 4 (ux-polish-batch) de-dup: compare against the same
+		// node_absname() form each row's Mark::path already stores (see
+		// the struct's comment above and the add path just below) --
+		// not a freshly-derived variant that could drift from it.
+		// Marking a node that's already bookmarked used to push a
+		// second, identical row; now it just focuses the existing row's
+		// inline rename field, mirroring draw_mark_row()'s own
+		// double-click-to-rename entry point, so the click still gives
+		// visible feedback.
+		const char *absname = node_absname(globals.current_node);
+		int existing = -1;
+		for (int i = 0; i < (int)g_marks.size(); i++) {
+			if (g_marks[i].path == absname) {
+				existing = i;
+				break;
+			}
+		}
+		if (existing >= 0) {
+			g_editing_index = existing;
+			strncpy(g_edit_buf, g_marks[existing].name.c_str(),
+			    sizeof(g_edit_buf) - 1);
+			g_edit_buf[sizeof(g_edit_buf) - 1] = '\0';
+		} else {
+			Mark m;
+			m.path = absname;
+			const char *dname = NODE_DNAME(globals.current_node);
+			m.name = (strlen(dname) > 0) ? dname : _("/. (root)");
+			g_marks.push_back(std::move(m));
+			marks_write_config();
+		}
 	}
 	ImGui::EndDisabled();
 

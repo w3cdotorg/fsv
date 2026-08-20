@@ -167,6 +167,20 @@ static const FsnLandscape fsn_landscapes[FSN_LANDSCAPE_COUNT] = {
  * screenshot's inset, whose landscape sits well clear of its frame. */
 #define FSN_OVERVIEW_MARGIN 0.08
 
+/* The framed rect may grow to at most this multiple of the landscape's own
+ * larger dimension to chase the camera; beyond that the marker edge-clamps
+ * as before (TODO.md's "Overview mini-map (Task C1)" ticket: a camera
+ * outside the landscape used to pin the marker to the frame edge with its
+ * distance unreadable).
+ *
+ * Implicit floor: below 1 + 2*FSN_OVERVIEW_MARGIN (~1.16 at the margin
+ * above), this cap would be tighter than the landscape-plus-margin
+ * baseline itself (gpu.cpp's overview_frame_scene() -- the un-chased
+ * base rect is already landscape_dim * (1 + 2*FSN_OVERVIEW_MARGIN)), so
+ * a value that low would crop the baseline frame on every render, not
+ * just cap how far it can chase the camera. Never set it below that. */
+#define FSN_OVERVIEW_MAX_GROWTH 3.0
+
 /* The camera marker: an isoceles triangle pointing the way the camera is
  * looking, centered on the camera's ground position. Its size is a
  * fraction of the framed area's half-width rather than a world-unit
@@ -505,5 +519,31 @@ static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
                                                * above rather than a
                                                * flat-topped wedge with a
                                                * hard floating edge */
+
+/* Fade-on-entry (TODO.md UX ticket): back-face culling makes the beam
+ * vanish the instant the camera crosses the cone wall -- warp-lite
+ * parks the camera exactly there. Fade the beam's alpha over a band
+ * of the ratio (camera horizontal distance to the cone axis) /
+ * (cone radius at the camera's height): 1 outside, 0 well inside,
+ * smoothstep between, so the beam dissolves on approach instead of
+ * snapping off.
+ *
+ * CALIBRATION (fix round, 2026-08-19): 0.85-1.15 was the theoretical
+ * target -- bracketing the geometric cone wall itself (ratio 1.0),
+ * where back-face culling actually kicks in. But Task 2's own
+ * verification found the cone stops rendering *at all*, at full
+ * alpha, once the camera's ratio drops below roughly 2.0-2.3 -- a
+ * separate, pre-existing, undiagnosed rejection confirmed to be
+ * neither back-face culling (persists with the depth test forced to
+ * always-pass) nor dependent on how the pose is built (see TODO.md's
+ * "UX rough edges" ticket for the full probe list). That cutoff sits
+ * well outside the 0.85-1.15 band, so the fade never ran before the
+ * beam had already snapped off -- the band was inert in real play.
+ * Recalibrated here to bracket the *observed* vanish boundary instead
+ * of the geometric wall, so today's snap becomes a dissolve. If the
+ * ratio-~2 cutoff is ever root-caused and fixed, retune this band back
+ * toward 0.85/1.15, the original theoretical target. */
+#define FSN_SPOTLIGHT_CONE_FADE_OUTER 2.6 /* ratio at which fade begins */
+#define FSN_SPOTLIGHT_CONE_FADE_INNER 2.0 /* ratio at which alpha hits 0 */
 
 #endif /* FSV_FSN_STYLE_H */

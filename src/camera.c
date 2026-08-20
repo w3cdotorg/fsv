@@ -835,7 +835,7 @@ cancel_pan_for_manual_control( void )
  *
  * Why it is free: every other consumer of theta takes its sine or
  * cosine, so theta and theta +/- 360 are the same heading everywhere
- * (mapv_get_camera_position( ) included). Only the morph, which does
+ * (camera_ground_position( ) included). Only the morph, which does
  * arithmetic on the number itself, can tell them apart -- which is
  * exactly the bug.
  *
@@ -1019,7 +1019,7 @@ camera_flight_tick( void )
 
 	/* The camera sits at target + distance * (cos(theta)cos(phi),
 	 * sin(theta)cos(phi), sin(phi)) and looks back down that vector at
-	 * the target (mapv_get_camera_position( ) above), so the direction
+	 * the target (camera_ground_position( ) above), so the direction
 	 * the viewer faces, projected onto the ground, is
 	 * -(cos(theta), sin(theta)). Moving the target along it carries the
 	 * whole rig -- viewpoint and all -- forward.
@@ -1098,10 +1098,27 @@ discv_look_at( GNode *node, MorphType mtype, double pan_time_override )
 }
 
 
-/* Helper function for mapv_look_at( ). Calculates the position of a camera
- * (i.e. viewer location) */
-static void
-mapv_get_camera_position( const Camera *cam, XYZvec *pos )
+/* The camera's eye position in world coordinates -- x/y ground-plane,
+ * z height -- for any camera whose mode uses MapVCamera's XYZvec target
+ * (MapV itself, and FSV_FSN, which reuses that same union member; see
+ * geometry-fsn.c's own note on why FSN has no camera struct of its
+ * own). Derived by inverting setup_modelview_matrix( )'s eye-point
+ * transform: eye = target + distance * (cos phi cos theta,
+ * cos phi sin theta, sin phi).
+ *
+ * Originally a MapV-only static helper (mapv_look_at( )'s few call
+ * sites below still use it that way); promoted to a public accessor,
+ * name and all, because FSV_FSN needs the identical derivation twice
+ * more -- the overview mini-map's camera marker (src/sdl/gpu.cpp's
+ * draw_overview_marker( ), which today still inlines its own
+ * ground-only x/y copy of this same formula -- PORTING.md's fsn-mode
+ * deferred notes flag that duplication, left alone here to keep this
+ * change's diff scoped to the caller that actually needs it) and the
+ * selection spotlight's fade-on-entry (geometry-fsn-draw.c's
+ * fsn_draw_spotlight( )), which additionally needs the height
+ * component draw_overview_marker( ) never had a use for. */
+void
+camera_ground_position( const Camera *cam, XYZvec *pos )
 {
 	double sin_theta, cos_theta, sin_phi, cos_phi;
 
@@ -1172,8 +1189,8 @@ mapv_look_at( GNode *node, MorphType mtype, double pan_time_override )
 	new_cam->far_clip = FAR_TO_NEAR_RATIO * new_cam->near_clip;
 
 	/* Overall travel vector */
-	mapv_get_camera_position( camera, &camera_pos );
-	mapv_get_camera_position( new_cam, &new_cam_pos );
+	camera_ground_position( camera, &camera_pos );
+	camera_ground_position( new_cam, &new_cam_pos );
 	delta.x = new_cam_pos.x - camera_pos.x;
 	delta.y = new_cam_pos.y - camera_pos.y;
 	delta.z = new_cam_pos.z - camera_pos.z;
@@ -1318,8 +1335,8 @@ fsn_look_at( GNode *node, MorphType mtype, double pan_time_override )
 	if (pan_time_override > 0.0)
 		pan_time = pan_time_override;
 	else {
-		mapv_get_camera_position( camera, &camera_pos );
-		mapv_get_camera_position( new_cam, &new_cam_pos );
+		camera_ground_position( camera, &camera_pos );
+		camera_ground_position( new_cam, &new_cam_pos );
 		delta.x = new_cam_pos.x - camera_pos.x;
 		delta.y = new_cam_pos.y - camera_pos.y;
 		delta.z = new_cam_pos.z - camera_pos.z;
@@ -1745,8 +1762,8 @@ fsn_warp_pose( GNode *node, MorphType mtype, double pan_time_override )
 	if (pan_time_override > 0.0)
 		pan_time = pan_time_override;
 	else {
-		mapv_get_camera_position( camera, &camera_pos );
-		mapv_get_camera_position( new_cam, &new_cam_pos );
+		camera_ground_position( camera, &camera_pos );
+		camera_ground_position( new_cam, &new_cam_pos );
 		delta.x = new_cam_pos.x - camera_pos.x;
 		delta.y = new_cam_pos.y - camera_pos.y;
 		delta.z = new_cam_pos.z - camera_pos.z;

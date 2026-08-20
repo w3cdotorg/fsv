@@ -76,6 +76,13 @@ extern Camera *camera;
 
 boolean camera_moving( void );
 void camera_init( FsvMode mode, boolean initial_view );
+/* Eye position (world x/y ground-plane, z height) for any camera whose
+ * mode keys its target off MapVCamera's XYZvec -- MapV itself, and
+ * FSV_FSN, which reuses that same union member (see camera.c's own
+ * doc comment on this function for the derivation and its other
+ * callers). `cam` need not be the global `camera` -- callers morph
+ * towards a constructed candidate pose too. */
+void camera_ground_position( const Camera *cam, XYZvec *pos );
 /* Frontend calls this when the user drags a viewport scrollbar (axis:
  * 0 = x, 1 = y, matching fsv_platform.set_scroll( )/get_scroll( )) */
 void camera_scrollbar_moved( int axis );
