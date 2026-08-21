@@ -38,6 +38,7 @@ extern "C" {
 #include "fontatlas.h" /* font_atlas_find_font( ): the panels' TTF too */
 #include "fsv-platform.h"
 #include "geometry.h"
+#include "fscache.h" /* --no-cache, Rescan's fscache_skip_next_load() */
 #include "scanfs.h"
 #include "tmaptext.h" /* text_init( ) */
 #include "window.h" /* StatusBarID, window_statusbar( ) */
@@ -418,6 +419,10 @@ app_request_rescan(void)
 {
 	if (g_scanning)
 		return;
+	// Rescan means "show me the disk as it is": read-side cache bypass
+	// for the scan this queues (the scan still re-saves afterward).
+	// Change Root and startup keep the cache -- navigation, not refresh.
+	fscache_skip_next_load();
 	g_pending_root_change = true;
 	if (g_pending_new_root != nullptr)
 		xfree(g_pending_new_root);
@@ -1081,7 +1086,7 @@ static void
 usage(const char *argv0)
 {
 	SDL_Log("Usage: %s [rootdir] [--discv|--mapv|--treev|--fsn] "
-	    "[--exclude PATTERN] [--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
+	    "[--exclude PATTERN] [--no-cache] [--screenshot FILE] [--record OUTDIR SECONDS]", argv0);
 	// --exclude matches directory basenames only (fnmatch(3) glob
 	// patterns, e.g. "builddir*"), never full paths or file names.
 	SDL_Log("  --exclude matches directory basenames only, not paths or files");
@@ -1113,6 +1118,8 @@ main(int argc, char **argv)
 			initial_mode = FSV_FSN;
 		else if (strcmp(argv[i], "--exclude") == 0 && i + 1 < argc)
 			scanfs_add_exclude_pattern(argv[++i]);
+		else if (strcmp(argv[i], "--no-cache") == 0)
+			fscache_set_enabled(FALSE);
 		else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
 			screenshot_path = argv[++i];
 		else if (strcmp(argv[i], "--record") == 0 && i + 2 < argc) {

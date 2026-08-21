@@ -464,6 +464,23 @@ pipeline_for(SDL_GPUPrimitiveType prim, FsvDepthTest depth_test, int target)
 	rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
 	rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
 
+	// GL always clips primitives against the near/far planes; SDL_GPU's
+	// zero-initialized default here is the OPPOSITE (false == depth
+	// *clamp*, Metal's MTLDepthClipModeClamp / Vulkan's depthClampEnable).
+	// Leaving it off kept geometry between the eye and the near plane --
+	// which GL discards -- fully rasterized, so on any close approach the
+	// foreground boxes GL would clip away instead walled off the whole
+	// frame and occluded everything behind them. That was the entire
+	// "spotlight cone stops rendering below ratio ~2.0-2.3" mystery
+	// (TODO.md): the threshold was exactly where the near plane
+	// (NEAR_TO_DISTANCE_RATIO: half the camera-to-target distance) starts
+	// overlapping the selected pedestal's file boxes -- and it also
+	// explains why manipulating the clip planes during that investigation
+	// changed nothing: in clamp mode they clip nothing. The ground quad
+	// used to lean on clamp mode to survive the far plane; it is sized to
+	// the frustum in draw_landscape() now, so nothing here needs clamping.
+	rasterizer_state.enable_depth_clip = true;
+
 	// ogl_init(): glEnable(GL_POLYGON_OFFSET_FILL) + glPolygonOffset(1,1),
 	// which in GL applies to filled polygons only -- so the line
 	// pipelines deliberately do not carry it. Same factor/units, same
@@ -617,6 +634,9 @@ text_pipeline_for(int target)
 	rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
 	rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
 	rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+	// GL-style near/far clipping, not SDL_GPU's zero-init depth clamp --
+	// see pipeline_for()'s comment on the same line for the full story.
+	rasterizer_state.enable_depth_clip = true;
 
 	// Depth test ON, depth WRITE ON. This matches the GL original
 	// exactly rather than the "depth write off" pattern that is typical
@@ -1311,16 +1331,21 @@ constexpr int SKY_BANDS = 32;
 // depth *testing*) don't discard the quad.
 constexpr float SKY_NDC_DEPTH = 0.5f;
 
-// Half-extent of the ground quad, in the same world units as MapV's own
-// node dimensions (mapv_dir_height = 384.0 etc, src/geometry.c). Large
-// enough that its projected silhouette reaches the horizon at any camera
-// distance this app allows: far_clip tops out at 64x the camera's own
-// distance from its target (camera.h's NEAR_TO_DISTANCE_RATIO *
-// FAR_TO_NEAR_RATIO = 0.5 * 128), so whenever this plane's far corners
-// *are* clipped, perspective has already shrunk them to nothing on
-// screen well before that distance -- clipping never shows up as a
-// visibly "too small" ground.
-constexpr float GROUND_HALF_EXTENT = 100000.0f;
+// Half-extent of the ground quad as a fraction of the frame's far clip
+// distance, centered under the camera's eye. Sized so the quad's corners
+// (half-extent x sqrt(2) away) stay just inside far_clip: with the
+// pipelines now clipping against the near/far planes like GL always did
+// (pipeline_for()'s enable_depth_clip comment), a fixed 100000-unit quad
+// would get far-clipped into a visible "tent" horizon -- the far plane
+// intersects each of the quad's two giant triangles in a straight 3D
+// line, and the two projected lines meet in a peak. Kept just inside far
+// instead: the quad's straight edges then sit ~0.7 x far_clip out, where
+// the drop below the true horizon is atan(eye_height / (0.7 far)) --
+// far_clip is 64x the camera-to-target distance (camera.h's
+// NEAR_TO_DISTANCE_RATIO * FAR_TO_NEAR_RATIO) and eye height is at most
+// 1x that same distance, so under a degree: not visible at any pose the
+// app can reach.
+constexpr float GROUND_EXTENT_FAR_FRAC = 0.68f;
 
 // geometry.c's MapV layout puts the *bottom* of the root node's box at
 // z=0 and stacks every directory upward from there (see
@@ -1430,13 +1455,26 @@ draw_landscape(int index)
 	gpu_set_color(land.ground[0], land.ground[1], land.ground[2], 1.0f);
 	// gpu_set_lighting(0) from the sky loop above is still in effect --
 	// a flat plane would light uniformly across its single normal anyway.
-	const float e = GROUND_HALF_EXTENT;
+	//
+	// Center the quad under the camera's eye and size it to the frame's
+	// far clip (GROUND_EXTENT_FAR_FRAC's comment above) so it always
+	// covers the visible frustum without ever crossing the far plane.
+	// The eye position comes from inverting the modelview just restored
+	// above -- mode-agnostic, unlike camera_ground_position(), which
+	// assumes MapVCamera's XYZvec target and so excludes TreeV (a ground
+	// mode, see the switch at the top).
+	mat4 view_inverse;
+	vec4 world_origin = { 0.f, 0.f, 0.f, 1.f }, eye;
+	glm_mat4_inv(gpu_mat.modelview, view_inverse);
+	glm_mat4_mulv(view_inverse, world_origin, eye);
+	const float e = GROUND_EXTENT_FAR_FRAC * (float)camera->far_clip;
+	const float cx = eye[0], cy = eye[1];
 	const float z = GROUND_Z_OFFSET;
 	const FsvVertex ground_verts[4] = {
-		{ { -e, -e, z }, { 0.f, 0.f, 1.f } },
-		{ {  e, -e, z }, { 0.f, 0.f, 1.f } },
-		{ {  e,  e, z }, { 0.f, 0.f, 1.f } },
-		{ { -e,  e, z }, { 0.f, 0.f, 1.f } },
+		{ { cx - e, cy - e, z }, { 0.f, 0.f, 1.f } },
+		{ { cx + e, cy - e, z }, { 0.f, 0.f, 1.f } },
+		{ { cx + e, cy + e, z }, { 0.f, 0.f, 1.f } },
+		{ { cx - e, cy + e, z }, { 0.f, 0.f, 1.f } },
 	};
 	static const unsigned int ground_idx[6] = { 0, 1, 2, 0, 2, 3 };
 	gpu_draw(FSV_TRIANGLES, ground_verts, 4, ground_idx, 6);
@@ -2448,9 +2486,20 @@ gpu_text_upload_mvp(const float *mvp)
 // see the loop in src/sdl/main.cpp. g_cmd is therefore always null on entry;
 // the check below turns a violation of that invariant into a logged no-op
 // pick rather than stomping the in-flight frame.
-unsigned int
-gpu_pick(int x, int y)
+//
+// Shared body of gpu_pick()/gpu_pick_window() (gpu.h): one id-color
+// render, one readback of the GPU_PICK_WINDOW-square neighborhood
+// around (x, y), clamped at the viewport edges. `ids` always holds
+// GPU_PICK_WINDOW * GPU_PICK_WINDOW entries and is zero-filled up
+// front, so every early-out leaves it in the documented "nothing
+// there" state.
+static unsigned int
+pick_impl(int x, int y, unsigned int *ids)
 {
+	const int R = GPU_PICK_WINDOW / 2;
+
+	memset(ids, 0, GPU_PICK_WINDOW * GPU_PICK_WINDOW * sizeof(*ids));
+
 	if (!g_ready || g_window == nullptr)
 		return 0;
 	if (g_cmd != nullptr || g_recording) {
@@ -2519,9 +2568,15 @@ gpu_pick(int x, int y)
 	g_render_mode = FSV_RENDER_NORMAL;
 	g_capture_texture = nullptr;
 
+	// The window rect, clamped to the viewport. Texels the clamp cuts
+	// off stay 0 in `ids` (the memset above).
+	const int wx0 = MAX(0, x - R), wy0 = MAX(0, y - R);
+	const int wx1 = MIN(width - 1, x + R), wy1 = MIN(height - 1, y + R);
+	const int ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+
 	SDL_GPUTransferBufferCreateInfo transfer_info = {};
 	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-	transfer_info.size = 4; // one RGBA8 texel
+	transfer_info.size = (Uint32)(4 * ww * wh); // RGBA8 texels
 	SDL_GPUTransferBuffer *download =
 	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
 	if (download == nullptr) {
@@ -2537,7 +2592,7 @@ gpu_pick(int x, int y)
 		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
 		SDL_GPUTextureRegion source = {};
 		source.texture = pick_texture;
-		source.x = (Uint32)x;
+		source.x = (Uint32)wx0;
 		// SDL_GPU texture regions are top-left origin (SDL_gpu.h:
 		// SDL_GPUTextureRegion::y is "the *top* offset of the
 		// region"), same as the swapchain and same as the (x, y)
@@ -2549,15 +2604,15 @@ gpu_pick(int x, int y)
 		// resolve to the node actually drawn there (an inverted flip
 		// would have swapped top and bottom hits) -- see
 		// docs/PORTING.md Task 4.2.
-		source.y = (Uint32)y;
-		source.w = 1;
-		source.h = 1;
+		source.y = (Uint32)wy0;
+		source.w = (Uint32)ww;
+		source.h = (Uint32)wh;
 		source.d = 1;
 		SDL_GPUTextureTransferInfo destination = {};
 		destination.transfer_buffer = download;
 		destination.offset = 0;
-		destination.pixels_per_row = 1;
-		destination.rows_per_layer = 1;
+		destination.pixels_per_row = (Uint32)ww;
+		destination.rows_per_layer = (Uint32)wh;
 		SDL_DownloadFromGPUTexture(copy_pass, &source, &destination);
 		SDL_EndGPUCopyPass(copy_pass);
 
@@ -2580,19 +2635,30 @@ gpu_pick(int x, int y)
 		SDL_WaitForGPUFences(g_device, true, &fence, 1);
 		SDL_ReleaseGPUFence(g_device, fence);
 
-		const Uint8 *pixel = (const Uint8 *)
+		const Uint8 *pixels = (const Uint8 *)
 		    SDL_MapGPUTransferBuffer(g_device, download, false);
-		if (pixel == nullptr)
+		if (pixels == nullptr)
 			SDL_Log("gpu: pick map failed: %s", SDL_GetError());
 		else {
 			// Byte order matches node_set_color()'s encode
 			// (src/geometry.c: r = id & 0xFF, g = (id>>8) & 0xFF,
 			// b = (id>>16) & 0xFF) and ogl_select_modern()'s
 			// decode (src/ogl.c:456: color[0] + (color[1]<<8) +
-			// (color[2]<<16)) exactly.
-			node_id = (unsigned int)pixel[0] |
-			    ((unsigned int)pixel[1] << 8) |
-			    ((unsigned int)pixel[2] << 16);
+			// (color[2]<<16)) exactly. Each downloaded texel
+			// lands at its window-relative slot in `ids`; the
+			// clamped-off border stays 0 from the memset.
+			for (int gy = 0; gy < wh; gy++)
+				for (int gx = 0; gx < ww; gx++) {
+					const Uint8 *px =
+					    pixels + 4 * (gy * ww + gx);
+					const int ix = (wx0 + gx) - (x - R);
+					const int iy = (wy0 + gy) - (y - R);
+					ids[iy * GPU_PICK_WINDOW + ix] =
+					    (unsigned int)px[0] |
+					    ((unsigned int)px[1] << 8) |
+					    ((unsigned int)px[2] << 16);
+				}
+			node_id = ids[R * GPU_PICK_WINDOW + R];
 			SDL_UnmapGPUTransferBuffer(g_device, download);
 		}
 	}
@@ -2600,6 +2666,20 @@ gpu_pick(int x, int y)
 	SDL_ReleaseGPUTransferBuffer(g_device, download);
 	SDL_ReleaseGPUTexture(g_device, pick_texture);
 	return node_id;
+}
+
+unsigned int
+gpu_pick(int x, int y)
+{
+	unsigned int ids[GPU_PICK_WINDOW * GPU_PICK_WINDOW];
+
+	return pick_impl(x, y, ids);
+}
+
+unsigned int
+gpu_pick_window(int x, int y, unsigned int *ids)
+{
+	return pick_impl(x, y, ids);
 }
 
 // ---- --screenshot ----------------------------------------------------

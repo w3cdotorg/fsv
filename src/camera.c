@@ -283,19 +283,26 @@ treev_camera_theta( double target_theta, GNode *target_node )
 }
 
 
-/* Helper function for camera_scrollbar_moved( ) */
+/* Helper function for camera_scrollbar_moved( ). Exact inverse of
+ * discv_get_scrollbar_state( ) below: the caller has already converted
+ * the raw slider value to the page *center* (camera_scrollbar_moved( )
+ * adds 0.5 * page before dispatching -- the same reason
+ * mapv_scrollbar_move( ) can assign it directly), so x is the target
+ * itself and y needs only the canonical sign reversal the get side
+ * applies. No yaw/pitch coupling: DiscV's camera looks straight down a
+ * fixed axis (see setup_modelview_matrix( )'s FSV_DISCV case), so
+ * unlike MapV there is no camera angle for a scroll position to
+ * imply. test_discv_scroll locks the get/move round-trip. */
 static void
 discv_scrollbar_move( double value, int axis )
 {
 	switch (axis) {
 		case X_AXIS:
-		/* ????? */
 		DISCV_CAMERA(camera)->target.x = value;
 		break;
 
 		case Y_AXIS:
-		/* ????? */
-		DISCV_CAMERA(camera)->target.y = value;
+		DISCV_CAMERA(camera)->target.y = - value;
 		break;
 
 		SWITCH_FAIL
@@ -432,15 +439,70 @@ null_get_scrollbar_state( ScrollState *x, ScrollState *y )
 
 
 /* This produces the exact state the viewport scrollbars should have in
- * DiscV mode, given the current camera state and current node */
+ * DiscV mode, given the current camera state and current node. Was the
+ * upstream `TODO: To be implemented...` stub (it echoed back whatever
+ * scroll_state[] already held); now mirrors mapv_get_scrollbar_state( )'s
+ * structure over DiscV's geometry: the scrollable area is the bounding
+ * square of the current disc -- the current node's parent's disc (the
+ * disc it sits on) outside bird's-eye, the root disc under it -- with
+ * the same field-diameter margins, the same half-page corrective offset,
+ * and the same sign-reversed y. The absolute disc center is the same
+ * ancestor sum geometry_discv_node_pos( ) (src/geometry.c) performs,
+ * inlined here rather than called: that function lives in the frontends'
+ * GL-bound translation unit, and this file is libfsvcore -- calling
+ * across would hand headless camera tests a stub instead of the real
+ * walk (discv_init( ) fills the metanode's geomparams too, so summing
+ * to the top is safe). */
 static void
 discv_get_scrollbar_state( ScrollState *x, ScrollState *y )
 {
+	GNode *dnode, *up_node;
+	XYvec center, c0, c1;
+	double radius, diameter, margin, cofs;
 
-	/* TODO: To be implemented... */
+	if (birdseye_view_active || !NODE_IS_DIR(globals.current_node->parent))
+		dnode = birdseye_view_active ? root_dnode : globals.current_node;
+	else
+		dnode = globals.current_node->parent;
 
-	*x = scroll_state[X_AXIS];
-	*y = scroll_state[Y_AXIS];
+	radius = DISCV_GEOM_PARAMS(dnode)->radius;
+	center.x = 0.0;
+	center.y = 0.0;
+	for (up_node = dnode; up_node != NULL; up_node = up_node->parent) {
+		center.x += DISCV_GEOM_PARAMS(up_node)->pos.x;
+		center.y += DISCV_GEOM_PARAMS(up_node)->pos.y;
+	}
+
+	/* Diameter of camera's field of view (centered at target) */
+	diameter = field_diameter( camera->fov, camera->distance );
+
+	/* Margin width (the disc is round: one margin for both axes) */
+	margin = 0.5 * MIN(diameter, 2.0 * radius);
+
+	/* Corners of scrollable area, stretched to include the target
+	 * (same clamp mapv applies, so an off-disc camera never pins the
+	 * slider outside its own range) */
+	c0.x = MIN(center.x - radius + margin, DISCV_CAMERA(camera)->target.x);
+	c0.y = MIN(center.y - radius + margin, DISCV_CAMERA(camera)->target.y);
+	c1.x = MAX(center.x + radius - margin, DISCV_CAMERA(camera)->target.x);
+	c1.y = MAX(center.y + radius - margin, DISCV_CAMERA(camera)->target.y);
+
+	/* Corrective offset (value indicates the top of the scrollbar
+	 * slider, not its center) */
+	cofs = 0.5 * diameter;
+
+	/* x-scrollbar state */
+	x->lower = c0.x - cofs;
+	x->upper = c1.x + cofs;
+	x->value = DISCV_CAMERA(camera)->target.x - cofs;
+	x->page = diameter;
+
+	/* y-scrollbar state -- signs reversed to correct for canonical
+	 * scrollbar increment direction, exactly as in MapV */
+	y->lower = - c1.y - cofs;
+	y->upper = - c0.y + cofs;
+	y->value = - DISCV_CAMERA(camera)->target.y - cofs;
+	y->page = diameter;
 }
 
 

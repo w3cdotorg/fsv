@@ -22,6 +22,7 @@
 #include "animation.h" /* morph_break_all( ), scheduled_events_clear( ) */
 #include "dirtree.h"
 #include "filelist.h"
+#include "fscache.h" /* scan cache -- fscache_load( )/fscache_save( ) etc. */
 #include "geometry.h" /* geometry_free( ) */
 #include "gui.h" /* gui_update( ) */
 #include "viewport.h" /* viewport_pass_node_table( ) */
@@ -100,6 +101,32 @@ scanfs_add_exclude_pattern( const char *pattern )
 		user_exclude_patterns = g_ptr_array_new( );
 	g_ptr_array_add( user_exclude_patterns, g_strdup( pattern ) );
 }
+
+char *
+scanfs_exclusion_fingerprint( void )
+{
+	GString *fp;
+	int i;
+
+	/* The two off switches collapse to the same fingerprint: with
+	 * exclusion off, no pattern matters. */
+	if (!scanfs_exclusion || g_getenv( "FSV_NO_EXCLUDE" ) != NULL)
+		return g_strdup( "off" );
+
+	fp = g_string_new( "on" );
+	for (i = 0; i < (int)G_N_ELEMENTS(excluded_dir_patterns); i++) {
+		g_string_append_c( fp, '\n' );
+		g_string_append( fp, excluded_dir_patterns[i] );
+	}
+	if (user_exclude_patterns != NULL)
+		for (i = 0; i < (int)user_exclude_patterns->len; i++) {
+			g_string_append_c( fp, '\n' );
+			g_string_append( fp, (const char *)g_ptr_array_index( user_exclude_patterns, i ) );
+		}
+
+	return g_string_free( fp, FALSE );
+}
+
 
 static boolean
 dir_name_excluded( const char *name )
@@ -257,23 +284,139 @@ de_select( const struct dirent *de )
 }
 
 
-static int
-process_dir( const char *dir, GNode *dnode )
+static int process_dir( const char *dir, GNode *dnode, const FscacheDir *cdir );
+
+/* Shared tail for one just-created, already-stat'ed (or cache-filled)
+ * child node: exclusion check, id claim, dirtree entry, recursion into
+ * directories, descriptor move into working memory, progress counts.
+ * `sub_cdir` is the node's own cached subtree when the scan cache covers
+ * it (NULL otherwise); only directories consult it. Returns FALSE when
+ * the node was excluded and destroyed. */
+static boolean
+process_child( GNode *node, const FscacheDir *sub_cdir )
 {
-	union AnyNodeDesc any_node_desc, *andesc;
+	union AnyNodeDesc *andesc;
+
+	if (NODE_IS_DIR(node) && dir_name_excluded( NODE_DESC(node)->name )) {
+		/* Excluded: never traversed, never in the tree -- same
+		 * removal the stat-failure path uses. node_id is NOT
+		 * incremented (mirrors the stat-failure arm, which also
+		 * skips past this node without claiming an id) */
+		g_node_unlink( node );
+		g_node_destroy( node );
+		return FALSE;
+	}
+	++node_id;
+
+	if (NODE_IS_DIR(node)) {
+		/* Create corresponding directory tree entry */
+		dirtree_entry_new( node );
+
+		/* Recurse down */
+		process_dir( node_absname( node ), node, sub_cdir );
+
+		/* Move new descriptor into working memory */
+		andesc = (union AnyNodeDesc *) g_slice_new(DirNodeDesc);
+		memcpy( andesc, DIR_NODE_DESC(node), sizeof(DirNodeDesc) );
+		node->data = andesc;
+	}
+	else {
+		/* Move new descriptor into working memory */
+		andesc = (union AnyNodeDesc *) g_slice_new(NodeDesc);
+		memcpy( andesc, NODE_DESC(node), sizeof(NodeDesc) );
+		node->data = andesc;
+	}
+
+	/* Add to appropriate node/size counts
+	 * (for dynamic progress display) */
+	++node_counts[NODE_DESC(node)->type];
+	size_counts[NODE_DESC(node)->type] += NODE_DESC(node)->size;
+
+	/* Keep the user interface responsive */
+	gui_update( );
+
+	return TRUE;
+}
+
+
+/* Replay one directory's contents from the scan cache instead of
+ * scandir()ing it (fscache.h; the caller established the match). Files
+ * take their stat scalars straight from the cache -- no lstat.
+ * Subdirectories are lstat()ed fresh: their own replay-or-scan decision
+ * one level down needs current mtime/ctime, and it keeps their displayed
+ * metadata true. A cached subdirectory whose fresh lstat fails, or that
+ * is no longer a directory, is dropped -- the same skip the scan path's
+ * stat-failure arm performs. */
+static void
+replay_dir( GNode *dnode, const FscacheDir *cdir )
+{
+	union AnyNodeDesc any_node_desc;
+	GNode *node;
+	int n, i;
+
+	n = fscache_dir_entry_count( cdir );
+	for (i = 0; i < n; i++) {
+		const FscacheEntry *ent = fscache_dir_entry( cdir, i );
+
+		node = g_node_prepend_data( dnode, &any_node_desc );
+		NODE_DESC(node)->id = node_id;
+		NODE_DESC(node)->name = g_string_chunk_insert( name_strchunk, ent->name );
+		NODE_DESC(node)->dname = display_name( NODE_DESC(node)->name );
+
+		if (ent->type == NODE_DIRECTORY) {
+			if (stat_node( node ) || !NODE_IS_DIR(node)) {
+				g_node_unlink( node );
+				g_node_destroy( node );
+				continue;
+			}
+			++stat_count;
+		}
+		else {
+			NODE_DESC(node)->type = ent->type;
+			NODE_DESC(node)->size = ent->size;
+			NODE_DESC(node)->size_alloc = ent->size_alloc;
+			NODE_DESC(node)->user_id = ent->user_id;
+			NODE_DESC(node)->group_id = ent->group_id;
+			NODE_DESC(node)->atime = ent->atime;
+			NODE_DESC(node)->mtime = ent->mtime;
+			NODE_DESC(node)->ctime = ent->ctime;
+		}
+
+		process_child( node, ent->subdir );
+	}
+
+	fscache_count_replayed_dir( );
+}
+
+
+static int
+process_dir( const char *dir, GNode *dnode, const FscacheDir *cdir )
+{
+	union AnyNodeDesc any_node_desc;
 	struct dirent **dir_entries;
 	GNode *node;
 	int num_entries, i;
 	char strbuf[1024];
 
+	/* Update display */
+	snprintf( strbuf, sizeof(strbuf), _("Scanning: %s"), dir );
+	window_statusbar( SB_RIGHT, strbuf );
+
+	/* Scan-cache replay: dnode's fresh lstat (taken by the caller when
+	 * the node was created) matches the cached snapshot, so its
+	 * contents come from the cache -- no scandir(), no per-file lstat.
+	 * See fscache.h for the semantics, including the disclosed
+	 * staleness of in-place file edits. */
+	if (cdir != NULL && fscache_dir_matches( cdir,
+	    NODE_DESC(dnode)->mtime, NODE_DESC(dnode)->ctime )) {
+		replay_dir( dnode, cdir );
+		return 0;
+	}
+
 	/* Scan in directory entries */
 	num_entries = scandir( dir, &dir_entries, de_select, alphasort );
 	if (num_entries < 0)
 		return -1;
-
-	/* Update display */
-	snprintf( strbuf, sizeof(strbuf), _("Scanning: %s"), dir );
-	window_statusbar( SB_RIGHT, strbuf );
 
 	/* Process directory entries */
 	for (i = 0; i < num_entries; i++) {
@@ -294,47 +437,11 @@ process_dir( const char *dir, GNode *dnode )
 		}
 		++stat_count;
 
-		if (NODE_IS_DIR(node) && dir_name_excluded( NODE_DESC(node)->name )) {
-			/* Excluded: never traversed, never in the tree -- same
-			 * removal the stat-failure path above uses. node_id is
-			 * NOT incremented (mirrors the stat-failure arm, which
-			 * also skips past this node without claiming an id) */
-			g_node_unlink( node );
-			g_node_destroy( node );
-			free( dir_entries[i] ); /* !xfree -- same leak as the
-			                         * stat-failure arm above */
-			continue;
-		}
-		++node_id;
-
-		if (NODE_IS_DIR(node)) {
-			/* Create corresponding directory tree entry */
-			dirtree_entry_new( node );
-
-			/* Recurse down */
-			process_dir( node_absname( node ), node );
-
-			/* Move new descriptor into working memory */
-			andesc = (union AnyNodeDesc *) g_slice_new(DirNodeDesc);
-			memcpy( andesc, DIR_NODE_DESC(node), sizeof(DirNodeDesc) );
-			node->data = andesc;
-		}
-		else {
-			/* Move new descriptor into working memory */
-			andesc = (union AnyNodeDesc *) g_slice_new(NodeDesc);
-			memcpy( andesc, NODE_DESC(node), sizeof(NodeDesc) );
-			node->data = andesc;
-		}
-
-		/* Add to appropriate node/size counts
-		 * (for dynamic progress display) */
-		++node_counts[NODE_DESC(node)->type];
-		size_counts[NODE_DESC(node)->type] += NODE_DESC(node)->size;
+		/* An unchanged subtree under a changed directory still
+		 * replays: hand the recursion its cached counterpart. */
+		process_child( node, fscache_dir_child( cdir, NODE_DESC(node)->name ) );
 
 		free( dir_entries[i] ); /* !xfree */
-
-		/* Keep the user interface responsive */
-		gui_update( );
 	}
 
 	free( dir_entries ); /* !xfree */
@@ -511,6 +618,13 @@ scanfs( const char *dir )
 	}
 	root_dir = xgetcwd( );
 
+	/* Scan cache (fscache.h): a usable previous scan of this exact root
+	 * lets unchanged directories replay below instead of re-scanning.
+	 * Every rejection reason -- disabled, Rescan's one-shot skip,
+	 * missing/corrupt file, other root, other exclusion fingerprint --
+	 * degrades to a plain full scan. */
+	fscache_load( root_dir );
+
 	/* Set up fstree metanode */
 	globals.fstree = g_node_new(g_slice_new(DirNodeDesc));
 	NODE_DESC(globals.fstree)->type = NODE_METANODE;
@@ -539,7 +653,7 @@ scanfs( const char *dir )
 	handler_id = g_timeout_add( SCAN_MONITOR_PERIOD, (GSourceFunc)scan_monitor, NULL);
 
 	/* Let the disk thrashing begin */
-	process_dir( root_dir, root_dnode );
+	process_dir( root_dir, root_dnode, fscache_root( ) );
 
 	/* GUI stuff again */
 	g_source_remove( handler_id );
@@ -553,6 +667,11 @@ scanfs( const char *dir )
 
 	/* Pass off new node table to the viewport handler */
 	viewport_pass_node_table(node_table, node_id);
+
+	/* Persist this scan for the next one, then drop the consumed index
+	 * (fscache_prev_scan_time( ) survives the release -- see fscache.h). */
+	fscache_save( root_dnode, root_dir );
+	fscache_release( );
 }
 
 

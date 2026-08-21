@@ -528,21 +528,29 @@ static const FsnSpotlightRing fsn_spotlight_rings[FSN_SPOTLIGHT_RING_COUNT] = {
  * smoothstep between, so the beam dissolves on approach instead of
  * snapping off.
  *
- * CALIBRATION (fix round, 2026-08-19): 0.85-1.15 was the theoretical
- * target -- bracketing the geometric cone wall itself (ratio 1.0),
- * where back-face culling actually kicks in. But Task 2's own
- * verification found the cone stops rendering *at all*, at full
- * alpha, once the camera's ratio drops below roughly 2.0-2.3 -- a
- * separate, pre-existing, undiagnosed rejection confirmed to be
- * neither back-face culling (persists with the depth test forced to
- * always-pass) nor dependent on how the pose is built (see TODO.md's
- * "UX rough edges" ticket for the full probe list). That cutoff sits
- * well outside the 0.85-1.15 band, so the fade never ran before the
- * beam had already snapped off -- the band was inert in real play.
- * Recalibrated here to bracket the *observed* vanish boundary instead
- * of the geometric wall, so today's snap becomes a dissolve. If the
- * ratio-~2 cutoff is ever root-caused and fixed, retune this band back
- * toward 0.85/1.15, the original theoretical target. */
+ * CALIBRATION (fix round, 2026-08-19; root-caused 2026-08-21): 0.85-1.15
+ * was the original theoretical target -- bracketing the geometric cone
+ * wall itself (ratio 1.0), where back-face culling kicks in. The
+ * verification round then found the cone gone *at all alpha* below
+ * ratio ~2.0-2.3, which TODO.md carried as an undiagnosed cutoff. Now
+ * root-caused, twice over, and the band is 2.0-2.6 by *both* accounts:
+ *
+ *  - The original cutoff was SDL_GPU's zero-initialized depth-*clamp*
+ *    mode (fixed: pipeline_for( )'s enable_depth_clip comment,
+ *    src/sdl/gpu.cpp): unclipped foreground boxes GL would discard
+ *    walled off the view and occluded the beam from about that ratio
+ *    inward.
+ *  - With clipping restored, the beam's near wall is instead eaten by
+ *    the near plane itself -- fsv's near clip is half the camera-to-
+ *    target distance (camera.h's NEAR_TO_DISTANCE_RATIO 0.5), so on
+ *    approach the wall legitimately crosses it around ratio ~1.8-2.2
+ *    (pose-dependent) and is clipped away, long before the geometric
+ *    wall at 1.0 is ever reachable on screen.
+ *
+ * So the 0.85-1.15 retune the old note hoped for is geometrically
+ * unreachable under this projection: by ratio 1.15 there is no wall
+ * left to fade. The observed-boundary band stands as the correct
+ * calibration, now by construction rather than by masking. */
 #define FSN_SPOTLIGHT_CONE_FADE_OUTER 2.6 /* ratio at which fade begins */
 #define FSN_SPOTLIGHT_CONE_FADE_INNER 2.0 /* ratio at which alpha hits 0 */
 

@@ -54,6 +54,7 @@ extern "C" {
 #include "color.h"
 #include "dirtree.h"
 #include "geometry.h" /* MapVAreaScale, mapv_set_area_scale() -- MapV area scale startup load, see ui_dialogs_init() */
+#include "fscache.h" /* fscache_prev_scan_time() -- the "Since previous scan" spectrum preset */
 #include "nvstore.h" /* Task C3: open_files_allowed persistence, same API src/sdl/ui_rail.cpp's Marks panel already uses directly */
 #include "scanfs.h" /* scanfs_set_exclusion() -- scan exclusion startup load, see ui_dialogs_init() */
 }
@@ -197,6 +198,28 @@ draw_color_setup_timestamp_tab(void)
 {
 	ImGui::SliderFloat("Oldest (days ago)", &g_cs.old_days_ago, 0.0f, 3650.0f, "%.1f days");
 	ImGui::SliderFloat("Newest (days ago)", &g_cs.new_days_ago, 0.0f, 3650.0f, "%.1f days");
+
+	// The 1999 TODO's "graphical diff": anchor the spectrum's old end at
+	// the previous scan of this root (the scan cache's header timestamp,
+	// fscache.h) so everything touched since the last fsv run reads as
+	// the newest colors. Disabled when there was no usable cache --
+	// first-ever scan, --no-cache, or a Rescan's deliberate skip.
+	{
+		time_t prev = fscache_prev_scan_time();
+		ImGui::BeginDisabled(prev == 0);
+		if (ImGui::Button("Since previous scan") && prev != 0) {
+			double days = difftime(time(nullptr), prev) / 86400.0;
+			// Floor keeps old_time strictly before new_time even for
+			// a seconds-old previous scan (time_color() divides by
+			// the span).
+			g_cs.old_days_ago = (float)MAX(days, 0.001);
+			g_cs.new_days_ago = 0.0f;
+		}
+		ImGui::EndDisabled();
+		if (prev == 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("No previous scan of this root was cached");
+	}
+
 	cs_apply_time_sliders_to_scratch();
 
 	static const char *timestamp_labels[] = {

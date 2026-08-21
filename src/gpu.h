@@ -124,6 +124,20 @@ void gpu_scene_end(void);
  * Returns the node id, or 0 for "nothing there". */
 unsigned int gpu_pick(int x, int y);
 
+/* Windowed variant for the sub-pixel-target promotion (upstream-1999
+ * TODO "smarter pointing/selection for faraway nodes", input.cpp's
+ * node_at_cursor( )): same single id-color render, but reads back the
+ * square window of GPU_PICK_WINDOW x GPU_PICK_WINDOW ids centered on
+ * (x, y) -- clamped at the viewport edges -- into `ids` (row-major,
+ * GPU_PICK_WINDOW * GPU_PICK_WINDOW entries; texels outside the
+ * viewport are 0). Returns the id under (x, y) itself, exactly like
+ * gpu_pick( ), or 0 with the window zero-filled when picking is
+ * impossible. The window is deliberately small: it is a size *census*
+ * around the cursor for the ancestor-promotion policy, not a scene
+ * inventory. */
+#define GPU_PICK_WINDOW 17
+unsigned int gpu_pick_window(int x, int y, unsigned int *ids);
+
 /**** Draw state ****************/
 
 /* Whether draws paint their real colors or flat per-node id colors.

@@ -280,13 +280,53 @@ pixel_scale(SDL_WindowID window_id)
 // exactly like viewport.c's own node_at_location(): this runs on *every*
 // hover motion event even with no button held (see the MOTION_NOTIFY port
 // below), so logging in here would flood stdout on ordinary mouse movement.
+// Minimum on-screen presence (in physical pixels, counted inside
+// gpu_pick_window()'s GPU_PICK_WINDOW-square census around the cursor)
+// for a pick to resolve to a node as-is. Anything smaller promotes to
+// the nearest ancestor whose *subtree* covers at least this much --
+// upstream-1999 TODO "smarter pointing/selection for faraway nodes":
+// a sub-pixel file box under a birds-eye camera should select something
+// a person can plausibly have aimed at, not whichever speck happened to
+// own the hotspot texel. 16 px is a ~4x4 target, comfortably below any
+// deliberate click on a visible node (whose census easily saturates)
+// and comfortably above an accidental speck hit.
+#define PICK_MIN_PIXELS 16
+
 static GNode *
 node_at_cursor(int x, int y)
 {
-	unsigned int id = gpu_pick(x, y);
+	unsigned int ids[GPU_PICK_WINDOW * GPU_PICK_WINDOW];
+	unsigned int id = gpu_pick_window(x, y, ids);
 	if (id == 0)
 		return NULL;
-	return viewport_node_for_id(id);
+	GNode *node = viewport_node_for_id(id);
+	if (node == NULL)
+		return NULL;
+
+	// Ancestor promotion. Walk up until the candidate's subtree --
+	// itself or any descendant -- covers PICK_MIN_PIXELS of the census
+	// window. The census is capped at the window's area, far above the
+	// threshold, so a legibly-sized node never promotes; the walk stops
+	// below the metanode, so a genuinely sparse window resolves to the
+	// scan root rather than nothing.
+	for (;;) {
+		int coverage = 0;
+		for (int i = 0; i < GPU_PICK_WINDOW * GPU_PICK_WINDOW; i++) {
+			if (ids[i] == 0)
+				continue;
+			GNode *pn = viewport_node_for_id(ids[i]);
+			if (pn != NULL &&
+			    (pn == node || g_node_is_ancestor(node, pn)))
+				++coverage;
+		}
+		if (coverage >= PICK_MIN_PIXELS)
+			break;
+		if (node->parent == NULL || NODE_IS_METANODE(node->parent))
+			break;
+		node = node->parent;
+	}
+
+	return node;
 }
 
 // Port of the highlight/status-bar block that appears twice in
@@ -1124,3 +1164,4 @@ input_take_open_file_request(void)
 	g_open_file_request.pending = false;
 	return req;
 }
+

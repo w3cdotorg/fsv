@@ -79,12 +79,48 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   dylib, failing the job on any `/opt/homebrew` match — so the tagged
   release's `fsv.app` is self-contained as a CI-enforced fact, not a
   hoped-for one. (PORTING.md, Task 6.2/6.3 notes; `.github/workflows/ci.yml`)
-- [ ] **Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
+- [x] ~~**Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
   (`GL/glu.h` not found). Pre-existing; reserved for a future OpenGL-removal
-  task. (PORTING.md, Task 1.1 notes)
-- [ ] **`discv_get_scrollbar_state()` is a `/* TODO */` stub** that just
+  task. (PORTING.md, Task 1.1 notes)~~ **Fixed (2026-08-21)** — and it
+  took a one-line removal, not an OpenGL-removal task: the
+  `#include <GL/glu.h>` (annotated `gluPickMatrix( )`) was a leftover;
+  no `glu*` function is called anywhere in `src/ogl.c` (the modern
+  select path is `ogl_select_modern()`'s color-ID readback). With the
+  include gone and `src/meson.build`'s darwin gate lifted, the GTK
+  frontend configures, compiles, links (Homebrew gtk+3 + gdk-pixbuf +
+  epoxy) and launches on macOS: verified by a real windowed run — the
+  GL realize path executes (the 3D-label glyph atlas, rasterized from
+  inside `ogl.c`'s GL init right after the `glPolygonOffset`/
+  `glClearColor` calls, logs its 512x352 atlas) and the app runs until
+  killed. Pixel-level rendering parity is unverified (no compositor
+  capture in this environment); the SDL/Metal frontend remains the
+  primary macOS arm, GTK the legacy fallback. CI does not build the
+  GTK arm on macOS (would need brew gtk+3 on the runner; not added).
+- [ ] **`fsv ROOTDIR` aborts the GTK frontend with a GLib-GIO CRITICAL**
+  ("This application can not open files", exit 1) — found while
+  verifying the macOS GTK build (2026-08-21), but platform-independent:
+  `src/fsv.c` passes the full argv to `g_application_run()` after doing
+  its own option parsing, and the `GApplication` was not created with
+  `G_APPLICATION_HANDLES_OPEN`, so any positional argument trips GIO's
+  open-files path. Running with no argument (cwd scan) works. The SDL
+  frontend has its own argv handling and is unaffected. Fix directions:
+  strip already-consumed argv entries before `g_application_run()`, or
+  add `G_APPLICATION_HANDLES_OPEN` + an `open` handler.
+- [x] ~~**`discv_get_scrollbar_state()` is a `/* TODO */` stub** that just
   echoes back whatever `scroll_state[]` already held. (PORTING.md, camera
-  scrollbar notes)
+  scrollbar notes)~~ **Implemented (2026-08-21)**: mirrors
+  `mapv_get_scrollbar_state()`'s structure over DiscV's geometry — the
+  scrollable area is the current disc's bounding square (the current
+  node's parent's disc outside bird's-eye), with the same field-diameter
+  margins, half-page corrective offset, and sign-reversed y; the absolute
+  disc center is `geometry_discv_node_pos()`'s ancestor sum inlined
+  (that function is frontend code, camera.c is libfsvcore).
+  `discv_scrollbar_move()`'s two `/* ????? */` arms became the exact
+  inverse (raw x, negated y — `camera_scrollbar_moved()` already
+  converts the slider value to the page center before dispatching). The
+  SDL rail's Tilt/Height sliders are now enabled in DiscV. Regression-
+  locked by meson test `discv_scroll` (range reported, value tracks the
+  target both ways, get/move round-trip).
 
 ## UX rough edges (accepted as YAGNI, documented)
 
@@ -125,32 +161,44 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   nominal band, roughly ratio 2.4-2.6, with the band's lower reaches
   masked by that separate bug rather than doing any fading of their own.
   Bounded by, and closes with, the open cutoff ticket below.
-- [ ] **Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
-  full alpha, cause undiagnosed (Task 2 fix-round finding):** independent
-  of the fade-on-entry band above (`FSN_SPOTLIGHT_CONE_FADE_INNER`/`_OUTER`,
-  fsn-style.h) -- the cone's geometry drops out of the rendered frame
-  entirely once the camera's ratio (ground distance from the cone's axis /
-  cone radius at the camera's height) falls below roughly 2.0-2.3, well
-  outside the geometric cone wall (ratio 1.0) the fade band was originally
-  calibrated to bracket. Confirmed **not** back-face culling: forcing the
-  spotlight's depth test from `FSV_DEPTH_LESS_NOWRITE` to
-  `FSV_DEPTH_ALWAYS_NOWRITE` made the geometry flash fully white at ratios
-  where it was otherwise invisible, proving the triangles reach the
-  rasterizer and are only failing the depth *comparison*. Confirmed
-  independent of how the pose is built (reproduced with
-  `camera_look_at()`-style, `camera_warp_to()`-style, and a from-scratch
-  pose with the look-at target decoupled from the eye-to-axis distance)
-  and reproducible across two very differently scaled pedestals
-  (radius-294 and radius-110), a strong signal it's ratio-driven rather
-  than distance- or scale-driven. Root cause undiagnosed -- a leading
-  theory involving near/far clip interaction with the cone's own tall,
-  close-up geometry did not reproduce or disappear under direct
-  manipulation of the clip planes, which weakens but doesn't rule it out.
-  The fade band was recalibrated (2.0-2.6) to bracket this *observed*
-  boundary instead of the geometric wall, so the user-facing symptom is a
-  dissolve rather than a snap, but that masks rather than fixes the
-  underlying invisibility -- once root-caused, retune the band back
-  toward 0.85-1.15, the original theoretical target.
+  **Update (2026-08-21):** that cutoff is root-caused and fixed (see the
+  closed ticket below); the full 2.0-2.6 band now does real fading, and
+  it remains the correct calibration — below ~2.0 the near plane
+  legitimately clips the wall away, so there is nothing left to fade.
+- [x] ~~**Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
+  full alpha, cause undiagnosed (Task 2 fix-round finding).**~~
+  **Root-caused and fixed (2026-08-21)**: SDL_GPU's zero-initialized
+  `SDL_GPURasterizerState.enable_depth_clip = false` means depth *clamp*
+  (Metal's `MTLDepthClipModeClamp`), the opposite of GL's always-on
+  near/far clipping -- every scene pipeline shipped that way. So
+  geometry between the eye and the near plane, which GL discards, stayed
+  fully rasterized: on any close approach the selected pedestal's own
+  file boxes -- which fsv's unusually distant near plane
+  (`NEAR_TO_DISTANCE_RATIO` 0.5: *half* the camera-to-target distance)
+  starts overlapping right around ratio ~2.2 -- walled off the frame and
+  simply occluded the beam. Every confusing probe result follows: the
+  depth *comparison* failures were legitimate losses to that unclipped
+  foreground; scale-invariance because everything (near, wall distance,
+  box footprint) scales with the pose; and clip-plane manipulation
+  changed nothing because in clamp mode the clip planes clip nothing.
+  Fixed by setting `enable_depth_clip = true` on the scene and text
+  pipelines (`pipeline_for()`/`text_pipeline_for()`, src/sdl/gpu.cpp).
+  One dependent repair: the landscape's ground quad silently relied on
+  clamp mode to survive the far plane (a fixed 100000-unit quad
+  far-clips into a visible "tent" horizon once clipping is real) -- it
+  is now sized per frame to `GROUND_EXTENT_FAR_FRAC` x `far_clip` and
+  centered under the eye, keeping its edges inside the far plane at a
+  sub-degree horizon depression (invisible; verified across
+  FSN/MapV/TreeV/DiscV establishing shots and close FSN poses). The
+  ticket's hoped-for fade retune toward 0.85-1.15 turned out to be
+  geometrically unreachable: with near at half the camera distance, the
+  cone's near wall is legitimately near-clipped away around ratio
+  ~1.8-2.2 (pose-dependent), so the shipped 2.0-2.6 band brackets the
+  *correct* boundary -- now by construction, not by masking. See the
+  rewritten CALIBRATION note in src/fsn-style.h. Side effect worth
+  knowing: extreme close-up framings across all modes now near-clip
+  foreground geometry exactly like the GL arm always did, instead of
+  filling the frame with boxes GL would have discarded.
 - [x] ~~**Overview mini-map (Task C1): framing ignores the camera.**~~
   **Closed**: the framed rect now grows toward the camera, per axis, up to
   `FSN_OVERVIEW_MAX_GROWTH` (3.0x the landscape's larger dimension) —
@@ -211,16 +259,50 @@ has native Help → Controls / About windows). Still worth doing:
   in `ui_dialogs_init()`). Together they fix both original complaints —
   no more paper-thin frontmost rows, no more one node dwarfing the rest.
   Design: `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
-- [ ] **Smarter pointing/selection for faraway nodes** (e.g. birds-eye
+- [x] ~~**Smarter pointing/selection for faraway nodes** (e.g. birds-eye
   view): picking returns exactly the node under the hotspot even when it's
   sub-pixel small; should walk up to an ancestor above a pixel-based
   minimum. Still true of the port's color-ID `gpu_pick()` — the Task C4
   harness's stray-click-on-a-tiny-file-box episode is this exact failure
-  mode in miniature.
-- [ ] **Scan caching** (`~/.fsvcache/@usr@lib`-style): store the tree state,
+  mode in miniature.~~ **Implemented (2026-08-21)**: `gpu_pick_window()`
+  (gpu.h) reads back the 17x17 id neighborhood around the cursor from the
+  same single id-color render, and `node_at_cursor()` (src/sdl/input.cpp)
+  promotes the hit to the nearest ancestor whose *subtree* covers at
+  least `PICK_MIN_PIXELS` (16 px, a ~4x4 target) of that census — so a
+  birds-eye speck resolves to its enclosing pedestal (or, over a sparse
+  region, the scan root) instead of whichever sub-pixel file box owned
+  the hotspot texel, while any legibly-sized node saturates the census
+  and resolves unchanged. Mode-agnostic (the pick buffer is), applies to
+  hover/click/double-click alike (all flow through `node_at_cursor()`).
+  Verified empirically with a posed birds-eye dolly-out harness: 4-px
+  specks promote to their pedestal, a 64-px file box stays itself. SDL
+  frontend only (the GTK arm keeps `ogl_select_modern()`'s exact-texel
+  behavior, consistent with the other SDL-only additions). Not headless-
+  testable (GPU readback) — same standing limitation the test-harness
+  section already records for picking.
+- [x] ~~**Scan caching** (`~/.fsvcache/@usr@lib`-style): store the tree state,
   re-scan only subdirectories with updated timestamps on the next launch;
   would also let ColorByTimestamp use the previous scan as the spectrum
-  start ("graphical diff" of the filesystem).
+  start ("graphical diff" of the filesystem).~~ **Implemented
+  (2026-08-21)**: new `src/fscache.c` libfsvcore module — after every
+  scan the tree's stat scalars are serialized (versioned binary, atomic
+  write, exclusion state fingerprinted) to `g_get_user_cache_dir()/fsv/`
+  with the ticket's own `@usr@lib` name encoding; the next scan of the
+  same root replays every directory whose fresh lstat mtime+ctime match
+  the snapshot — no `scandir()`, no per-file `lstat()` (subdirectories
+  are still lstat'ed fresh: a directory's mtime says nothing about its
+  descendants). `/opt/homebrew`, 406k nodes: 9.3s cold → 0.6s cached
+  (15x). The ticket's designed-in trade-off is kept and disclosed: an
+  in-place file edit inside an unchanged directory stays stale until
+  that directory changes or File → Rescan (which always bypasses the
+  cache read side; Change Root and startup use it). Off switches:
+  `--no-cache` (SDL frontend only, like `--exclude`) and `FSV_NO_CACHE`
+  (both frontends). The "graphical diff" half shipped too: the Color
+  Setup "By date/time" tab's "Since previous scan" preset anchors the
+  spectrum at the previous scan's timestamp. Regression-locked by meson
+  test `fscache` (roundtrip, replay, change propagation, the staleness
+  contract in both directions, fingerprint/corrupt/disabled rejections).
+  Design: `docs/superpowers/specs/2026-08-21-scan-cache-design.md`.
 - [x] ~~**A way to exclude directories from the scan**~~ **Fixed**:
   `scanfs.c` now carries a built-in, deliberately conservative
   exclusion list (**exact basename match only**, directories only —
@@ -242,17 +324,34 @@ has native Help → Controls / About windows). Still worth doing:
 
 ## Test-harness limitations (not product code)
 
+Triaged 2026-08-21 (the "dormant debts" pass): these three are
+disclosure notes, not fixable bugs — statuses below.
+
 - [ ] The Color Setup **Gradient spectrum was never driven through the
   "By date/time" tab's `Combo` dropdown in the automated harness** (an open
   `ImGui::Combo()` popup eats the next click as dismiss); verified end-to-end
   only with the tab's default Rainbow spectrum. Would need keyboard nav or a
   `BeginCombo`/`Selectable` rewrite to automate. (Task 5.3 gaps)
+  *2026-08-21: left as-is deliberately — the `BeginCombo`/`Selectable`
+  rewrite is ~20 lines but has no consumer today (no automated test
+  wants to drive that dropdown); do it together with whichever future
+  harness first needs it, so the benefit is testable when it lands.*
 - [ ] **ImGui overlay pixels aren't screenshot-verifiable in the sandbox**
   (no compositor capture); dialogs are verified via internal-state tracing
   plus the offscreen scene screenshot only.
+  *2026-08-21: inherent to the environment (the offscreen scene target
+  renders before the ImGui pass by design — see gpu.cpp's two-pass
+  frame comment); not fixable from this codebase. Stays as permanent
+  disclosure.*
 - [ ] **Task C4's MapV regression check is verified by code diff**, not a
   clean empirical click-through (synthetic-harness picking limitation at the
   one fixed pixel used in that mode's layout).
+  *2026-08-21: the underlying failure mode (a fixed-pixel synthetic
+  click landing on a tiny unintended node) is now structurally mitigated
+  by the sub-pixel pick promotion (`gpu_pick_window()` +
+  `node_at_cursor()`'s ancestor walk); the C4 check itself has not been
+  re-run empirically — re-running that retired harness for an
+  already-shipped verification wouldn't strengthen anything current.*
 - [x] ~~**`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks live in
   that test's own `main()`**, not in `tools/fsv-headless-stubs.c`.~~
   Promoted into the shim as opt-in `fsv_headless_platform_init()` when the

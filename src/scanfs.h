@@ -29,5 +29,11 @@ boolean scanfs_get_exclusion( void );
  * ownership of pattern. */
 void scanfs_add_exclude_pattern( const char *pattern );
 
+/* The active exclusion state as one string -- toggle, FSV_NO_EXCLUDE,
+ * built-in and user patterns -- for the scan cache's header (fscache.c):
+ * a cache written under one exclusion regime must not replay under
+ * another. Caller frees. */
+char *scanfs_exclusion_fingerprint( void );
+
 
 /* end scanfs.h */

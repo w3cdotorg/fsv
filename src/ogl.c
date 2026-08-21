@@ -17,7 +17,12 @@
 
 #include <gtk/gtk.h>
 #include <gtk/gtkglarea.h>
-#include <GL/glu.h> /* gluPickMatrix( ) */
+/* No GLU: the old `#include <GL/glu.h>` (annotated "gluPickMatrix( )")
+ * was a leftover -- no glu* function is called anywhere in this file
+ * (the modern select path is ogl_select_modern( )'s color-ID readback,
+ * no pick matrix involved), and GLU headers don't exist on macOS under
+ * that path, which is what kept this whole frontend from building
+ * there (TODO.md's "Legacy GTK/OpenGL build fails on macOS"). */
 
 #include "animation.h" /* redraw( ) */
 #include "camera.h"
