@@ -125,32 +125,44 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   nominal band, roughly ratio 2.4-2.6, with the band's lower reaches
   masked by that separate bug rather than doing any fading of their own.
   Bounded by, and closes with, the open cutoff ticket below.
-- [ ] **Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
-  full alpha, cause undiagnosed (Task 2 fix-round finding):** independent
-  of the fade-on-entry band above (`FSN_SPOTLIGHT_CONE_FADE_INNER`/`_OUTER`,
-  fsn-style.h) -- the cone's geometry drops out of the rendered frame
-  entirely once the camera's ratio (ground distance from the cone's axis /
-  cone radius at the camera's height) falls below roughly 2.0-2.3, well
-  outside the geometric cone wall (ratio 1.0) the fade band was originally
-  calibrated to bracket. Confirmed **not** back-face culling: forcing the
-  spotlight's depth test from `FSV_DEPTH_LESS_NOWRITE` to
-  `FSV_DEPTH_ALWAYS_NOWRITE` made the geometry flash fully white at ratios
-  where it was otherwise invisible, proving the triangles reach the
-  rasterizer and are only failing the depth *comparison*. Confirmed
-  independent of how the pose is built (reproduced with
-  `camera_look_at()`-style, `camera_warp_to()`-style, and a from-scratch
-  pose with the look-at target decoupled from the eye-to-axis distance)
-  and reproducible across two very differently scaled pedestals
-  (radius-294 and radius-110), a strong signal it's ratio-driven rather
-  than distance- or scale-driven. Root cause undiagnosed -- a leading
-  theory involving near/far clip interaction with the cone's own tall,
-  close-up geometry did not reproduce or disappear under direct
-  manipulation of the clip planes, which weakens but doesn't rule it out.
-  The fade band was recalibrated (2.0-2.6) to bracket this *observed*
-  boundary instead of the geometric wall, so the user-facing symptom is a
-  dissolve rather than a snap, but that masks rather than fixes the
-  underlying invisibility -- once root-caused, retune the band back
-  toward 0.85-1.15, the original theoretical target.
+  **Update (2026-08-21):** that cutoff is root-caused and fixed (see the
+  closed ticket below); the full 2.0-2.6 band now does real fading, and
+  it remains the correct calibration — below ~2.0 the near plane
+  legitimately clips the wall away, so there is nothing left to fade.
+- [x] ~~**Spotlight cone stops rendering entirely below ratio ~2.0-2.3, at
+  full alpha, cause undiagnosed (Task 2 fix-round finding).**~~
+  **Root-caused and fixed (2026-08-21)**: SDL_GPU's zero-initialized
+  `SDL_GPURasterizerState.enable_depth_clip = false` means depth *clamp*
+  (Metal's `MTLDepthClipModeClamp`), the opposite of GL's always-on
+  near/far clipping -- every scene pipeline shipped that way. So
+  geometry between the eye and the near plane, which GL discards, stayed
+  fully rasterized: on any close approach the selected pedestal's own
+  file boxes -- which fsv's unusually distant near plane
+  (`NEAR_TO_DISTANCE_RATIO` 0.5: *half* the camera-to-target distance)
+  starts overlapping right around ratio ~2.2 -- walled off the frame and
+  simply occluded the beam. Every confusing probe result follows: the
+  depth *comparison* failures were legitimate losses to that unclipped
+  foreground; scale-invariance because everything (near, wall distance,
+  box footprint) scales with the pose; and clip-plane manipulation
+  changed nothing because in clamp mode the clip planes clip nothing.
+  Fixed by setting `enable_depth_clip = true` on the scene and text
+  pipelines (`pipeline_for()`/`text_pipeline_for()`, src/sdl/gpu.cpp).
+  One dependent repair: the landscape's ground quad silently relied on
+  clamp mode to survive the far plane (a fixed 100000-unit quad
+  far-clips into a visible "tent" horizon once clipping is real) -- it
+  is now sized per frame to `GROUND_EXTENT_FAR_FRAC` x `far_clip` and
+  centered under the eye, keeping its edges inside the far plane at a
+  sub-degree horizon depression (invisible; verified across
+  FSN/MapV/TreeV/DiscV establishing shots and close FSN poses). The
+  ticket's hoped-for fade retune toward 0.85-1.15 turned out to be
+  geometrically unreachable: with near at half the camera distance, the
+  cone's near wall is legitimately near-clipped away around ratio
+  ~1.8-2.2 (pose-dependent), so the shipped 2.0-2.6 band brackets the
+  *correct* boundary -- now by construction, not by masking. See the
+  rewritten CALIBRATION note in src/fsn-style.h. Side effect worth
+  knowing: extreme close-up framings across all modes now near-clip
+  foreground geometry exactly like the GL arm always did, instead of
+  filling the frame with boxes GL would have discarded.
 - [x] ~~**Overview mini-map (Task C1): framing ignores the camera.**~~
   **Closed**: the framed rect now grows toward the camera, per axis, up to
   `FSN_OVERVIEW_MAX_GROWTH` (3.0x the landscape's larger dimension) —

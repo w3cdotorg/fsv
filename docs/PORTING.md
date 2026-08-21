@@ -5072,7 +5072,21 @@ Verified:
   is wider than what actually reads as a dissolve on screen: the visible
   fade is effectively only its upper reach, roughly ratio 2.4-2.6, with
   the rest of the nominal band masked by that separate, still-open bug
-  rather than doing any fading of its own.
+  rather than doing any fading of its own. **Update (2026-08-21): that
+  cutoff is root-caused and fixed** — SDL_GPU's zero-initialized
+  `enable_depth_clip = false` put every scene pipeline in depth-*clamp*
+  mode (the opposite of GL's always-on near/far clipping), so foreground
+  geometry GL would near-clip away stayed rasterized and occluded the
+  beam on close approach; `pipeline_for()`/`text_pipeline_for()` now set
+  `enable_depth_clip = true`, and the landscape's ground quad (which
+  silently relied on clamp mode to survive the far plane) is sized per
+  frame to the frustum instead of a fixed 100000-unit extent. The
+  2.0-2.6 band survives as the correct calibration — with GL clipping
+  restored, the near plane (half the camera-to-target distance,
+  `NEAR_TO_DISTANCE_RATIO`) legitimately clips the cone's wall away
+  around ratio ~1.8-2.2, so a 0.85-1.15 band would have nothing left to
+  fade. Full story in `TODO.md`'s closed cutoff ticket and
+  `src/fsn-style.h`'s CALIBRATION note.
 - **"Night" landscape is now calibrated** (Task A1's disclosed gap, closed
   post-v0.3; the sky colors were determined by screenshot iteration against
   established constraints, validated at default and tilted framings; ground
