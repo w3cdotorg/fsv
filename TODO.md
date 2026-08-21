@@ -82,9 +82,21 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
 - [ ] **Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
   (`GL/glu.h` not found). Pre-existing; reserved for a future OpenGL-removal
   task. (PORTING.md, Task 1.1 notes)
-- [ ] **`discv_get_scrollbar_state()` is a `/* TODO */` stub** that just
+- [x] ~~**`discv_get_scrollbar_state()` is a `/* TODO */` stub** that just
   echoes back whatever `scroll_state[]` already held. (PORTING.md, camera
-  scrollbar notes)
+  scrollbar notes)~~ **Implemented (2026-08-21)**: mirrors
+  `mapv_get_scrollbar_state()`'s structure over DiscV's geometry — the
+  scrollable area is the current disc's bounding square (the current
+  node's parent's disc outside bird's-eye), with the same field-diameter
+  margins, half-page corrective offset, and sign-reversed y; the absolute
+  disc center is `geometry_discv_node_pos()`'s ancestor sum inlined
+  (that function is frontend code, camera.c is libfsvcore).
+  `discv_scrollbar_move()`'s two `/* ????? */` arms became the exact
+  inverse (raw x, negated y — `camera_scrollbar_moved()` already
+  converts the slider value to the page center before dispatching). The
+  SDL rail's Tilt/Height sliders are now enabled in DiscV. Regression-
+  locked by meson test `discv_scroll` (range reported, value tracks the
+  target both ways, get/move round-trip).
 
 ## UX rough edges (accepted as YAGNI, documented)
 

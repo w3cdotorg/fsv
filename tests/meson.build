@@ -103,6 +103,19 @@ test_camera_theta = executable('test_camera_theta',
   c_args: fixture_c_args)
 test('camera_theta', test_camera_theta, env: ['FSV_NO_CACHE=1'])
 
+# DiscV viewport scrolling (src/camera.c): discv_get_scrollbar_state()
+# was upstream's "TODO: To be implemented..." stub; now it reports the
+# current disc's real range, and discv_scrollbar_move() consumes it as
+# an exact inverse. Hand-fills DiscVGeomParams (geometry.c's discv_init()
+# is frontend code) and captures fsv_platform.set_scroll.
+test_discv_scroll = executable('test_discv_scroll',
+  ['test_discv_scroll.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir,
+  c_args: fixture_c_args)
+test('discv_scroll', test_discv_scroll, env: ['FSV_NO_CACHE=1'])
+
 # Scan cache (src/fscache.c; upstream-1999 TODO "scan caching"): save/
 # load/reject surface plus scanfs()'s replay integration and the
 # in-place-edit staleness contract. Builds its own mkdtemp tree and

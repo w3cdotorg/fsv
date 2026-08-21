@@ -106,10 +106,9 @@ draw_scroll_slider(int axis, const char *label, bool enabled)
 	// set_scroll()): `value` ranges over [lower, upper-page], not
 	// [lower, upper] — the latter would let the slider claim positions
 	// where the page's far edge runs past `upper`. When the current mode
-	// has no real scrollable range (DiscV's discv_get_scrollbar_state()
-	// is a TODO stub; an unexpanded TreeV root falls back to
-	// null_get_scrollbar_state()), lower == upper-page and the slider is
-	// simply pinned — harmless, and `enabled` already greys it out in
+	// has no real scrollable range (an unexpanded TreeV root falls back
+	// to null_get_scrollbar_state()), lower == upper-page and the slider
+	// is simply pinned — harmless, and `enabled` already greys it out in
 	// those cases via the caller's mode check.
 	float v = (float)value;
 	const float v_min = (float)lower;
@@ -124,7 +123,7 @@ draw_scroll_slider(int axis, const char *label, bool enabled)
 		app_scrollbar_dragged(axis, (double)v);
 	ImGui::EndDisabled();
 	if (!enabled && ImGui::IsItemHovered())
-		ImGui::SetTooltip("Only available in MapV/TreeV");
+		ImGui::SetTooltip("Only available in DiscV/MapV/TreeV");
 	ImGui::EndGroup();
 	ImGui::PopID();
 }
@@ -471,22 +470,23 @@ ui_rail_draw(void)
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	// Sliders only mean anything in the two modes whose camera actually
+	// Sliders only mean anything in the modes whose camera actually
 	// consumes scrollbar-driven input: mapv_scrollbar_move()/
-	// treev_scrollbar_move() in camera.c. DiscV's discv_scrollbar_move()
-	// is explicitly marked "?????" (dead-reckoning at best) and its
-	// discv_get_scrollbar_state() is a TODO stub that just echoes back
-	// whatever scroll_state[] already held, so it never has a real range
-	// to display in the first place.
+	// treev_scrollbar_move()/discv_scrollbar_move() in camera.c. DiscV
+	// joined the list when its upstream "TODO: To be implemented" pair
+	// (discv_get_scrollbar_state() echoing stale scroll_state[]) was
+	// implemented for real -- meson test discv_scroll locks its
+	// get/move round-trip. FSN stays out: it has no scroll model at all
+	// (camera.c's FSV_FSN arm deliberately reports the null state).
 	const bool sliders_ok = access_ok &&
-	    (mode == FSV_MAPV || mode == FSV_TREEV);
+	    (mode == FSV_MAPV || mode == FSV_TREEV || mode == FSV_DISCV);
 
 	draw_scroll_slider(0, "Tilt", sliders_ok);
 	ImGui::SameLine();
 	draw_scroll_slider(1, "Height", sliders_ok);
 
 	if (access_ok && !sliders_ok)
-		ImGui::TextDisabled("MapV/TreeV only");
+		ImGui::TextDisabled("DiscV/MapV/TreeV only");
 
 	draw_marks_section(access_ok, btn_w);
 
