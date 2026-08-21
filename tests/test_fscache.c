@@ -165,8 +165,12 @@ main(void)
 	assert(dnode != NULL);
 	{
 		/* scanfs() chdir()'d into root; the cache file is named after
-		 * the resolved absolute root. */
-		char *resolved = xgetcwd();
+		 * the resolved absolute root. Copied: xgetcwd() hands back its
+		 * own static buffer, which every later scanfs() call inside
+		 * this test reallocs -- holding the raw pointer here was a
+		 * use-after-free that made this test flaky (main.cpp's
+		 * xstrdup(xgetcwd()) exists for the same reason). */
+		char *resolved = xstrdup(xgetcwd());
 		GDir *gd = g_dir_open(cachedir, 0, NULL);
 		const char *fname;
 		int cache_files = 0;

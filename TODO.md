@@ -229,10 +229,29 @@ has native Help → Controls / About windows). Still worth doing:
   minimum. Still true of the port's color-ID `gpu_pick()` — the Task C4
   harness's stray-click-on-a-tiny-file-box episode is this exact failure
   mode in miniature.
-- [ ] **Scan caching** (`~/.fsvcache/@usr@lib`-style): store the tree state,
+- [x] ~~**Scan caching** (`~/.fsvcache/@usr@lib`-style): store the tree state,
   re-scan only subdirectories with updated timestamps on the next launch;
   would also let ColorByTimestamp use the previous scan as the spectrum
-  start ("graphical diff" of the filesystem).
+  start ("graphical diff" of the filesystem).~~ **Implemented
+  (2026-08-21)**: new `src/fscache.c` libfsvcore module — after every
+  scan the tree's stat scalars are serialized (versioned binary, atomic
+  write, exclusion state fingerprinted) to `g_get_user_cache_dir()/fsv/`
+  with the ticket's own `@usr@lib` name encoding; the next scan of the
+  same root replays every directory whose fresh lstat mtime+ctime match
+  the snapshot — no `scandir()`, no per-file `lstat()` (subdirectories
+  are still lstat'ed fresh: a directory's mtime says nothing about its
+  descendants). `/opt/homebrew`, 406k nodes: 9.3s cold → 0.6s cached
+  (15x). The ticket's designed-in trade-off is kept and disclosed: an
+  in-place file edit inside an unchanged directory stays stale until
+  that directory changes or File → Rescan (which always bypasses the
+  cache read side; Change Root and startup use it). Off switches:
+  `--no-cache` (SDL frontend only, like `--exclude`) and `FSV_NO_CACHE`
+  (both frontends). The "graphical diff" half shipped too: the Color
+  Setup "By date/time" tab's "Since previous scan" preset anchors the
+  spectrum at the previous scan's timestamp. Regression-locked by meson
+  test `fscache` (roundtrip, replay, change propagation, the staleness
+  contract in both directions, fingerprint/corrupt/disabled rejections).
+  Design: `docs/superpowers/specs/2026-08-21-scan-cache-design.md`.
 - [x] ~~**A way to exclude directories from the scan**~~ **Fixed**:
   `scanfs.c` now carries a built-in, deliberately conservative
   exclusion list (**exact basename match only**, directories only —
