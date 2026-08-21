@@ -59,10 +59,13 @@ libfsvcore = static_library('fsvcore', fsvcore_src,
 
 # GTK frontend. Only built for frontend == 'gtk', only when GTK was
 # actually found (never hard-required at configure time — see
-# meson.build), and (for now) only on non-macOS hosts: ogl.c's GL/glu.h
-# dependency doesn't build on macOS (pre-existing, out of scope for the
-# Metal port). See docs/PORTING.md.
-if frontend == 'gtk' and gtkdep_found and host_machine.system() != 'darwin'
+# meson.build). The old additional non-macOS gate is gone: it existed
+# for ogl.c's `#include <GL/glu.h>`, which turned out to be a leftover
+# (no glu* call anywhere) and was removed — the frontend now configures
+# and compiles on macOS with Homebrew's gtk+3/gdk-pixbuf/epoxy. Note
+# macOS's OpenGL is deprecated-but-present; this arm stays the legacy
+# fallback, the SDL/Metal frontend is the primary one there.
+if frontend == 'gtk' and gtkdep_found
   gnome = import('gnome')
 
   gr = gnome.compile_resources('gr', 'fsv-gresource.xml')

@@ -79,9 +79,33 @@ actionable tickets. The historical upstream wishlist lives in [`TODO`](TODO).
   dylib, failing the job on any `/opt/homebrew` match — so the tagged
   release's `fsv.app` is self-contained as a CI-enforced fact, not a
   hoped-for one. (PORTING.md, Task 6.2/6.3 notes; `.github/workflows/ci.yml`)
-- [ ] **Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
+- [x] ~~**Legacy GTK/OpenGL build fails on macOS** at `src/ogl.c`
   (`GL/glu.h` not found). Pre-existing; reserved for a future OpenGL-removal
-  task. (PORTING.md, Task 1.1 notes)
+  task. (PORTING.md, Task 1.1 notes)~~ **Fixed (2026-08-21)** — and it
+  took a one-line removal, not an OpenGL-removal task: the
+  `#include <GL/glu.h>` (annotated `gluPickMatrix( )`) was a leftover;
+  no `glu*` function is called anywhere in `src/ogl.c` (the modern
+  select path is `ogl_select_modern()`'s color-ID readback). With the
+  include gone and `src/meson.build`'s darwin gate lifted, the GTK
+  frontend configures, compiles, links (Homebrew gtk+3 + gdk-pixbuf +
+  epoxy) and launches on macOS: verified by a real windowed run — the
+  GL realize path executes (the 3D-label glyph atlas, rasterized from
+  inside `ogl.c`'s GL init right after the `glPolygonOffset`/
+  `glClearColor` calls, logs its 512x352 atlas) and the app runs until
+  killed. Pixel-level rendering parity is unverified (no compositor
+  capture in this environment); the SDL/Metal frontend remains the
+  primary macOS arm, GTK the legacy fallback. CI does not build the
+  GTK arm on macOS (would need brew gtk+3 on the runner; not added).
+- [ ] **`fsv ROOTDIR` aborts the GTK frontend with a GLib-GIO CRITICAL**
+  ("This application can not open files", exit 1) — found while
+  verifying the macOS GTK build (2026-08-21), but platform-independent:
+  `src/fsv.c` passes the full argv to `g_application_run()` after doing
+  its own option parsing, and the `GApplication` was not created with
+  `G_APPLICATION_HANDLES_OPEN`, so any positional argument trips GIO's
+  open-files path. Running with no argument (cwd scan) works. The SDL
+  frontend has its own argv handling and is unaffected. Fix directions:
+  strip already-consumed argv entries before `g_application_run()`, or
+  add `G_APPLICATION_HANDLES_OPEN` + an `open` handler.
 - [x] ~~**`discv_get_scrollbar_state()` is a `/* TODO */` stub** that just
   echoes back whatever `scroll_state[]` already held. (PORTING.md, camera
   scrollbar notes)~~ **Implemented (2026-08-21)**: mirrors
