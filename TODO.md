@@ -324,17 +324,34 @@ has native Help → Controls / About windows). Still worth doing:
 
 ## Test-harness limitations (not product code)
 
+Triaged 2026-08-21 (the "dormant debts" pass): these three are
+disclosure notes, not fixable bugs — statuses below.
+
 - [ ] The Color Setup **Gradient spectrum was never driven through the
   "By date/time" tab's `Combo` dropdown in the automated harness** (an open
   `ImGui::Combo()` popup eats the next click as dismiss); verified end-to-end
   only with the tab's default Rainbow spectrum. Would need keyboard nav or a
   `BeginCombo`/`Selectable` rewrite to automate. (Task 5.3 gaps)
+  *2026-08-21: left as-is deliberately — the `BeginCombo`/`Selectable`
+  rewrite is ~20 lines but has no consumer today (no automated test
+  wants to drive that dropdown); do it together with whichever future
+  harness first needs it, so the benefit is testable when it lands.*
 - [ ] **ImGui overlay pixels aren't screenshot-verifiable in the sandbox**
   (no compositor capture); dialogs are verified via internal-state tracing
   plus the offscreen scene screenshot only.
+  *2026-08-21: inherent to the environment (the offscreen scene target
+  renders before the ImGui pass by design — see gpu.cpp's two-pass
+  frame comment); not fixable from this codebase. Stays as permanent
+  disclosure.*
 - [ ] **Task C4's MapV regression check is verified by code diff**, not a
   clean empirical click-through (synthetic-harness picking limitation at the
   one fixed pixel used in that mode's layout).
+  *2026-08-21: the underlying failure mode (a fixed-pixel synthetic
+  click landing on a tiny unintended node) is now structurally mitigated
+  by the sub-pixel pick promotion (`gpu_pick_window()` +
+  `node_at_cursor()`'s ancestor walk); the C4 check itself has not been
+  re-run empirically — re-running that retired harness for an
+  already-shipped verification wouldn't strengthen anything current.*
 - [x] ~~**`tests/test_fsn_camera.c`'s five no-op `fsv_platform` hooks live in
   that test's own `main()`**, not in `tools/fsv-headless-stubs.c`.~~
   Promoted into the shim as opt-in `fsv_headless_platform_init()` when the
