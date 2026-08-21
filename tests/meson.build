@@ -13,7 +13,7 @@ test_scanfs = executable('test_scanfs', ['test_scanfs.c', headless_stubs_src],
   dependencies: core_test_deps,
   include_directories: incdir,
   c_args: fixture_c_args)
-test('scanfs', test_scanfs)
+test('scanfs', test_scanfs, env: ['FSV_NO_CACHE=1'])
 
 # lib/nvstore.c gained real logic in Task 5.3 of the SDL/Metal port
 # (was a complete stub before); worth its own test independent of
@@ -33,7 +33,7 @@ test_color_persistence = executable('test_color_persistence',
   objects: libfsvcore.extract_all_objects(recursive: false),
   dependencies: core_test_deps,
   include_directories: incdir)
-test('color_persistence', test_color_persistence)
+test('color_persistence', test_color_persistence, env: ['FSV_NO_CACHE=1'])
 
 # fsn-mode Task B1: FSV_FSN's layout pass is deliberately gpu-free, which
 # is what puts src/geometry-fsn.c in libfsvcore -- so this links exactly
@@ -44,7 +44,7 @@ test_fsn_layout = executable('test_fsn_layout',
   dependencies: core_test_deps,
   include_directories: incdir,
   c_args: fixture_c_args)
-test('fsn_layout', test_fsn_layout)
+test('fsn_layout', test_fsn_layout, env: ['FSV_NO_CACHE=1'])
 
 # Regression lock for the FSN collapsed-parent camera fix (fa9383c,
 # fsn_ensure_parent_expanded() -- TODO.md "Known bugs" item 1):
@@ -57,7 +57,7 @@ test_fsn_camera = executable('test_fsn_camera',
   dependencies: core_test_deps,
   include_directories: incdir,
   c_args: fixture_c_args)
-test('fsn_camera', test_fsn_camera)
+test('fsn_camera', test_fsn_camera, env: ['FSV_NO_CACHE=1'])
 
 # Regression test for TODO.md bug #2 (fsn_look_at()'s nose-first
 # file-zoom framing): a file must be framed at its parent directory's
@@ -69,7 +69,7 @@ test_fsn_framing = executable('test_fsn_framing',
   dependencies: core_test_deps,
   include_directories: incdir,
   c_args: fixture_c_args)
-test('fsn_framing', test_fsn_framing)
+test('fsn_framing', test_fsn_framing, env: ['FSV_NO_CACHE=1'])
 
 # Pure squarified-treemap module (src/squarify.c) -- MapV's layout
 # algorithm, extracted precisely so it can be tested here without the
@@ -90,7 +90,7 @@ test_scanfs_exclude = executable('test_scanfs_exclude',
   objects: libfsvcore.extract_all_objects(recursive: false),
   dependencies: core_test_deps,
   include_directories: incdir)
-test('scanfs_exclude', test_scanfs_exclude)
+test('scanfs_exclude', test_scanfs_exclude, env: ['FSV_NO_CACHE=1'])
 
 # Short-arc theta on fixed-heading re-poses after a manual revolve
 # (TODO.md's last Known bug): DiscV/MapV/TreeV get the same
@@ -101,4 +101,17 @@ test_camera_theta = executable('test_camera_theta',
   dependencies: core_test_deps,
   include_directories: incdir,
   c_args: fixture_c_args)
-test('camera_theta', test_camera_theta)
+test('camera_theta', test_camera_theta, env: ['FSV_NO_CACHE=1'])
+
+# Scan cache (src/fscache.c; upstream-1999 TODO "scan caching"): save/
+# load/reject surface plus scanfs()'s replay integration and the
+# in-place-edit staleness contract. Builds its own mkdtemp tree and
+# points FSV_CACHE_DIR inside it; every OTHER scan-driving test above
+# runs with FSV_NO_CACHE=1 so none of them touch the user's real cache
+# directory.
+test_fscache = executable('test_fscache',
+  ['test_fscache.c', headless_stubs_src],
+  objects: libfsvcore.extract_all_objects(recursive: false),
+  dependencies: core_test_deps,
+  include_directories: incdir)
+test('fscache', test_fscache)

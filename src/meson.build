@@ -50,9 +50,9 @@ incdir = include_directories('../lib', '.')
 # not frontend -- camera.c right below it reads the layout to frame the
 # landscape. Its drawing half is src/geometry-fsn-draw.c, which does call
 # gpu.h and therefore belongs to the frontends, next to geometry.c.
-fsvcore_src = files('scanfs.c', 'colexp.c', 'color.c', 'common.c',
-                    'animation.c', 'camera.c', 'geometry-fsn.c',
-                    'squarify.c')
+fsvcore_src = files('scanfs.c', 'fscache.c', 'colexp.c', 'color.c',
+                    'common.c', 'animation.c', 'camera.c',
+                    'geometry-fsn.c', 'squarify.c')
 libfsvcore = static_library('fsvcore', fsvcore_src,
   dependencies: [glibdep, cglm_dep, libm, libmisc_dep, libdebug_dep],
   include_directories: incdir)
@@ -71,7 +71,8 @@ if frontend == 'gtk' and gtkdep_found and host_machine.system() != 'darwin'
     'color.c', 'common.c', 'dialog.c', 'dirtree.c', 'filelist.c',
     'fontatlas.c', 'fsv.c',
     'geometry.c', 'geometry-fsn.c', 'geometry-fsn-draw.c',
-    'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c', 'squarify.c',
+    'gui.c', 'ogl.c', 'ogl-gpu-compat.c', 'scanfs.c', 'fscache.c',
+    'squarify.c',
     'tmaptext.c',
     'viewport.c', 'window.c']
   executable('fsv', sources: [srcs, gr],
