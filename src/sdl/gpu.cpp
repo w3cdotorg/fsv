@@ -2486,9 +2486,20 @@ gpu_text_upload_mvp(const float *mvp)
 // see the loop in src/sdl/main.cpp. g_cmd is therefore always null on entry;
 // the check below turns a violation of that invariant into a logged no-op
 // pick rather than stomping the in-flight frame.
-unsigned int
-gpu_pick(int x, int y)
+//
+// Shared body of gpu_pick()/gpu_pick_window() (gpu.h): one id-color
+// render, one readback of the GPU_PICK_WINDOW-square neighborhood
+// around (x, y), clamped at the viewport edges. `ids` always holds
+// GPU_PICK_WINDOW * GPU_PICK_WINDOW entries and is zero-filled up
+// front, so every early-out leaves it in the documented "nothing
+// there" state.
+static unsigned int
+pick_impl(int x, int y, unsigned int *ids)
 {
+	const int R = GPU_PICK_WINDOW / 2;
+
+	memset(ids, 0, GPU_PICK_WINDOW * GPU_PICK_WINDOW * sizeof(*ids));
+
 	if (!g_ready || g_window == nullptr)
 		return 0;
 	if (g_cmd != nullptr || g_recording) {
@@ -2557,9 +2568,15 @@ gpu_pick(int x, int y)
 	g_render_mode = FSV_RENDER_NORMAL;
 	g_capture_texture = nullptr;
 
+	// The window rect, clamped to the viewport. Texels the clamp cuts
+	// off stay 0 in `ids` (the memset above).
+	const int wx0 = MAX(0, x - R), wy0 = MAX(0, y - R);
+	const int wx1 = MIN(width - 1, x + R), wy1 = MIN(height - 1, y + R);
+	const int ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+
 	SDL_GPUTransferBufferCreateInfo transfer_info = {};
 	transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-	transfer_info.size = 4; // one RGBA8 texel
+	transfer_info.size = (Uint32)(4 * ww * wh); // RGBA8 texels
 	SDL_GPUTransferBuffer *download =
 	    SDL_CreateGPUTransferBuffer(g_device, &transfer_info);
 	if (download == nullptr) {
@@ -2575,7 +2592,7 @@ gpu_pick(int x, int y)
 		SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(g_cmd);
 		SDL_GPUTextureRegion source = {};
 		source.texture = pick_texture;
-		source.x = (Uint32)x;
+		source.x = (Uint32)wx0;
 		// SDL_GPU texture regions are top-left origin (SDL_gpu.h:
 		// SDL_GPUTextureRegion::y is "the *top* offset of the
 		// region"), same as the swapchain and same as the (x, y)
@@ -2587,15 +2604,15 @@ gpu_pick(int x, int y)
 		// resolve to the node actually drawn there (an inverted flip
 		// would have swapped top and bottom hits) -- see
 		// docs/PORTING.md Task 4.2.
-		source.y = (Uint32)y;
-		source.w = 1;
-		source.h = 1;
+		source.y = (Uint32)wy0;
+		source.w = (Uint32)ww;
+		source.h = (Uint32)wh;
 		source.d = 1;
 		SDL_GPUTextureTransferInfo destination = {};
 		destination.transfer_buffer = download;
 		destination.offset = 0;
-		destination.pixels_per_row = 1;
-		destination.rows_per_layer = 1;
+		destination.pixels_per_row = (Uint32)ww;
+		destination.rows_per_layer = (Uint32)wh;
 		SDL_DownloadFromGPUTexture(copy_pass, &source, &destination);
 		SDL_EndGPUCopyPass(copy_pass);
 
@@ -2618,19 +2635,30 @@ gpu_pick(int x, int y)
 		SDL_WaitForGPUFences(g_device, true, &fence, 1);
 		SDL_ReleaseGPUFence(g_device, fence);
 
-		const Uint8 *pixel = (const Uint8 *)
+		const Uint8 *pixels = (const Uint8 *)
 		    SDL_MapGPUTransferBuffer(g_device, download, false);
-		if (pixel == nullptr)
+		if (pixels == nullptr)
 			SDL_Log("gpu: pick map failed: %s", SDL_GetError());
 		else {
 			// Byte order matches node_set_color()'s encode
 			// (src/geometry.c: r = id & 0xFF, g = (id>>8) & 0xFF,
 			// b = (id>>16) & 0xFF) and ogl_select_modern()'s
 			// decode (src/ogl.c:456: color[0] + (color[1]<<8) +
-			// (color[2]<<16)) exactly.
-			node_id = (unsigned int)pixel[0] |
-			    ((unsigned int)pixel[1] << 8) |
-			    ((unsigned int)pixel[2] << 16);
+			// (color[2]<<16)) exactly. Each downloaded texel
+			// lands at its window-relative slot in `ids`; the
+			// clamped-off border stays 0 from the memset.
+			for (int gy = 0; gy < wh; gy++)
+				for (int gx = 0; gx < ww; gx++) {
+					const Uint8 *px =
+					    pixels + 4 * (gy * ww + gx);
+					const int ix = (wx0 + gx) - (x - R);
+					const int iy = (wy0 + gy) - (y - R);
+					ids[iy * GPU_PICK_WINDOW + ix] =
+					    (unsigned int)px[0] |
+					    ((unsigned int)px[1] << 8) |
+					    ((unsigned int)px[2] << 16);
+				}
+			node_id = ids[R * GPU_PICK_WINDOW + R];
 			SDL_UnmapGPUTransferBuffer(g_device, download);
 		}
 	}
@@ -2638,6 +2666,20 @@ gpu_pick(int x, int y)
 	SDL_ReleaseGPUTransferBuffer(g_device, download);
 	SDL_ReleaseGPUTexture(g_device, pick_texture);
 	return node_id;
+}
+
+unsigned int
+gpu_pick(int x, int y)
+{
+	unsigned int ids[GPU_PICK_WINDOW * GPU_PICK_WINDOW];
+
+	return pick_impl(x, y, ids);
+}
+
+unsigned int
+gpu_pick_window(int x, int y, unsigned int *ids)
+{
+	return pick_impl(x, y, ids);
 }
 
 // ---- --screenshot ----------------------------------------------------

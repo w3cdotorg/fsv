@@ -223,12 +223,27 @@ has native Help → Controls / About windows). Still worth doing:
   in `ui_dialogs_init()`). Together they fix both original complaints —
   no more paper-thin frontmost rows, no more one node dwarfing the rest.
   Design: `docs/superpowers/specs/2026-08-14-mapv-squarify-scan-exclude-design.md`.
-- [ ] **Smarter pointing/selection for faraway nodes** (e.g. birds-eye
+- [x] ~~**Smarter pointing/selection for faraway nodes** (e.g. birds-eye
   view): picking returns exactly the node under the hotspot even when it's
   sub-pixel small; should walk up to an ancestor above a pixel-based
   minimum. Still true of the port's color-ID `gpu_pick()` — the Task C4
   harness's stray-click-on-a-tiny-file-box episode is this exact failure
-  mode in miniature.
+  mode in miniature.~~ **Implemented (2026-08-21)**: `gpu_pick_window()`
+  (gpu.h) reads back the 17x17 id neighborhood around the cursor from the
+  same single id-color render, and `node_at_cursor()` (src/sdl/input.cpp)
+  promotes the hit to the nearest ancestor whose *subtree* covers at
+  least `PICK_MIN_PIXELS` (16 px, a ~4x4 target) of that census — so a
+  birds-eye speck resolves to its enclosing pedestal (or, over a sparse
+  region, the scan root) instead of whichever sub-pixel file box owned
+  the hotspot texel, while any legibly-sized node saturates the census
+  and resolves unchanged. Mode-agnostic (the pick buffer is), applies to
+  hover/click/double-click alike (all flow through `node_at_cursor()`).
+  Verified empirically with a posed birds-eye dolly-out harness: 4-px
+  specks promote to their pedestal, a 64-px file box stays itself. SDL
+  frontend only (the GTK arm keeps `ogl_select_modern()`'s exact-texel
+  behavior, consistent with the other SDL-only additions). Not headless-
+  testable (GPU readback) — same standing limitation the test-harness
+  section already records for picking.
 - [x] ~~**Scan caching** (`~/.fsvcache/@usr@lib`-style): store the tree state,
   re-scan only subdirectories with updated timestamps on the next launch;
   would also let ColorByTimestamp use the previous scan as the spectrum
